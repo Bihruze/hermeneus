@@ -37,7 +37,7 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..contracts import CaptureError, CaptureSource, FrameSink
-from ._tap_engine import STATUS_NO_AUDIO, STATUS_STALLED
+from ._tap_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
 from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, KIND_STATUS, read_frame
 
 log = logging.getLogger(__name__)
@@ -87,10 +87,24 @@ def macos_version() -> Optional[tuple[int, ...]]:
         return None
 
 
-def spawn_worker() -> subprocess.Popen:
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(_PACKAGE_ROOT), env.get("PYTHONPATH", "")) if p)
+# The worker gets only these variables from the parent. It holds no secrets and
+# needs none: measured, the worker captures with nothing but PYTHONPATH and
+# PYTHONUNBUFFERED set; the rest keep paths, temp files and text encoding
+# behaving as in the parent.
+WORKER_ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+
+
+def worker_env(parent: Optional[dict] = None) -> dict:
+    """Minimal environment for the capture worker; never carries API keys, tokens or secrets."""
+    parent = os.environ if parent is None else parent
+    env = {k: parent[k] for k in WORKER_ENV_ALLOWLIST if k in parent}
+    env["PYTHONPATH"] = str(_PACKAGE_ROOT)
     env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def spawn_worker() -> subprocess.Popen:
+    env = worker_env()
     return subprocess.Popen(
         [sys.executable, "-m", "hermeneus_engine.capture._tap_worker"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -130,6 +144,7 @@ class ProcessTapBackend:
         self._responsible_app = responsible_app or responsible_app_name
         self.last_stats: Optional[dict] = None
         self.last_status: Optional[tuple[str, str]] = None
+        self.status_message: str = ""  # latest non-fatal watchdog note; the session shows it
         self.failure: str = ""  # set when the worker stops on its own during capture
 
     # ------------------------------------------------------------------ helpers
@@ -206,6 +221,7 @@ class ProcessTapBackend:
                 self._finish(run)
                 raise CaptureError(run.error)
             self._run = run
+            self.status_message = ""
             _live.add(self)
             _register_atexit()
 
@@ -320,8 +336,13 @@ class ProcessTapBackend:
         self.last_status = (code, text)
         if code in (STATUS_NO_AUDIO, STATUS_STALLED):
             self.failure = text
+            self.status_message = text
             log.error("%s", text)
+        elif code == STATUS_RECOVERED:
+            self.status_message = ""
+            log.info("process tap: %s", text)
         else:
+            self.status_message = text
             log.info("process tap: %s: %s", code, text)
         if self.on_status is not None:
             try:
@@ -367,6 +388,19 @@ class ProcessTapBackend:
         self.last_stats = stats
         if stats.get("teardown_failures"):
             log.error("process tap teardown reported failures: %s", stats["teardown_failures"])
+
+
+def verify_system_audio_capture(timeout_s: float = 30.0) -> tuple[bool, str]:
+    """Doctor seam (components "capture.verify_tap_audio"): one real capture of a test tone.
+
+    Plays a short quiet tone with afplay in a separate process, captures it through the
+    full backend and worker, and returns (ok, plain-language detail). The first run on a
+    Mac shows the System Audio Recording prompt.
+    """
+    from .tap_doctor import check_process_tap
+
+    result = check_process_tap(timeout_s=timeout_s)
+    return result.ok, result.message
 
 
 def permission_message(app: Optional[str]) -> str:

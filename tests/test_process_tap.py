@@ -579,3 +579,61 @@ def test_doctor_reports_start_failure():
     hal.fail["create_tap"] = HALError("create process tap", 2003332927)
     r = doctor_with(hal, lambda hal: None)
     assert not r.ok and r.code == "start-failed" and "create process tap" in r.message
+
+
+# ---------------------------------------------------------------- worker environment and doctor seam
+
+def test_worker_env_carries_no_secrets():
+    parent = {"PATH": "/usr/bin", "HOME": "/Users/x", "TMPDIR": "/tmp/x", "LANG": "en_US.UTF-8",
+              "ELEVENLABS_API_KEY": "sk-1", "OPENROUTER_API_KEY": "sk-2", "GITHUB_TOKEN": "t", "HERMES_SECRET": "s",
+              "ANTHROPIC_AUTH_TOKEN": "a", "AWS_SECRET_ACCESS_KEY": "k", "PYTHONPATH": "/elsewhere"}
+    env = process_tap.worker_env(parent)
+    assert not [k for k in env if k.endswith(("_KEY", "_TOKEN", "_SECRET")) or "SECRET" in k or "TOKEN" in k]
+    assert set(env) <= set(process_tap.WORKER_ENV_ALLOWLIST) | {"PYTHONPATH", "PYTHONUNBUFFERED"}
+    assert env["PYTHONPATH"] == str(process_tap._PACKAGE_ROOT) and env["PATH"] == "/usr/bin"
+
+
+def test_spawn_worker_passes_the_minimal_env(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+    monkeypatch.setenv("SOME_PROVIDER_TOKEN", "tok")
+    seen = {}
+
+    def fake_popen(args, **kw):
+        seen.update(kw)
+        return object()
+
+    monkeypatch.setattr(process_tap.subprocess, "Popen", fake_popen)
+    process_tap.spawn_worker()
+    assert "ELEVENLABS_API_KEY" not in seen["env"] and "SOME_PROVIDER_TOKEN" not in seen["env"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="spawns the real worker module")
+def test_real_worker_sees_no_secrets(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+    env = process_tap.worker_env()
+    out = subprocess.run([sys.executable, "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
+                         env=env, capture_output=True, text=True, timeout=30).stdout
+    names = json.loads(out)
+    assert not [k for k in names if k.endswith(("_KEY", "_TOKEN", "_SECRET"))]
+
+
+def test_status_message_and_failure_follow_worker_status():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    b = make_backend(hal)
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    b._handle_status(b._run, json.dumps({"code": "rebuilt", "message": "tap rebuilt", "details": {}}).encode())
+    assert b.status_message == "tap rebuilt" and b.failure == ""
+    b._handle_status(b._run, json.dumps({"code": "recovered", "message": "back", "details": {}}).encode())
+    assert b.status_message == ""
+    b._handle_status(b._run, json.dumps({"code": "stalled", "message": "x", "details": {}}).encode())
+    assert "stopped receiving audio" in b.failure
+    b.stop()
+
+
+def test_verify_seam_is_wired(monkeypatch):
+    from hermeneus_engine import components
+    fn = components.load("capture.verify_tap_audio")
+    monkeypatch.setattr(tap_doctor, "check_process_tap",
+                        lambda timeout_s=30.0: tap_doctor.DoctorResult(False, "permission-denied", "allow it"))
+    assert fn() == (False, "allow it")
