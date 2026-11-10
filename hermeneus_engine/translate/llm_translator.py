@@ -18,9 +18,9 @@ import asyncio
 import re
 from typing import Optional, Sequence, Union
 
-from hermeneus_engine.contracts import LlmCall, TranslationError
-from hermeneus_engine.translate.languages import primary_subtag, resolve_target_language
-from hermeneus_engine.translate.prompt import ContextLine, build_messages, clean_reply
+from ..contracts import LlmCall, TranslationError
+from .languages import primary_subtag, resolve_target_language
+from .prompt import ContextLine, build_messages, clean_reply
 
 # A healthy one-line translation is a short prompt and a short reply. Six
 # seconds leaves room for a slow first token while still failing well before

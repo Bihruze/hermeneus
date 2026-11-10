@@ -17,8 +17,8 @@ import re
 from dataclasses import dataclass
 from typing import Optional, Sequence
 
-from hermeneus_engine.contracts import ChatMessage
-from hermeneus_engine.translate.languages import Language, find_language
+from ..contracts import ChatMessage
+from .languages import Language, find_language
 
 
 @dataclass(frozen=True)
