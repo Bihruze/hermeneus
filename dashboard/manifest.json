@@ -1,0 +1,7 @@
+{
+  "name": "hermeneus",
+  "label": "Hermeneus",
+  "description": "Live translation backend routes for the Hermeneus desktop pane",
+  "api": "plugin_api.py",
+  "tab": {"hidden": true}
+}

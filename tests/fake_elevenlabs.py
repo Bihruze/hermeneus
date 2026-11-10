@@ -21,7 +21,8 @@ _QUIET.setLevel(logging.WARNING)
 
 class FakeTtsServer:
     def __init__(self, *, chunks_per_context=3, samples_per_chunk=480, audio_delay_s=0.0,
-                 delays=None, drop_after_text=0, split_odd=False, idle_close_s=None, reject_status=None):
+                 delays=None, drop_after_text=0, split_odd=False, idle_close_s=None, reject_status=None,
+                 unknown_voices=()):
         self.chunks_per_context = chunks_per_context
         self.samples_per_chunk = samples_per_chunk
         self.audio_delay_s = audio_delay_s
@@ -30,6 +31,7 @@ class FakeTtsServer:
         self.split_odd = split_odd          # split audio at an odd byte offset
         self.idle_close_s = idle_close_s
         self.reject_status = reject_status
+        self.unknown_voices = set(unknown_voices)  # voice ids answered like the live server on 2026-11-11
         self.connections = []               # list of dicts: path, headers, messages
         self._server = None
         self.port = None
@@ -80,6 +82,13 @@ class FakeTtsServer:
     async def _handler(self, ws):
         conn = {"path": ws.request.path, "headers": dict(ws.request.headers), "messages": []}
         self.connections.append(conn)
+        voice = ws.request.path.split("/")[3]
+        if voice in self.unknown_voices:
+            conn["messages"].append(json.loads(await ws.recv()))
+            text = f"A voice with voice_id {voice} does not exist."
+            await ws.send(json.dumps({"message": text, "error": "voice_id_does_not_exist", "code": 1008}))
+            await ws.close(1008, text)
+            return
         closing = {}
         tasks = []
         try:

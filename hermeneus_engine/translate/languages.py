@@ -13,7 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Optional
 
-from hermeneus_engine import languages as verified
+from .. import languages as verified
 
 
 @dataclass(frozen=True)

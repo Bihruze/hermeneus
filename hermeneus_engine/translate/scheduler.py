@@ -35,8 +35,8 @@ import time
 from collections import deque
 from typing import Callable, Optional, Protocol, Sequence
 
-from hermeneus_engine.contracts import LineState, SubtitleLine, TranslationError
-from hermeneus_engine.translate.prompt import ContextLine
+from ..contracts import LineState, SubtitleLine, TranslationError
+from .prompt import ContextLine
 
 logger = logging.getLogger(__name__)
 
