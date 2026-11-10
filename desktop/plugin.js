@@ -56,6 +56,7 @@ export const SPEAKER_TOKENS = Object.freeze([
 ])
 
 const LINE_STATES = new Set(['partial', 'committed', 'translated', 'failed'])
+const RUNNING_STATES = new Set(['starting', 'live', 'reconnecting', 'stopping'])
 
 export function createSubtitleState(limit = LINE_LIMIT) {
   return {
@@ -66,7 +67,9 @@ export function createSubtitleState(limit = LINE_LIMIT) {
     lines: [],
     // Ids dropped by the bound, so a late update cannot bring a line back at the bottom.
     evicted: [],
-    // speaker_id -> index into SPEAKER_TOKENS.
+    // speaker_id -> speaker number (1, 2, ...) in order of first appearance. Scribe ids are
+    // s<N>:speaker_<k> and N grows every Scribe session (docs/events.md), so the raw id
+    // carries no stable number of its own. The number also picks the colour.
     speakers: {},
     speakerCount: 0,
     // Last status object from hello, status events, GET /status or a control call.
@@ -109,7 +112,7 @@ function withSpeaker(state, speakerId) {
 
   return {
     ...state,
-    speakers: { ...state.speakers, [speakerId]: state.speakerCount % SPEAKER_TOKENS.length },
+    speakers: { ...state.speakers, [speakerId]: state.speakerCount + 1 },
     speakerCount: state.speakerCount + 1
   }
 }
@@ -168,7 +171,7 @@ function applyRelabel(state, from, to) {
   const lines = state.lines.map(line => (line.speaker_id === from ? { ...line, speaker_id: to } : line))
   let speakers = state.speakers
 
-  // The surviving speaker keeps its own colour; a new id inherits the merged one's.
+  // The surviving speaker keeps its own number and colour; a new id inherits the merged one's.
   if (!Object.prototype.hasOwnProperty.call(speakers, to) && Object.prototype.hasOwnProperty.call(speakers, from)) {
     speakers = { ...speakers, [to]: speakers[from] }
   }
@@ -182,7 +185,26 @@ function applyRelabel(state, from, to) {
 function applyStatus(state, event) {
   const { type: _type, seq: _seq, ...status } = event
 
-  return typeof status.state === 'string' ? { ...state, status } : state
+  if (typeof status.state !== 'string') {
+    return state
+  }
+
+  // A new run starts a new SubtitleBus and a new Scribe client, so line and speaker ids
+  // from the previous run can repeat. Start the list and the speaker numbering again.
+  if (status.state === 'starting' && !RUNNING_STATES.has(state.status?.state)) {
+    return { ...createSubtitleState(state.limit), seq: state.seq, status }
+  }
+
+  return { ...state, status }
+}
+
+function clearLines(state) {
+  return {
+    ...createSubtitleState(state.limit),
+    speakers: state.speakers,
+    speakerCount: state.speakerCount,
+    status: state.status
+  }
 }
 
 /** Apply one event from the /events socket or from a /lines resync page.
@@ -196,6 +218,27 @@ export function applyEvent(state, event) {
 
   const seq = seqOf(event)
 
+  // hello carries the server's latest seq, but it is not an event in the sequence: moving
+  // our seq to it would skip what happened while the socket was down. It sets the status
+  // only; the controller resyncs after it.
+  if (event.type === 'hello') {
+    const session = event.session
+
+    if (session && typeof session === 'object' && typeof session.state === 'string') {
+      const { seq: _seq, ...status } = session
+
+      return { ...state, status }
+    }
+
+    return state
+  }
+
+  // reset: the stream is about to resend every stored line. Its seq may be below ours
+  // after a gateway restart, so it is applied whatever our seq is.
+  if (event.type === 'reset') {
+    return { ...clearLines(state), seq }
+  }
+
   if (seq !== null && state.seq !== null && seq <= state.seq) {
     return state
   }
@@ -203,12 +246,6 @@ export function applyEvent(state, event) {
   let next = state
 
   switch (event.type) {
-    case 'hello':
-      if (event.session && typeof event.session === 'object' && typeof event.session.state === 'string') {
-        next = { ...state, status: event.session }
-      }
-
-      break
     case 'line':
       next = applyLine(state, event.line)
 
@@ -241,12 +278,7 @@ export function applyResync(state, page) {
   let next = state
 
   if (page.reset === true) {
-    next = {
-      ...createSubtitleState(state.limit),
-      speakers: state.speakers,
-      speakerCount: state.speakerCount,
-      status: state.status
-    }
+    next = clearLines(state)
   }
 
   for (const event of page.events) {
@@ -266,19 +298,25 @@ export function speakerColor(state, speakerId) {
     return null
   }
 
-  return `var(${SPEAKER_TOKENS[state.speakers[speakerId]]})`
+  return `var(${SPEAKER_TOKENS[(state.speakers[speakerId] - 1) % SPEAKER_TOKENS.length]})`
 }
 
-/** Scribe speaker ids look like speaker_0. Returns the 1-based number, or null
- *  when the id has another shape and should be shown as it is. */
-export function speakerNumber(speakerId) {
-  const match = /^speaker_(\d+)$/.exec(speakerId ?? '')
+/** The speaker's number in order of first appearance (1-based), or null for no speaker. */
+export function speakerNumber(state, speakerId) {
+  if (speakerId === null || !Object.prototype.hasOwnProperty.call(state.speakers, speakerId)) {
+    return null
+  }
 
-  return match ? Number(match[1]) + 1 : null
+  return state.speakers[speakerId]
 }
 
-/** Source language of the newest line that carries one. */
+/** The language the backend detected (status.detected_language), else the source
+ *  language of the newest line that carries one. */
 export function detectedLanguage(state) {
+  if (typeof state.status?.detected_language === 'string' && state.status.detected_language) {
+    return state.status.detected_language
+  }
+
   for (let i = state.lines.length - 1; i >= 0; i -= 1) {
     if (state.lines[i].source_language) {
       return state.lines[i].source_language
@@ -305,8 +343,6 @@ const POLL_TICK_MS = 2000
 const QUIET_WHILE_RUNNING_MS = 4000
 const QUIET_WHILE_IDLE_MS = 10000
 const PENDING_LIMIT = LINE_LIMIT * 4
-const RUNNING_STATES = new Set(['starting', 'live', 'reconnecting', 'stopping'])
-
 export const FONT_SCALES = Object.freeze([0.85, 1, 1.15, 1.3, 1.5, 1.75, 2])
 
 const DEFAULT_PREFS = Object.freeze({
@@ -317,8 +353,43 @@ const DEFAULT_PREFS = Object.freeze({
   targetLanguage: ''
 })
 
-function errorText(error) {
-  return error instanceof Error ? error.message : String(error)
+// Desktop's REST bridge rejects with "<status>: <body>" (apps/desktop/electron/api-transport.ts:185-186).
+// The Hermeneus routes answer errors as {"ok": false, "detail", "error"} (docs/events.md), so
+// show the detail when the body is that JSON.
+const REST_ERROR_BODY = /(\d{3}): (\{[\s\S]*\})\s*$/
+
+export function errorText(error) {
+  const text = error instanceof Error ? error.message : String(error)
+  const match = REST_ERROR_BODY.exec(text)
+
+  if (match) {
+    try {
+      const body = JSON.parse(match[2])
+      const detail = typeof body.detail === 'string' ? body.detail : typeof body.error === 'string' ? body.error : ''
+
+      if (detail) {
+        return `${detail} (${match[1]})`
+      }
+    } catch {
+      // Not JSON after all: show the text as it came.
+    }
+  }
+
+  return text
+}
+
+/** GET /devices path for a saved source key (backend:source_id), or the plain path. */
+export function devicesPath(key) {
+  const split = typeof key === 'string' ? key.indexOf(':') : -1
+
+  if (split <= 0) {
+    return '/devices'
+  }
+
+  const backend = encodeURIComponent(key.slice(0, split))
+  const sourceId = encodeURIComponent(key.slice(split + 1))
+
+  return `/devices?backend=${backend}&source_id=${sourceId}`
 }
 
 export function sourceKey(source) {
@@ -727,8 +798,12 @@ function Controls({ ctrl }) {
   const prefs = useValue(ctrl.prefs)
   const action = useValue(ctrl.action)
   const devices = useQuery({
-    queryKey: [ID, 'devices'],
-    queryFn: () => ctrl.rest('/devices'),
+    // Outputs depend on the source: the backend lists only the outputs that are safe to
+    // speak into with that source (docs/events.md, GET /devices).
+    queryKey: [ID, 'devices', prefs.source],
+    queryFn: () => ctrl.rest(devicesPath(prefs.source)),
+    // Keep the previous lists on screen while the next source's lists load.
+    placeholderData: previous => previous,
     staleTime: 30000,
     retry: false
   })
@@ -847,8 +922,7 @@ function Controls({ ctrl }) {
   })
 }
 
-const LineRow = memo(function LineRow({ color, line, scale, t }) {
-  const number = speakerNumber(line.speaker_id)
+const LineRow = memo(function LineRow({ color, line, number, scale, t }) {
   const speaker = line.speaker_id === null ? '' : number === null ? line.speaker_id : t('speaker', number)
   const translated = line.state === 'translated'
 
@@ -953,7 +1027,17 @@ function SubtitleList({ ctrl }) {
               ? jsx(ErrorState, { title: t('offline'), description: `${t('offlineHint')} (${link.error})` })
               : jsx(EmptyState, { title: t('emptyTitle'), description: t('emptyDescription') })
             : state.lines.map(line =>
-                jsx(LineRow, { color: speakerColor(state, line.speaker_id), line, scale: fontScale, t }, line.line_id)
+                jsx(
+                  LineRow,
+                  {
+                    color: speakerColor(state, line.speaker_id),
+                    line,
+                    number: speakerNumber(state, line.speaker_id),
+                    scale: fontScale,
+                    t
+                  },
+                  line.line_id
+                )
               )
       }),
       follow
