@@ -412,3 +412,170 @@ def test_real_worker_module_starts_and_exits_on_empty_input():
     out, err = proc.communicate(b"", timeout=30)
     assert proc.returncode == 0, err.decode()
     assert out == b""
+
+
+# ---------------------------------------------------------------- silence watchdog and format changes
+
+from hermeneus_engine.capture import _tap_engine as eng  # noqa: E402
+
+
+def watchdog_capture(hal, **kw):
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None,
+                     on_status=lambda c, m, d: statuses.append(c), refresh_interval=1000, **kw)
+    cap.open()
+    return cap, statuses
+
+
+def feed_and_wait(hal, cap, samples, n=1):
+    before = cap.stats.buffers
+    for _ in range(n):
+        hal.feed(0, samples)
+    assert wait_for(lambda: cap.stats.buffers >= before + n)
+
+
+def test_watchdog_reports_no_audio_when_denied_and_never_heard():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    cap, statuses = watchdog_capture(hal)
+    zeros = np.zeros(512, dtype=np.float32)
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(0.0)
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(3.0)  # 3 s of silence while playing: first rebuild
+    assert statuses == [eng.STATUS_REBUILT] and cap.stats.silent_rebuilds == 1
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(8.9)
+    assert cap.stats.silent_rebuilds == 1  # the second wait is doubled to 6 s
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(9.0)
+    assert statuses == [eng.STATUS_REBUILT, eng.STATUS_REBUILT, eng.STATUS_NO_AUDIO]
+    assert [c[0] for c in hal.calls].count("create_tap") == 3
+    cap.close()
+    assert hal.clean
+
+
+def test_watchdog_ignores_silence_when_nothing_plays():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=False)
+    cap, statuses = watchdog_capture(hal)
+    for t in (0.0, 5.0, 50.0):
+        feed_and_wait(hal, cap, np.zeros(512, dtype=np.float32))
+        cap.tick(t)
+    assert statuses == [] and cap.stats.rebuilds == 0
+    cap.close()
+
+
+def test_watchdog_rebuilds_a_stalled_tap_then_reports_after_the_cap():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    cap, statuses = watchdog_capture(hal, max_rebuilds=2)
+    feed_and_wait(hal, cap, sine(440, 512))
+    cap.tick(0.0)  # audio heard
+    t = 1.0
+    for _ in range(6):
+        feed_and_wait(hal, cap, np.zeros(512, dtype=np.float32))
+        cap.tick(t)
+        t += 20.0
+    assert statuses == [eng.STATUS_REBUILT, eng.STATUS_REBUILT, eng.STATUS_STALLED]
+    feed_and_wait(hal, cap, sine(440, 512))
+    cap.tick(t)
+    assert statuses[-1] == eng.STATUS_RECOVERED
+    cap.close()
+    assert hal.clean
+
+
+def test_rate_change_rebuilds_with_a_new_resampler():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    got = []
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: got.append(pcm),
+                     on_status=lambda c, m, d: statuses.append((c, d)), refresh_interval=1000)
+    cap.open()
+    hal.fmt = hal.fmt.__class__(44100.0, hal.fmt.format_id, hal.fmt.format_flags, 1, 32)
+    cap.tick(0.0)
+    assert statuses == [(eng.STATUS_FORMAT_CHANGED, {"old_rate": 48000, "new_rate": 44100})]
+    assert cap.stats.format_rebuilds == 1
+    got.clear()
+    hal.feed(0, sine(440, 4410, rate=44100))
+    assert wait_for(lambda: cap.stats.buffers >= 1)
+    cap.close()
+    assert sum(len(p) for p in got) // 2 == 1600
+
+
+def test_backend_turns_no_audio_status_into_a_permission_message():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    seen = []
+    b = ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID,
+                          on_status=lambda c, m, d: seen.append((c, m)), responsible_app=lambda: "Terminal")
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    run = b._run
+    b._handle_status(run, json.dumps({"code": "no-audio", "message": "x", "details": {}}).encode())
+    b.stop()
+    code, message = seen[0]
+    assert code == "no-audio" and b.failure == message
+    assert "Screen & System Audio Recording" in message and "'Terminal'" in message
+
+
+# ---------------------------------------------------------------- doctor
+
+from hermeneus_engine.capture import tap_doctor  # noqa: E402
+
+
+class FakePlayer:
+    def __init__(self, path):
+        self.pid = 77
+        self.killed = False
+        assert os.path.getsize(path) > 48000 * 2 * 30  # outlasts the start timeout
+
+    def kill(self):
+        self.killed = True
+
+    def wait(self, timeout=None):
+        return 0
+
+
+def doctor_with(hal, feed):
+    hal.add_process(1, 77, playing=True)
+    players = []
+
+    def player(path):
+        players.append(FakePlayer(path))
+        threading.Thread(target=lambda: (wait_for(lambda: hal.callback is not None), feed(hal)), daemon=True).start()
+        return players[-1]
+
+    result = tap_doctor.check_process_tap(
+        backend_factory=lambda **kw: ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID, **kw),
+        player=player, app_name=lambda: "Terminal")
+    assert players and players[0].killed
+    return result
+
+
+def test_doctor_passes_on_the_test_tone():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, sine(440, 4800, amp=0.1, start=i * 4800))
+                                            for i in range(10)])
+    assert r.ok and r.code == "ok", r
+    assert -25 < r.details["rms_dbfs"] < -21
+
+
+def test_doctor_reports_denied_permission_with_the_pane():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, np.zeros(4800, dtype=np.float32)) for i in range(10)])
+    assert not r.ok and r.code == "permission-denied"
+    assert "System Settings > Privacy & Security > Screen & System Audio Recording" in r.message
+    assert "'Terminal'" in r.message
+
+
+def test_doctor_rejects_audio_that_is_not_the_tone():
+    rng = np.random.default_rng(1)
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, (rng.standard_normal(4800) * 0.1).astype(np.float32))
+                                            for i in range(10)])
+    assert not r.ok and r.code == "wrong-audio"
+
+
+def test_doctor_reports_start_failure():
+    hal = FakeHAL()
+    hal.fail["create_tap"] = HALError("create process tap", 2003332927)
+    r = doctor_with(hal, lambda hal: None)
+    assert not r.ok and r.code == "start-failed" and "create process tap" in r.message

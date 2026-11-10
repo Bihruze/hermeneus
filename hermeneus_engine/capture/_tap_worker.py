@@ -13,6 +13,8 @@ payload length: uint32 LE, timestamp: int64 LE) followed by the payload.
 * ``R`` ready, JSON payload with the tap format and tapped process objects
 * ``A`` audio, engine-format PCM; timestamp is monotonic_ns of the first sample
 * ``E`` error, JSON payload ``{"message": ...}``; the worker exits after it
+* ``T`` status, JSON payload ``{"code", "message", "details"}`` from the silence watchdog
+  and format-change handling (see ``_tap_engine.STATUS_*``)
 * ``S`` final stats, JSON payload, sent after teardown
 
 The worker stops when stdin reaches end of file or delivers a ``stop`` line,
@@ -38,6 +40,7 @@ KIND_READY = b"R"
 KIND_AUDIO = b"A"
 KIND_ERROR = b"E"
 KIND_STATS = b"S"
+KIND_STATUS = b"T"
 
 log = logging.getLogger("hermeneus.capture.tap_worker")
 
@@ -89,7 +92,7 @@ def _read_exact(inp: BinaryIO, n: int) -> Optional[bytes]:
 
 
 def serve(inp: BinaryIO, out: BinaryIO, hal_factory: Callable[[], object], *, own_pid: int,
-          refresh_interval: float = 1.0) -> int:
+          refresh_interval: float = 1.0, engine_options: Optional[dict] = None) -> int:
     """Run one capture session. Returns the process exit code."""
     from ._tap_engine import TapCapture, TapSetupError, TapSpec
 
@@ -111,8 +114,12 @@ def serve(inp: BinaryIO, out: BinaryIO, hal_factory: Callable[[], object], *, ow
     def on_pcm(pcm: bytes, timestamp: int) -> None:
         writer.send(KIND_AUDIO, timestamp, pcm)
 
+    def on_status(code: str, message: str, details: dict) -> None:
+        writer.send_json(KIND_STATUS, {"code": code, "message": message, "details": details})
+
     try:
-        capture = TapCapture(hal_factory(), spec, on_pcm, refresh_interval=refresh_interval)
+        capture = TapCapture(hal_factory(), spec, on_pcm, on_status=on_status, refresh_interval=refresh_interval,
+                             **(engine_options or {}))
         atexit.register(capture.close)
         capture.open()
     except TapSetupError as exc:
