@@ -169,10 +169,10 @@ Command flags override the settings for one session.
 | `speak` | Spoken translation | bool | `false` | | Speak the translation as well as showing subtitles. The --speak flag turns it on for one session. |
 | `commit_strategy` | Segmenting | str | `vad` | vad, turn_prediction | How Scribe decides a segment is finished. |
 | `output_device` | Spoken translation output | str | `""` | | Output device for spoken translation. It must not feed the audio source. |
-| `voice_id` | Voice | str | `""` | | ElevenLabs voice id for spoken translation. |
+| `voice_id` | Voice | str | `""` | | ElevenLabs voice id for spoken translation. Empty uses the default voice Talia. |
 | `context_segments` | Context lines | int | `3` | | Earlier lines sent with each translation request (0 to 10). |
 
-The default voice for spoken translation is `<DEFAULT_VOICE>`.
+The default voice for spoken translation is Talia (`OZ0L6eISlOejga3XjDFt`), the replacement ElevenLabs publishes for its retiring default voice Sarah (https://elevenlabs.io/docs/help-center/product/voices/my-voices/what-are-default-voices). Talia is a Voice Library voice, and ElevenLabs does not offer Voice Library voices through the API on the free tier, so free accounts set `voice_id` to a voice from their own account. When the chosen voice is not available, Hermeneus falls back to Talia and says so in the status line.
 
 ### Translation model
 
@@ -302,7 +302,7 @@ To undo the setup, choose your speakers again in System Settings > Sound and del
 - One session at a time. A second start reports the running session.
 - The doctor cannot read the System Audio Recording permission and shows it as a warning.
 - The process tap reads audio before the system output volume is applied, so the volume setting does not change what Hermeneus hears.
-- Spoken translation covers 32 languages and needs an output device and a voice.
+- Spoken translation covers 32 languages and needs an output device.
 - Speaker labels come from Scribe's diarization. Scribe can merge two labels during a session; Hermeneus relabels the lines it still shows when that happens.
 - Translation runs on your model. Its speed sets how far subtitles trail the speech, and its skill in a language sets their quality.
 - Scribe bills streamed audio including silence, so an idle session still costs money.
