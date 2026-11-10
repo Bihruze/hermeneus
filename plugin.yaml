@@ -1,0 +1,7 @@
+name: hermeneus
+version: "0.1.0"
+description: "Live translation for Hermes. Captures audio playing on your Mac, transcribes it with ElevenLabs Scribe v3 Live, translates it with your Hermes model and shows live subtitles. Spoken translation is opt-in."
+author: Bihruze
+kind: standalone
+platforms:
+  - macos
