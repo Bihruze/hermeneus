@@ -1,0 +1,24 @@
+name: hermeneus
+title: Hermeneus
+repo: https://github.com/Bihruze/hermeneus
+sha: "<FINAL_SHA>"
+description: "Live translation for Hermes. Captures the audio playing on your Mac (one app, or all system audio except Hermeneus) through a Core Audio process tap on macOS 14.2+, transcribes it with ElevenLabs Scribe v3 Live, translates each line with your own Hermes model and shows live subtitles in a Desktop pane, in the terminal (hermes hermeneus run) or through /translate; spoken translation with ElevenLabs Flash v2.5 is opt-in. Listening covers 100 languages and speaking covers 32. Disclosure: streams the captured audio to ElevenLabs (wss://api.elevenlabs.io) with your ELEVENLABS_API_KEY for as long as a session runs, silence included, and sends the translated text there too when spoken translation is on; sends each committed line plus up to 3 earlier lines (context_segments, 0 to 10) to your configured model through ctx.llm under its own auxiliary task, live_translate; needs the macOS System Audio Recording permission for the app that runs Hermes (Microphone for the fallback); the process tap runs one capture worker subprocess per session, stopped with the session, on unload and at exit; one session at a time on its own thread, reached through a Unix domain socket (mode 0600) under its plugin-data, with no TCP port; runs system_profiler SPAudioDataType read-only to check audio routes; the fallback reads a virtual device (BlackHole 2ch or VB-Cable) that you install yourself, never bundled or downloaded; subtitles stay in memory (last 200 lines) and no audio or transcript is written to disk; no telemetry."
+maintainer: Bihruze
+tier: community
+category: voice
+requires_hermes: ">=0.23.1"
+docs_url: https://github.com/Bihruze/hermeneus#readme
+version: "0.1.0"
+# image and screenshots are filled once W16 commits them, pinned to the same sha:
+# image: https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/banner.png
+# screenshots:
+#   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/screenshots/pane-subtitles.png
+readme: true
+platforms:
+  - macos
+capabilities:
+  provides_tools: []
+  provides_hooks: []
+  provides_middleware: []
+  requires_env:
+    - ELEVENLABS_API_KEY
