@@ -148,9 +148,9 @@ def test_api_start_errors_are_4xx_with_a_message(api):
                                                                      "source_id": "BlackHole 2ch"}})
     assert r.status_code == 400 and "--to" in r.json()["detail"]
     r = client.post("/api/plugins/hermeneus/start", json={
-        "source": {"backend": "virtual-device", "source_id": "BlackHole 2ch"}, "target_language": "tr",
+        "source": {"backend": "virtual-device", "source_id": "BlackHole 2ch"}, "target_language": "af",
         "speak": True, "output_device": "AirPods"})
-    assert r.status_code == 400 and "voice_id" in r.json()["detail"]
+    assert r.status_code == 400 and "Afrikaans" in r.json()["detail"]
 
 
 def test_api_events_socket_says_hello_then_heartbeats_while_idle(api, monkeypatch):

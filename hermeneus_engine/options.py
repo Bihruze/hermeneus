@@ -14,6 +14,7 @@ from typing import Any, Mapping, Optional, Sequence
 from . import languages
 from .contracts import CaptureSource, CommitStrategy
 from .session import SessionOptions
+from .tts.voices import resolve_voice
 
 DEFAULT_CONTEXT_SEGMENTS = 3
 CAPTURE_BACKEND_CHOICES = ("auto", "process-tap", "virtual-device")
@@ -164,7 +165,7 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
     source = pick_source(choices.source, settings, sources)
 
     device = _text(choices.device) or _text(settings.get("output_device")) or None
-    voice = _text(choices.voice) or _text(settings.get("voice_id")) or None
+    voice = resolve_voice(_text(choices.voice), _text(settings.get("voice_id")))
     if speak:
         if not lang.tts_flash_v2_5_supported:
             raise UsageError(f"spoken translation does not support {lang.english_name}; "
@@ -172,10 +173,6 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
         if not device:
             raise UsageError("spoken translation needs an output device. Pass --device <name> "
                              "(see: hermes hermeneus devices) or set output_device in the plugin settings.")
-        if not voice:
-            raise UsageError("spoken translation needs a voice: set voice_id in the plugin settings "
-                             "(hermes config set plugins.entries.hermeneus.settings.voice_id <voice id>) "
-                             "or pass --voice <voice id>.")
 
     strategy_raw = _text(settings.get("commit_strategy")) or CommitStrategy.VAD.value
     try:

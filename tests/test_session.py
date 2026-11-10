@@ -270,3 +270,15 @@ async def test_session_needs_start_before_wait():
     s = TranslationSession(options(), make_rig().build(options(), None), SubtitleBus())
     with pytest.raises(AssertionError):
         await s.wait_closed()
+
+
+async def test_speaker_status_message_reaches_session_status():
+    speaker = FakeSpeaker()
+    opts = options(speak=True, output_device="Headphones", voice_id="v1")
+    bus = SubtitleBus()
+    s = TranslationSession(opts, make_rig(speaker=speaker).build(opts, None), bus, metrics_interval_s=0.01)
+    await s.start()
+    await wait_for(lambda: bus.status()["state"] == "live")
+    speaker.status_message = "Voice v1 is not available on this ElevenLabs account; using the default voice Talia."
+    await wait_for(lambda: "default voice Talia" in (bus.status().get("message") or ""))
+    await s.stop()

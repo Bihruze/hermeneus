@@ -180,7 +180,8 @@ def build(options: SessionOptions, services: HermesServices,
     if options.speak:
         # Checked before anything opens a device or a socket.
         check_feedback_risk(options.output_device or "", options.source)
-        config = load("speaker.config")(voice_id=options.voice_id or "")
+        # options.resolve fills voice_id (flag, setting, default); FlashConfig has the same default.
+        config = load("speaker.config")(**({"voice_id": options.voice_id} if options.voice_id else {}))
         source = options.source
 
         def route_check():
