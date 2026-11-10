@@ -1,0 +1,8 @@
+[
+  {"object_id": 10, "name": "BlackHole 2ch", "uid": "TestBlackHole2ch_UID", "transport": "virt", "sub_device_uids": []},
+  {"object_id": 11, "name": "Test Built-in Speakers", "uid": "TestBuiltInSpeakerDevice", "transport": "bltn", "sub_device_uids": []},
+  {"object_id": 12, "name": "Test USB Headset", "uid": "TestUSBHeadset_UID", "transport": "usb ", "sub_device_uids": []},
+  {"object_id": 13, "name": "Multi-Output Device", "uid": "TestMultiOutput_UID", "transport": "grup", "sub_device_uids": ["TestBuiltInSpeakerDevice", "TestBlackHole2ch_UID"]},
+  {"object_id": 14, "name": "Speakers And Headset", "uid": "TestSpeakersHeadset_UID", "transport": "grup", "sub_device_uids": ["TestBuiltInSpeakerDevice", "TestUSBHeadset_UID"]},
+  {"object_id": 15, "name": "Capture Aggregate", "uid": "TestCaptureAggregate_UID", "transport": "grup", "sub_device_uids": ["TestBlackHole2ch_UID", "TestUSBHeadset_UID"]}
+]
