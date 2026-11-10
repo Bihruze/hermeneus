@@ -40,8 +40,9 @@ def user_content(llm: FakeLlm, index: int = -1) -> str:
 
 def test_language_lookup_normalizes_and_falls_back():
     assert languages.resolve_target_language("TR").english_name == "Turkish"
-    assert languages.resolve_target_language("pt_br").english_name == "Brazilian Portuguese"
-    assert languages.resolve_target_language("pt-PT").english_name == "Portuguese"
+    assert languages.resolve_target_language("pt_br").english_name == "Portuguese"
+    assert languages.resolve_target_language("tur").code == "tr"
+    assert languages.primary_subtag("eng") == languages.primary_subtag("en-US")
     with pytest.raises(ValueError, match="Unsupported target language"):
         languages.resolve_target_language("xx")
 
