@@ -216,3 +216,44 @@ async def test_close_cancels_pending_and_stops_playback():
     assert not q.running
     with pytest.raises(fl.TtsError):
         await sp.speak("after close", language="en")
+
+
+async def test_unavailable_voice_falls_back_to_default_with_status():
+    from hermeneus_engine.tts.voices import DEFAULT_VOICE_ID
+    async with FakeTtsServer(unknown_voices={VOICE}) as srv:
+        sp, q = make_speaker(srv)
+        await sp.speak("hello", language="en")
+        await wait_for(done(sp, 1))
+        await sp.speak("second", language="en")
+        await wait_for(done(sp, 2))
+        await sp.close()
+    voices = [c["path"].split("/")[3] for c in srv.connections]
+    assert voices == [VOICE, DEFAULT_VOICE_ID]
+    assert [m.outcome for m in sp.metrics] == ["done", "done"]
+    assert sp.voice_id == DEFAULT_VOICE_ID
+    assert sp.status_message == (f"Voice {VOICE} is not available on this ElevenLabs account; "
+                                 "using the default voice Talia.")
+    texts = [m["text"] for m in srv.connections[1]["messages"] if m.get("flush")]
+    assert texts == ["hello ", "second "]
+
+
+async def test_unavailable_default_voice_fails_plainly():
+    from hermeneus_engine.tts.voices import DEFAULT_VOICE_ID
+    async with FakeTtsServer(unknown_voices={DEFAULT_VOICE_ID}) as srv:
+        q = PlaybackQueue("Test Built-in Speakers", sample_rate=24000, stream_factory=fake_factory,
+                          query_devices=lambda: DEVICES)
+        sp = fl.FlashSpeaker(fl.FlashConfig(base_url=srv.base_url), lambda: KEY, q)
+        assert sp.voice_id == DEFAULT_VOICE_ID
+        await sp.speak("hello", language="en")
+        await wait_for(done(sp, 1))
+        with pytest.raises(fl.TtsError, match="default voice Talia"):
+            await sp.speak("again", language="en")
+        await sp.close()
+    assert sp.metrics[0].outcome == "failed" and "Set voice_id" in sp.status_message
+    assert len(srv.connections) == 1
+
+
+def test_voice_unavailable_detection():
+    assert fl.FlashSpeaker._is_voice_unavailable({"error": "voice_id_does_not_exist", "message": "x"})
+    assert fl.FlashSpeaker._is_voice_unavailable({"message": "This voice is not available for free users."})
+    assert not fl.FlashSpeaker._is_voice_unavailable({"error": "quota_exceeded", "message": "quota"})

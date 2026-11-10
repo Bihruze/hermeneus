@@ -60,8 +60,10 @@ Nothing is written to disk. The owner keeps the last 200 lines in memory.
 | `GET /doctor` | `{"ok": bool, "checks": [{"id", "label", "state": "ok\|warn\|fail", "detail", "fix"?}]}` |
 | `WS /events?after=<seq>` | `hello`, then events as above. It does not end when a session ends; it falls back to idle heartbeats and attaches to the next session. |
 
-`voice_id` falls back to the `voice_id` plugin setting. With `speak` true and
-no voice, `/start` answers 400 naming the setting.
+`voice_id` falls back to the `voice_id` plugin setting, then to the default
+voice Talia (`OZ0L6eISlOejga3XjDFt`). When ElevenLabs reports the voice as
+unavailable, the session switches to the default voice and the status
+`message` says so.
 
 ## Unix socket
 

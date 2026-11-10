@@ -51,7 +51,7 @@ config_schema:
     type: str
     default: ""
     label: "Voice"
-    description: "ElevenLabs voice id for spoken translation."
+    description: "ElevenLabs voice id for spoken translation. Empty uses the default voice Talia."
   context_segments:
     type: int
     default: 3

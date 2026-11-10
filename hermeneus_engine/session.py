@@ -404,6 +404,9 @@ class TranslationSession:
             # W02 seam: the tap's zero-buffer watchdog reports what it is doing
             # (for example rebuilding a silent tap) in ``status_message``.
             note = str(getattr(self._c.capture, "status_message", "") or "") if self._capture_started else ""
+            # The speaker reports a voice fallback the same way.
+            voice_note = str(getattr(self._c.speaker, "status_message", "") or "") if self._c.speaker else ""
+            note = " ".join(n for n in (note, voice_note) if n)
             if note != self._capture_note:
                 self._capture_note = note
                 if self._state in ("live", "reconnecting"):

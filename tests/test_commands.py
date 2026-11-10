@@ -51,8 +51,18 @@ def test_missing_choices_name_the_flag():
         resolve(Choices(to="tr"), {}, two)
     with pytest.raises(UsageError, match="--device"):
         resolve(Choices(to="tr", source="BlackHole", speak=True), {}, [SOURCE])
-    with pytest.raises(UsageError, match="voice_id"):
-        resolve(Choices(to="tr", source="BlackHole", speak=True, device="Headphones"), {}, [SOURCE])
+    with pytest.raises(UsageError, match="does not support Afrikaans"):
+        resolve(Choices(to="af", source="BlackHole", speak=True, device="Headphones"), {}, [SOURCE])
+
+
+def test_voice_order_is_flag_then_setting_then_default():
+    from hermeneus_engine.tts.voices import DEFAULT_VOICE_ID
+    base = dict(to="tr", source="BlackHole", speak=True, device="Headphones")
+    assert resolve(Choices(**base), {}, [SOURCE]).voice_id == DEFAULT_VOICE_ID
+    assert resolve(Choices(**base), {"voice_id": "  "}, [SOURCE]).voice_id == DEFAULT_VOICE_ID
+    assert resolve(Choices(**base), {"voice_id": "cfg"}, [SOURCE]).voice_id == "cfg"
+    assert resolve(Choices(voice="flag", **base), {"voice_id": "cfg"}, [SOURCE]).voice_id == "flag"
+    assert resolve(Choices(to="tr", source="BlackHole"), {"voice_id": "cfg"}, [SOURCE]).voice_id is None
 
 
 def test_flags_win_over_settings_and_codes_go_out_as_iso639_1():

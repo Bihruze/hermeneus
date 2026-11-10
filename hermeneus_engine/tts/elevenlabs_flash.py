@@ -37,6 +37,7 @@ from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
 from .playback import PcmSink, Utterance
+from .voices import DEFAULT_VOICE_ID, DEFAULT_VOICE_NAME, unavailable_message
 
 log = logging.getLogger("hermeneus.tts.flash")
 
@@ -79,6 +80,15 @@ FLASH_V2_5_LANGUAGES = frozenset({
 })
 _LANGUAGE_ALIASES = {"nb": "no", "nn": "no", "tl": "fil", "in": "id"}
 
+# Server error for a voice id the account cannot use. Observed live on
+# 2026-11-11 for a made-up id: after the handshake the server sent
+# {"message": "A voice with voice_id <id> does not exist.",
+#  "error": "voice_id_does_not_exist", "code": 1008} and closed with 1008.
+VOICE_UNAVAILABLE_ERRORS = frozenset({"voice_id_does_not_exist"})
+# Message the help center quotes for library voices a free plan cannot use
+# (https://elevenlabs.io/docs/help-center/product/voices/voice-library/why-cant-i-use-some-voices-from-the-voice-library).
+_VOICE_UNAVAILABLE_PHRASE = "voice is not available"
+
 KeyProvider = Callable[[], Optional[str]]
 
 
@@ -98,7 +108,7 @@ def normalize_language(code: str) -> str:
 
 @dataclass(frozen=True)
 class FlashConfig:
-    voice_id: str                                  # required; see report for why there is no default
+    voice_id: str = DEFAULT_VOICE_ID               # resolved by voices.resolve_voice
     base_url: str = DEFAULT_BASE_URL
     output_format: str = OUTPUT_FORMAT
     sample_rate: int = OUTPUT_SAMPLE_RATE
@@ -188,6 +198,9 @@ class FlashSpeaker:
         self._closing = False
         self._closed = False
         self._last_key: str = ""
+        self.voice_id = config.voice_id
+        self.status_message = ""     # read by the session and shown with its status
+        self._voice_failed = ""
         self.connects = 0
         self.metrics: list[UtteranceMetrics] = []
 
@@ -208,6 +221,8 @@ class FlashSpeaker:
         """
         if self._closed:
             raise TtsError("Spoken output is closed.")
+        if self._voice_failed:
+            raise TtsError(self._voice_failed)
         text = " ".join(text.split())
         if not text:
             return
@@ -279,7 +294,7 @@ class FlashSpeaker:
             "inactivity_timeout": self.config.inactivity_timeout_s,
             "language_code": language,
         })
-        voice = urllib.parse.quote(self.config.voice_id, safe="")
+        voice = urllib.parse.quote(self.voice_id, safe="")
         return f"{self.config.base_url.rstrip('/')}/v1/text-to-speech/{voice}/multi-stream-input?{q}"
 
     def _redact(self, text: str) -> str:
@@ -436,9 +451,39 @@ class FlashSpeaker:
             return
         if not audio and ("error" in msg or "message" in msg):
             text = self._redact(str(msg.get("message") or msg.get("error")))
+            if self._is_voice_unavailable(msg):
+                self._on_voice_unavailable(text)
+                return
             log.warning("spoken output server message: %s", text)
             if ctx is not None:
                 self._end(ctx, "failed", error=text)
+
+    @staticmethod
+    def _is_voice_unavailable(msg: dict) -> bool:
+        if str(msg.get("error") or "") in VOICE_UNAVAILABLE_ERRORS:
+            return True
+        return _VOICE_UNAVAILABLE_PHRASE in str(msg.get("message") or "").lower()
+
+    def _on_voice_unavailable(self, server_text: str) -> None:
+        """Switch this session to the default voice; segments in flight are resent on reconnect."""
+        bad = self.voice_id
+        if bad != DEFAULT_VOICE_ID:
+            self.voice_id = DEFAULT_VOICE_ID
+            self.status_message = unavailable_message(bad)
+            log.warning("%s (server: %s)", self.status_message, server_text)
+        else:
+            self._voice_failed = (f"The default voice {DEFAULT_VOICE_NAME} ({DEFAULT_VOICE_ID}) is not available "
+                                  "on this ElevenLabs account. Set voice_id to a voice from your account.")
+            self.status_message = self._voice_failed
+            log.warning("%s (server: %s)", self._voice_failed, server_text)
+            for ctx in list(self._contexts.values()):
+                if ctx.sent:
+                    self._end(ctx, "failed", error=self._voice_failed)
+        ws = self._ws
+        if ws is not None:
+            # The server closes the socket after this error; closing from our
+            # side as well makes the reader run recovery with the new voice.
+            asyncio.get_running_loop().create_task(ws.close())
 
     # --------------------------------------------------------------- recovery
 
