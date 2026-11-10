@@ -187,6 +187,15 @@ auxiliary:
 
 The [plugin LLM access guide](https://hermes-agent.nousresearch.com/docs/developer-guide/plugin-llm-access) describes task-routed auxiliary calls.
 
+Providers tested with this release:
+
+| Provider | Model | Result |
+|---|---|---|
+| `anthropic` | `claude-haiku-5-5` | Translated live English news into Turkish on Hermes v0.23.1. Needs Hermes' optional `anthropic` feature: `hermes pm install --extra anthropic`. |
+| `nous` | `anthropic/claude-haiku-5.5` | The call reached Nous Portal and returned `insufficient_credits_for_paid_model` on an account without credits. Translation with credits was not tested. |
+
+Other providers go through the same Hermes route and are untested.
+
 ### Secret
 
 `ELEVENLABS_API_KEY` is declared under `requires_env` and read only through Hermes's secret scope (`agent.secret_scope.get_secret`), which follows the active profile. Set it with `hermes config set ELEVENLABS_API_KEY <key>`.
