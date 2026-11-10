@@ -2,14 +2,23 @@
 name = "hermeneus"
 version = "0.1.0"
 description = "Live translation for Hermes"
-requires-python = ">=3.11,<3.15"
+requires-python = ">=3.12,<3.15"
 license = "MIT"
-dependencies = []
+# websockets, sounddevice and numpy: each range contains the exact version
+# Hermes v0.23.1 pins in its own pyproject.toml (websockets==15.0.1,
+# sounddevice==0.5.6, numpy==2.5.4), so installing the plugin never moves a
+# core pin (catalog rule 10). pyobjc: the process-tap capture backend
+# (macOS 14.2+), measured with 13.0 in the W02 spike; Hermes core does not pin it.
+dependencies = [
+  "websockets>=15.0.1,<16",
+  "sounddevice>=0.5.6,<0.6",
+  "numpy>=2.5.4,<3",
+  "pyobjc-framework-CoreAudio>=13.0,<14; sys_platform == 'darwin'",
+  "pyobjc-framework-Cocoa>=13.0,<14; sys_platform == 'darwin'",
+]
 
 [project.optional-dependencies]
-dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<2"]
-# Core Audio process tap capture (macOS 14.2+). Versions are the ones measured in the W02 spike.
-process-tap = ["pyobjc-framework-CoreAudio==13.0", "pyobjc-framework-Cocoa==13.0", "numpy==2.5.4"]
+dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<2", "fastapi>=0.104.0,<1", "httpx>=0.27,<1"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

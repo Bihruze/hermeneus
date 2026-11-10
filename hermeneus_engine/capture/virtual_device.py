@@ -41,7 +41,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
-from hermeneus_engine.contracts import (
+from ..contracts import (
     ENGINE_SAMPLE_RATE,
     CaptureError,
     CaptureSource,

@@ -3,5 +3,57 @@ version: "0.1.0"
 description: "Live translation for Hermes. Captures audio playing on your Mac, transcribes it with ElevenLabs Scribe v3 Live, translates it with your Hermes model and shows live subtitles. Spoken translation is opt-in."
 author: Bihruze
 kind: standalone
+license: MIT
 platforms:
   - macos
+requires_hermes: ">=0.23.1"
+requires_env:
+  - name: ELEVENLABS_API_KEY
+    description: "ElevenLabs API key for Scribe v3 Live speech to text and, when turned on, spoken translation"
+    url: "https://elevenlabs.io/app/settings/api-keys"
+    secret: true
+provides_tools: []
+provides_hooks: []
+config_schema:
+  target_language:
+    type: str
+    default: ""
+    label: "Translate into"
+    description: "Language code to translate into, for example tr or de. The --to flag overrides it."
+  capture_backend:
+    type: str
+    choices: [auto, process-tap, virtual-device]
+    default: auto
+    label: "Capture"
+    description: "auto uses a Core Audio process tap on macOS 14.2 and later, otherwise a virtual device such as BlackHole."
+  source:
+    type: str
+    default: ""
+    label: "Audio source"
+    description: "Audio source to capture, as hermes hermeneus devices lists it. Empty means all system audio with a process tap. The --source flag overrides it."
+  speak:
+    type: bool
+    default: false
+    label: "Spoken translation"
+    description: "Speak the translation as well as showing subtitles. The --speak flag turns it on for one session."
+  commit_strategy:
+    type: str
+    choices: [vad, turn_prediction]
+    default: vad
+    label: "Segmenting"
+    description: "How Scribe decides a segment is finished."
+  output_device:
+    type: str
+    default: ""
+    label: "Spoken translation output"
+    description: "Output device for spoken translation. It must not feed the audio source."
+  voice_id:
+    type: str
+    default: ""
+    label: "Voice"
+    description: "ElevenLabs voice id for spoken translation."
+  context_segments:
+    type: int
+    default: 3
+    label: "Context lines"
+    description: "Earlier lines sent with each translation request (0 to 10)."
