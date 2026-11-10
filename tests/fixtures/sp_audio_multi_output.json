@@ -1,0 +1,15 @@
+{
+  "SPAudioDataType": [
+    {
+      "_name": "coreaudio_device",
+      "_items": [
+        {"_name": "BlackHole 2ch", "coreaudio_device_input": 2, "coreaudio_device_manufacturer": "Existential Audio Inc.", "coreaudio_device_output": 2, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_virtual"},
+        {"_name": "Test Built-in Speakers", "coreaudio_device_manufacturer": "Apple Inc.", "coreaudio_device_output": 2, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_builtin"},
+        {"_name": "Test USB Headset", "coreaudio_device_input": 1, "coreaudio_device_output": 2, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_usb"},
+        {"_name": "Multi-Output Device", "coreaudio_default_audio_output_device": "spaudio_yes", "coreaudio_device_manufacturer": "Apple Inc.", "coreaudio_device_output": 2, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_aggregate"},
+        {"_name": "Speakers And Headset", "coreaudio_device_manufacturer": "Apple Inc.", "coreaudio_device_output": 2, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_aggregate"},
+        {"_name": "Capture Aggregate", "coreaudio_device_input": 3, "coreaudio_device_output": 4, "coreaudio_device_srate": 48000, "coreaudio_device_transport": "coreaudio_device_type_aggregate"}
+      ]
+    }
+  ]
+}
