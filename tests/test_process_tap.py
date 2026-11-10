@@ -637,3 +637,78 @@ def test_verify_seam_is_wired(monkeypatch):
     monkeypatch.setattr(tap_doctor, "check_process_tap",
                         lambda timeout_s=30.0: tap_doctor.DoctorResult(False, "permission-denied", "allow it"))
     assert fn() == (False, "allow it")
+
+
+# ---------------------------------------------------------------- PortAudio reader path
+
+class FakePAStream:
+    def __init__(self, rate):
+        self.rate = rate
+        self.latency_s = 0.05
+        self.blocks = queue_mod.Queue()
+        self.closed = False
+
+    def read(self, frames=512):
+        item = self.blocks.get()
+        if item is None:
+            raise RuntimeError("stream closed")
+        return item
+
+    def close(self):
+        self.closed = True
+        self.blocks.put(None)
+
+
+class FakePA:
+    def __init__(self):
+        self.opened = []
+
+    def open(self, name, rate):
+        s = FakePAStream(rate)
+        self.opened.append((name, rate, s))
+        return s
+
+
+import queue as queue_mod  # noqa: E402
+
+
+def pa_capture(hal, got, **kw):
+    pa = FakePA()
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: got.append((pcm, ts)),
+                     reader=eng.READER_PORTAUDIO, pa_factory=lambda: pa, refresh_interval=1000, **kw)
+    cap.open()
+    return cap, pa
+
+
+def test_portaudio_reader_converts_and_counts_overflows():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    got = []
+    cap, pa = pa_capture(hal, got)
+    name, rate, stream = pa.opened[0]
+    assert name.startswith("Hermeneus capture ") and rate == 48000
+    assert "create_ioproc" not in hal.names()
+    t0 = time.monotonic_ns()
+    for i in range(10):
+        stream.blocks.put((sine(440, 4800, start=i * 4800), i == 3))
+    assert wait_for(lambda: cap.stats.buffers == 10)
+    assert cap.close() == []
+    assert stream.closed and hal.clean
+    pcm = np.frombuffer(b"".join(p for p, _ in got), dtype="<i2")
+    assert pcm.size == 16000 and cap.stats.overflows == 1
+    assert got[0][1] < t0  # stamped before arrival: block length plus reported latency
+
+
+def test_portaudio_reader_is_reopened_on_rebuild():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    got = []
+    cap, pa = pa_capture(hal, got)
+    assert cap.rebuild("silence")
+    assert len(pa.opened) == 2 and pa.opened[0][2].closed and not pa.opened[1][2].closed
+    assert pa.opened[0][0] != pa.opened[1][0]  # a fresh aggregate name each time
+    pa.opened[0][2].blocks.put((sine(440, 4800), False))  # late block from the old stream is ignored
+    pa.opened[1][2].blocks.put((sine(440, 4800), False))
+    assert wait_for(lambda: cap.stats.buffers == 1)
+    cap.close()
+    assert hal.clean

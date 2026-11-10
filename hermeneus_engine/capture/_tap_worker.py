@@ -101,8 +101,11 @@ def serve(inp: BinaryIO, out: BinaryIO, hal_factory: Callable[[], object], *, ow
     if not line:
         return 0
     try:
-        spec = TapSpec.from_dict(json.loads(line))
-    except (ValueError, KeyError, TypeError) as exc:
+        request = json.loads(line)
+        spec = TapSpec.from_dict(request)
+        if request.get("reader"):
+            engine_options = {**(engine_options or {}), "reader": str(request["reader"])}
+    except (ValueError, KeyError, TypeError, AttributeError) as exc:
         writer.send_json(KIND_ERROR, {"message": f"invalid tap request: {exc}"})
         return 2
     if spec.mode == "system" and own_pid not in spec.exclude_pids:
@@ -158,9 +161,15 @@ def main() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, _raise_exit)
 
-    from ._coreaudio import CoreAudioHAL
+    import importlib.util
 
-    return serve(sys.stdin.buffer, proto, CoreAudioHAL, own_pid=os.getpid())
+    from ._coreaudio import CoreAudioHAL
+    from ._tap_engine import READER_IOPROC, READER_PORTAUDIO
+
+    # PortAudio blocking reads keep Python off the realtime thread; the IOProc reader is the
+    # fallback for an interpreter without sounddevice.
+    reader = READER_PORTAUDIO if importlib.util.find_spec("sounddevice") else READER_IOPROC
+    return serve(sys.stdin.buffer, proto, CoreAudioHAL, own_pid=os.getpid(), engine_options={"reader": reader})
 
 
 if __name__ == "__main__":

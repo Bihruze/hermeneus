@@ -132,7 +132,8 @@ class ProcessTapBackend:
     def __init__(self, hal_factory: Optional[Callable[[], object]] = None, *,
                  spawn: Callable[[], object] = spawn_worker, own_pid: Optional[int] = None,
                  start_timeout: float = START_TIMEOUT_S, on_status: Optional[StatusCallback] = None,
-                 responsible_app: Optional[Callable[[], Optional[str]]] = None) -> None:
+                 responsible_app: Optional[Callable[[], Optional[str]]] = None,
+                 reader: Optional[str] = None) -> None:
         self._hal_factory = hal_factory
         self._hal = None
         self._spawn = spawn
@@ -141,6 +142,7 @@ class ProcessTapBackend:
         self._lock = threading.RLock()
         self._run: Optional[_Run] = None
         self.on_status = on_status
+        self._reader = reader  # None lets the worker choose (PortAudio when sounddevice is present)
         self._responsible_app = responsible_app or responsible_app_name
         self.last_stats: Optional[dict] = None
         self.last_status: Optional[tuple[str, str]] = None
@@ -196,6 +198,8 @@ class ProcessTapBackend:
             if self._run is not None:
                 raise CaptureError("Capture is already running. Stop it before starting another source.")
             spec = self._spec_for(source)
+            if self._reader:
+                spec["reader"] = self._reader
             self.failure = ""
             try:
                 proc = self._spawn()

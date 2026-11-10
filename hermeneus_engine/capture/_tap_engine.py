@@ -1,8 +1,12 @@
 """One process tap session: tap, private aggregate device, IOProc and conversion.
 
-This runs inside the capture worker process (see ``_tap_worker``). The HAL IO
-thread only copies each buffer into a queue. A converter thread resamples to
-engine format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
+This runs inside the capture worker process (see ``_tap_worker``). Two readers
+exist. The default, ``portaudio``, opens the private aggregate as a PortAudio
+input and drains it with blocking reads, so no Python code runs on the realtime
+thread (see ``_pa_reader``). The ``ioproc`` reader installs an IOProc through
+PyObjC whose Python block only copies each buffer into a queue; it is kept as
+the fallback when sounddevice is not importable. Either way a converter thread
+resamples to engine format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
 converter thread also:
 
 * follows the processes the tap should cover (app helpers that start later,
@@ -55,6 +59,9 @@ STATUS_STALLED = "stalled"            # audio stopped and rebuilding did not bri
 STATUS_RECOVERED = "recovered"        # audio is back after a no-audio or stalled report
 STATUS_FORMAT_CHANGED = "format-changed"
 
+READER_PORTAUDIO = "portaudio"
+READER_IOPROC = "ioproc"
+
 PcmCallback = Callable[[bytes, int], None]
 StatusCallback = Callable[[str, str, dict], None]
 
@@ -95,6 +102,8 @@ class TapStats:
     samples_out: int = 0
     gaps: int = 0
     gap_frames: int = 0
+    overflows: int = 0
+    reader: str = ""
     dropped_buffers: int = 0
     tap_updates: int = 0
     rebuilds: int = 0
@@ -155,7 +164,16 @@ def audio_expected(hal, spec: TapSpec, objects) -> bool:
 class TapCapture:
     def __init__(self, hal, spec: TapSpec, on_pcm: PcmCallback, *, on_status: Optional[StatusCallback] = None,
                  refresh_interval: float = 1.0, silence_rebuild_s: float = SILENCE_REBUILD_S,
-                 max_rebuilds: int = MAX_REBUILDS, clock: Callable[[], float] = time.monotonic) -> None:
+                 max_rebuilds: int = MAX_REBUILDS, clock: Callable[[], float] = time.monotonic,
+                 reader: str = READER_IOPROC, pa_factory: Optional[Callable[[], object]] = None) -> None:
+        if reader not in (READER_PORTAUDIO, READER_IOPROC):
+            raise ValueError(f"unknown reader {reader!r}")
+        self._reader_kind = reader
+        self._pa_factory = pa_factory
+        self._pa = None
+        self._pa_stream = None
+        self._pa_thread: Optional[threading.Thread] = None
+        self._pa_stop = threading.Event()
         self._hal = hal
         self._spec = spec
         self._on_pcm = on_pcm
@@ -183,7 +201,7 @@ class TapCapture:
         self._silent_since: Optional[float] = None
         self._attempts = 0
         self._reported = ""
-        self.stats = TapStats()
+        self.stats = TapStats(reader=reader)
 
     # ------------------------------------------------------------------ lifecycle
 
@@ -236,16 +254,21 @@ class TapCapture:
                 raise TapSetupError("The tap reported an invalid audio format.")
             self.stats.sample_rate = fmt.sample_rate
             self._rate = int(round(fmt.sample_rate))
-            self.device_id = hal.create_aggregate(handle.uid, TAP_NAME, f"hermeneus-tap-{uuid.uuid4()}")
+            tag = uuid.uuid4().hex[:8]
+            device_name = f"{TAP_NAME} {tag}"
+            self.device_id = hal.create_aggregate(handle.uid, device_name, f"hermeneus-tap-{tag}")
             self._generation += 1
             generation, rate, q, stats = self._generation, self._rate, self._queue, self.stats
+            if self._reader_kind == READER_PORTAUDIO:
+                self._open_portaudio(device_name, generation, rate)
+                return
 
             def on_audio(sample_time: float, host_time: int, data: bytes, channels: int) -> None:
                 # HAL IO thread: copy out and return.
                 if q.qsize() >= QUEUE_LIMIT:
                     stats.dropped_buffers += 1
                     return
-                q.put((generation, rate, sample_time, host_time, data, channels))
+                q.put((generation, rate, sample_time, host_time, False, data, channels))
 
             self.proc_id, self._block = hal.create_ioproc(self.device_id, on_audio)
             hal.start(self.device_id, self.proc_id)
@@ -254,8 +277,63 @@ class TapCapture:
             self._release()
             raise
 
+    def _open_portaudio(self, device_name: str, generation: int, rate: int) -> None:
+        if self._pa is None:
+            if self._pa_factory is None:
+                from ._pa_reader import PortAudioReader
+
+                self._pa = PortAudioReader()
+            else:
+                self._pa = self._pa_factory()
+        stream = self._pa.open(device_name, rate)
+        self._pa_stream = stream
+        stop = threading.Event()
+        self._pa_stop = stop
+        q, stats = self._queue, self.stats
+        latency_ns = int(getattr(stream, "latency_s", 0.0) * 1e9)
+
+        def drain() -> None:
+            sample_time = 0.0
+            while not stop.is_set():
+                try:
+                    x, overflowed = stream.read()
+                except Exception:
+                    if not stop.is_set():
+                        log.warning("PortAudio read failed; the watchdog will rebuild the tap")
+                    return
+                now = time.monotonic_ns()
+                frames = int(x.shape[0])
+                if overflowed:
+                    stats.overflows += 1
+                if not frames:
+                    continue
+                # Capture time of the first sample: the read returned once the block was complete,
+                # and PortAudio reports how long input takes to reach the ring buffer.
+                stamp = now - int(frames * 1e9 / rate) - latency_ns
+                if q.qsize() >= QUEUE_LIMIT:
+                    stats.dropped_buffers += 1
+                else:
+                    q.put((generation, rate, sample_time, stamp, True, x.astype("<f4").tobytes(), 1))
+                sample_time += frames
+
+        self._pa_thread = threading.Thread(target=drain, name="hermeneus-tap-portaudio", daemon=True)
+        self._pa_thread.start()
+
     def _release(self) -> list[str]:
         hal = self._hal
+        failures = []
+        if self._pa_stream is not None:
+            self._pa_stop.set()
+            try:
+                self._pa_stream.close()
+            except Exception as exc:
+                log.error("process tap teardown: closing the PortAudio stream failed: %s", exc)
+                failures.append(f"close PortAudio stream: {exc}")
+            thread = self._pa_thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+            self._pa_stream = None
+            self._pa_thread = None
         steps = []
         if self._started:
             steps.append(("stop aggregate device", hal.stop, (self.device_id, self.proc_id)))
@@ -265,7 +343,6 @@ class TapCapture:
             steps.append(("destroy aggregate device", hal.destroy_aggregate, (self.device_id,)))
         if self.tap_id is not None:
             steps.append(("destroy process tap", hal.destroy_tap, (self.tap_id,)))
-        failures = []
         for what, fn, args in steps:
             try:
                 fn(*args)
@@ -315,8 +392,8 @@ class TapCapture:
             if item is None:  # queued after the IOProc stopped, so every buffer before it is converted
                 return
             if item:
-                generation, rate, sample_time, host_time, data, channels = item
-                if generation != self._generation and self._started:
+                generation, rate, sample_time, stamp, stamp_is_ns, data, channels = item
+                if generation != self._generation:
                     item = ()  # left over from a tap that was rebuilt
                 else:
                     if (generation, rate) != current:
@@ -342,7 +419,8 @@ class TapCapture:
                     y = resampler.process(x)
                     if y.shape[0]:
                         stats.samples_out += int(y.shape[0])
-                        self._on_pcm(float_to_s16le(y), to_ns(host_time) + int(offset * 1e9 / rate))
+                        base = stamp if stamp_is_ns else to_ns(stamp)
+                        self._on_pcm(float_to_s16le(y), base + int(offset * 1e9 / rate))
             now = self._clock()
             if now >= next_tick:
                 next_tick = now + self._refresh_interval
