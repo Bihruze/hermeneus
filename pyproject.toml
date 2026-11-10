@@ -8,6 +8,8 @@ dependencies = []
 
 [project.optional-dependencies]
 dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<2"]
+# Core Audio process tap capture (macOS 14.2+). Versions are the ones measured in the W02 spike.
+process-tap = ["pyobjc-framework-CoreAudio==13.0", "pyobjc-framework-Cocoa==13.0", "numpy==2.5.4"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
