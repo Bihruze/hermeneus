@@ -8,6 +8,11 @@ PY="${HERMENEUS_PY:-.venv/bin/python}"
 echo "== tests"
 "$PY" -m pytest -q 2>&1 | tail -8
 
+if command -v node >/dev/null 2>&1; then
+  echo "== desktop pane tests"
+  node --test tests/desktop/*.test.mjs 2>&1 | tail -8
+fi
+
 echo "== em dash scan"
 if grep -rn --exclude-dir=.git --exclude-dir=.venv --exclude-dir=node_modules $'\xe2\x80\x94' . ; then
   echo "FAIL: em dash found"; exit 1
