@@ -12,6 +12,8 @@ const {
   createController,
   createSubtitleState,
   detectedLanguage,
+  devicesPath,
+  errorText,
   LINE_LIMIT,
   SPEAKER_TOKENS,
   speakerColor,
@@ -25,7 +27,7 @@ function line(id, state, extra = {}) {
     state,
     original: `original ${id}`,
     translation: state === 'translated' ? `translation ${id}` : '',
-    speaker_id: 'speaker_0',
+    speaker_id: 's1:speaker_0',
     source_language: 'en',
     target_language: 'tr',
     segment_index: 0,
@@ -72,32 +74,32 @@ test('an event whose seq is not above the applied seq is ignored', () => {
 
 test('relabel moves every earlier from line to the to speaker', () => {
   let state = run([
-    lineEvent(1, line('a', 'translated', { speaker_id: 'speaker_0' })),
-    lineEvent(2, line('b', 'translated', { speaker_id: 'speaker_1' })),
-    lineEvent(3, line('c', 'partial', { speaker_id: 'speaker_1' }))
+    lineEvent(1, line('a', 'translated', { speaker_id: 's1:speaker_0' })),
+    lineEvent(2, line('b', 'translated', { speaker_id: 's1:speaker_1' })),
+    lineEvent(3, line('c', 'partial', { speaker_id: 's1:speaker_1' }))
   ])
-  const colourOf0 = speakerColor(state, 'speaker_0')
+  const colourOf0 = speakerColor(state, 's1:speaker_0')
 
-  state = applyEvent(state, { type: 'relabel', seq: 4, from: 'speaker_1', to: 'speaker_0' })
+  state = applyEvent(state, { type: 'relabel', seq: 4, from: 's1:speaker_1', to: 's1:speaker_0' })
 
-  assert.deepEqual(state.lines.map(l => l.speaker_id), ['speaker_0', 'speaker_0', 'speaker_0'])
-  assert.equal(speakerColor(state, 'speaker_0'), colourOf0)
-  assert.equal(state.lastTranslated.speaker_id, 'speaker_0')
+  assert.deepEqual(state.lines.map(l => l.speaker_id), ['s1:speaker_0', 's1:speaker_0', 's1:speaker_0'])
+  assert.equal(speakerColor(state, 's1:speaker_0'), colourOf0)
+  assert.equal(state.lastTranslated.speaker_id, 's1:speaker_0')
   assert.equal(state.seq, 4)
 })
 
 test('relabel to an unseen speaker id keeps the merged speaker colour', () => {
-  let state = run([lineEvent(1, line('a', 'partial', { speaker_id: 'speaker_3' }))])
-  const before = speakerColor(state, 'speaker_3')
+  let state = run([lineEvent(1, line('a', 'partial', { speaker_id: 's1:speaker_3' }))])
+  const before = speakerColor(state, 's1:speaker_3')
 
-  state = applyEvent(state, { type: 'relabel', seq: 2, from: 'speaker_3', to: 'speaker_9' })
+  state = applyEvent(state, { type: 'relabel', seq: 2, from: 's1:speaker_3', to: 's1:speaker_9' })
 
-  assert.equal(state.lines[0].speaker_id, 'speaker_9')
-  assert.equal(speakerColor(state, 'speaker_9'), before)
+  assert.equal(state.lines[0].speaker_id, 's1:speaker_9')
+  assert.equal(speakerColor(state, 's1:speaker_9'), before)
 })
 
 test('speakers get theme tokens in order of first appearance and wrap around', () => {
-  const ids = Array.from({ length: SPEAKER_TOKENS.length + 1 }, (_, i) => `speaker_${i}`)
+  const ids = Array.from({ length: SPEAKER_TOKENS.length + 1 }, (_, i) => `s1:speaker_${i}`)
   const state = run(ids.map((id, i) => lineEvent(i + 1, line(`l${i}`, 'partial', { speaker_id: id }))))
 
   assert.deepEqual(
@@ -130,20 +132,20 @@ test('resync applies the page after the current seq and takes the page seq', () 
 
 test('a reset page replaces the lines and keeps speaker colours', () => {
   let state = run([
-    lineEvent(40, line('old', 'translated', { speaker_id: 'speaker_2' })),
+    lineEvent(40, line('old', 'translated', { speaker_id: 's1:speaker_2' })),
     { type: 'status', seq: 41, state: 'live', message: '' }
   ])
-  const colour = speakerColor(state, 'speaker_2')
+  const colour = speakerColor(state, 's1:speaker_2')
 
   state = applyResync(state, {
     seq: 3,
     reset: true,
-    events: [lineEvent(2, line('new', 'translated', { speaker_id: 'speaker_2' }))]
+    events: [lineEvent(2, line('new', 'translated', { speaker_id: 's1:speaker_2' }))]
   })
 
   assert.deepEqual(state.lines.map(l => l.line_id), ['new'])
   assert.equal(state.seq, 3)
-  assert.equal(speakerColor(state, 'speaker_2'), colour)
+  assert.equal(speakerColor(state, 's1:speaker_2'), colour)
   assert.equal(state.status.state, 'live')
 })
 
@@ -193,20 +195,100 @@ test('hello and status events set the status; malformed events change nothing', 
   assert.equal(state, same)
 })
 
-test('helpers: speaker numbers, detected language, truncation', () => {
-  assert.equal(speakerNumber('speaker_0'), 1)
-  assert.equal(speakerNumber('narrator'), null)
-  assert.equal(speakerNumber(null), null)
-
+test('helpers: detected language, truncation, devices path, REST error text', () => {
   const state = run([
     lineEvent(1, line('a', 'translated', { source_language: 'de' })),
     lineEvent(2, line('b', 'partial', { source_language: null }))
   ])
 
   assert.equal(detectedLanguage(state), 'de')
+  assert.equal(detectedLanguage(applyEvent(state, { type: 'status', seq: 3, state: 'live', detected_language: 'fr' })), 'fr')
   assert.equal(detectedLanguage(createSubtitleState()), null)
   assert.equal(truncate('  short  text ', 20), 'short text')
-  assert.equal(truncate('abcdefghij', 5), 'abcd…')
+  assert.equal(truncate('abcdefghij', 5), 'abcd\u2026')
+
+  assert.equal(devicesPath(''), '/devices')
+  assert.equal(devicesPath('virtual-device:BlackHole 2ch'), '/devices?backend=virtual-device&source_id=BlackHole%202ch')
+  assert.equal(devicesPath('process-tap:com.apple.Music:1'), '/devices?backend=process-tap&source_id=com.apple.Music%3A1')
+
+  const body = JSON.stringify({ ok: false, detail: 'a session already runs', error: 'a session already runs' })
+  assert.equal(errorText(new Error(`409: ${body}`)), 'a session already runs (409)')
+  assert.equal(errorText(new Error("Error invoking remote method 'hermes:api': Error: 400: " + body)), 'a session already runs (400)')
+  assert.equal(errorText(new Error('404: Not Found')), '404: Not Found')
+})
+
+test('speakers from different Scribe sessions get different numbers in order of first appearance', () => {
+  const state = run([
+    lineEvent(1, line('a', 'translated', { speaker_id: 's1:speaker_0' })),
+    lineEvent(2, line('b', 'translated', { speaker_id: 's1:speaker_1' })),
+    lineEvent(3, line('c', 'translated', { speaker_id: 's2:speaker_0' })),
+    lineEvent(4, line('d', 'translated', { speaker_id: 's1:speaker_0' }))
+  ])
+
+  assert.equal(speakerNumber(state, 's1:speaker_0'), 1)
+  assert.equal(speakerNumber(state, 's1:speaker_1'), 2)
+  assert.equal(speakerNumber(state, 's2:speaker_0'), 3)
+  assert.equal(speakerNumber(state, null), null)
+  assert.notEqual(speakerColor(state, 's1:speaker_0'), speakerColor(state, 's2:speaker_0'))
+})
+
+test('relabel keeps speaker numbers: the survivor keeps its own, a new id inherits', () => {
+  let state = run([
+    lineEvent(1, line('a', 'translated', { speaker_id: 's1:speaker_0' })),
+    lineEvent(2, line('b', 'translated', { speaker_id: 's1:speaker_1' })),
+    lineEvent(3, line('c', 'translated', { speaker_id: 's2:speaker_0' }))
+  ])
+
+  state = applyEvent(state, { type: 'relabel', seq: 4, from: 's1:speaker_1', to: 's1:speaker_0' })
+  assert.deepEqual(state.lines.map(l => speakerNumber(state, l.speaker_id)), [1, 1, 3])
+
+  state = applyEvent(state, { type: 'relabel', seq: 5, from: 's2:speaker_0', to: 's2:speaker_4' })
+  assert.equal(speakerNumber(state, 's2:speaker_4'), 3)
+  assert.equal(speakerColor(state, 's2:speaker_4'), `var(${SPEAKER_TOKENS[2]})`)
+
+  // The next new speaker still gets the next number.
+  state = applyEvent(state, lineEvent(6, line('d', 'partial', { speaker_id: 's3:speaker_0' })))
+  assert.equal(speakerNumber(state, 's3:speaker_0'), 4)
+})
+
+test('hello sets the status without moving the seq', () => {
+  let state = run([lineEvent(10, line('a', 'translated'))])
+
+  state = applyEvent(state, { type: 'hello', version: 1, seq: 41, session: { state: 'live', seq: 41 } })
+
+  assert.equal(state.seq, 10)
+  assert.deepEqual(state.status, { state: 'live' })
+})
+
+test('a reset event drops the lines, keeps speaker numbers and takes its seq even when lower', () => {
+  let state = run([lineEvent(90, line('old', 'translated', { speaker_id: 's1:speaker_1' }))])
+
+  state = applyEvent(state, { type: 'reset', seq: 5 })
+  assert.deepEqual(state.lines, [])
+  assert.equal(state.seq, 5)
+  assert.equal(speakerNumber(state, 's1:speaker_1'), 1)
+
+  state = applyEvent(state, lineEvent(6, line('new', 'partial')))
+  assert.deepEqual(state.lines.map(l => l.line_id), ['new'])
+})
+
+test('a new run clears the lines and starts speaker numbering again', () => {
+  let state = run([
+    { type: 'status', seq: 1, state: 'live' },
+    lineEvent(2, line('a', 'translated', { speaker_id: 's1:speaker_3' })),
+    { type: 'status', seq: 3, state: 'reconnecting' },
+    { type: 'status', seq: 4, state: 'live' }
+  ])
+
+  assert.equal(state.lines.length, 1, 'reconnecting inside a run keeps the lines')
+
+  state = run([{ type: 'status', seq: 5, state: 'idle' }, { type: 'status', seq: 6, state: 'starting' }], state)
+  assert.deepEqual(state.lines, [])
+  assert.equal(state.seq, 6)
+  assert.equal(state.status.state, 'starting')
+
+  state = applyEvent(state, lineEvent(7, line('b', 'partial', { speaker_id: 's1:speaker_0' })))
+  assert.equal(speakerNumber(state, 's1:speaker_0'), 1)
 })
 
 // ---------------------------------------------------------------------------
