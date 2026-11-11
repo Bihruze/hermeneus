@@ -68,6 +68,8 @@ hermes plugins remove hermeneus
 
 ## First run
 
+In Hermes Desktop, turn on Hermeneus in Capabilities > Plugins. Desktop installs the pane and the status bar item switched off, as it does for the desktop half of every plugin package, and shows neither until the plugin is on.
+
 Run the doctor first:
 
 ```bash
@@ -140,12 +142,14 @@ In a Hermes session:
 
 ### Desktop pane
 
-Hermes Desktop shows a Hermeneus pane at the bottom of the workspace and a status item on the right of the status bar. The pane has two tabs.
+Hermes Desktop shows a Hermeneus pane at the bottom of the workspace and a **Hermeneus** item on the right of the status bar. Both appear once the plugin is on in Capabilities > Plugins (see First run). The pane has two tabs.
 
-- **Subtitles**: pick a source, a subtitle language, and optionally **Speak translation** with an output device, then press **Start**. Lines appear with their speaker label and the language Scribe heard. Buttons change the subtitle size, and **Jump to latest** returns to the newest line after you scroll back.
+- **Subtitles**: pick a source, a subtitle language, and optionally **Speak translation** with an output device, then press **Start**. Each line shows the translation, with the original under it in smaller, dimmer text and tagged with the language Scribe heard. A line Scribe is still hearing updates in place and is replaced by its translation when it is ready. Speakers are named Speaker 1, Speaker 2 and so on, each in its own colour. The list follows the newest line; scroll up to read back and it stays where you are, with **Jump to live** and the number of new lines to return. Buttons change the subtitle size.
 - **Doctor**: the same checks as `hermes hermeneus doctor`, with **Run checks again**.
 
-The pane talks to the Hermes gateway through the plugin's backend routes under `/api/plugins/hermeneus/` on Hermes's own server. If the pane says "Hermeneus backend unreachable", enable the plugin and restart the gateway.
+Closing the pane with its close button turns the whole plugin off, status bar item included. That is how Desktop treats a plugin with one pane. Turn it on again in Capabilities > Plugins; it comes back in the same place.
+
+The pane talks to the Hermes gateway through the plugin's backend routes under `/api/plugins/hermeneus/` on Hermes's own server. If the pane says "Hermeneus backend unreachable", enable the plugin under `plugins.enabled` in `config.yaml` and restart the gateway.
 
 > Screenshot placeholder (W16): docs/screenshots/pane-subtitles.png, the Subtitles tab during a session.
 >
