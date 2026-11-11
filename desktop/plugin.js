@@ -1334,7 +1334,10 @@ const S = {
   chipMenu: { display: 'flex', flexDirection: 'column', gap: sp(2) },
   chipMenuPanel: { width: 'auto' },
   field: { display: 'flex', alignItems: 'center', gap: sp(1), minWidth: 0 },
-  select: { width: sp(44) },
+  // The trigger keeps its width but may shrink in a narrow pane; a long label (the macOS
+  // default source is "All system audio except Hermeneus") ends in an ellipsis inside it.
+  select: { width: sp(44), maxWidth: '100%', minWidth: 0 },
+  selectValue: { flex: 1, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', textAlign: 'start' },
   popover: { display: 'flex', flexDirection: 'column', gap: sp(2) },
   startStop: { marginLeft: 'auto' },
   topRow: { display: 'flex', alignItems: 'center', gap: sp(3), minWidth: 0 },
@@ -1554,13 +1557,22 @@ function StatusLine({ ctrl }) {
   })
 }
 
-function Picker({ disabled, label, onChange, options, placeholder, value }) {
+// The SDK's SelectValue drops its style prop, so a span around it does the truncating.
+// The full label of the chosen option is the trigger's title.
+export function Picker({ disabled, label, onChange, options, placeholder, value }) {
+  const chosen = value ? options.find(option => option.value === value)?.label : undefined
   return jsxs(Select, {
     disabled,
     value: value || undefined,
     onValueChange: onChange,
     children: [
-      jsx(SelectTrigger, { 'aria-label': label, size: 'sm', style: S.select, children: jsx(SelectValue, { placeholder }) }),
+      jsx(SelectTrigger, {
+        'aria-label': label,
+        size: 'sm',
+        style: S.select,
+        title: typeof chosen === 'string' && chosen !== '' ? chosen : undefined,
+        children: jsx('span', { style: S.selectValue, children: jsx(SelectValue, { placeholder }) })
+      }),
       jsx(SelectContent, {
         children: options.map(option => jsx(SelectItem, { value: option.value, children: option.label }, option.value))
       })
