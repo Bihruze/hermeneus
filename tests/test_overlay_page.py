@@ -630,3 +630,16 @@ def test_served_page_keeps_the_row_limit_across_updates(tmp_path):
                           env={**__import__("os").environ, "OVERLAY_PAGE_HTML": str(page)})
     assert done.returncode == 0, done.stdout[-2000:]
     assert "fail 0" in done.stdout
+
+
+def test_banner_style_reaches_the_page_as_its_own_scheme():
+    from hermeneus_engine import overlay_page
+    from hermeneus_engine.overlay_tokens import BANNER
+    tokens = overlay_page.theme_tokens(None)
+    assert tokens["banner"]["--surface"] == BANNER.surface.css()
+    assert tokens["banner"]["--speaker-1"] == BANNER.speakers[0].css()
+    css = overlay_page.theme_css(tokens)
+    assert ':root[data-theme="banner"]' in css
+    assert css.index(':root[data-theme="banner"]') > css.index("prefers-color-scheme")  # wins over the system dark
+    assert overlay_page.page_settings({"overlay_style": "banner"})["style"] == "banner"
+    assert overlay_page.page_settings({})["style"] == "theme"

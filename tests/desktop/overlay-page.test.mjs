@@ -129,6 +129,16 @@ test('a theme event picks the forced mode, then Desktop mode, then the system ap
   assert.equal(O.themeVars(null, 'auto', false), null)
 })
 
+test('the banner style is a scheme of its own: from the shared setting or ?theme=banner', () => {
+  const tokens = { common: {}, light: { '--surface': 'L' }, dark: { '--surface': 'D' }, banner: { '--surface': 'B' },
+    default: { '--surface': 'S' }, follow_system: false }
+  assert.equal(O.resolveSettings({ style: 'banner' }, '').theme, 'banner')
+  assert.equal(O.resolveSettings({ style: 'theme' }, '').theme, 'auto')
+  assert.equal(O.resolveSettings({ style: 'banner' }, '?theme=light').theme, 'light')
+  assert.equal(O.resolveSettings({}, '?theme=banner').theme, 'banner')
+  assert.equal(O.themeVars(tokens, 'banner', true)['--surface'], 'B')
+})
+
 test('a translated line with no translation shows as failed with the marker, as on the strip', () => {
   // Before: the page hid it while the native strip showed its original (A3 reaudit2 N7).
   const s = run([line(1, 'a', 'translated', 'Hello there', ''), line(2, 'b', 'failed', 'Fast talk')])
