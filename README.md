@@ -54,10 +54,20 @@ For subtitles closer to the speech, press **Choose a faster model** in the pane.
 ### In a terminal
 
 ```bash
-hermes plugins install Bihruze/hermeneus   # enter the key at its masked ELEVENLABS_API_KEY prompt; answer y to enable it and to install its Python packages
+hermes plugins install Bihruze/hermeneus   # asks three questions, see below
 hermes hermeneus doctor                    # the first run shows the macOS System Audio Recording prompt
 hermes hermeneus run --to tr               # live subtitles in this terminal
 ```
+
+`hermes plugins install` asks three questions, in this order:
+
+1. `ELEVENLABS_API_KEY:` Paste your key. The prompt shows only `*` characters, and Hermes saves the key in the `.env` file of your Hermes home.
+2. `Enable 'hermeneus' now? [y/N]:` Type `y`.
+3. `Prepare these with Hermes through PM now? [y/N]:` after the list of Python packages. Type `y`.
+
+If Hermes's security scan flags the plugin, Hermes shows its findings first and asks `Install anyway? Only continue if you trust the source. [y/N]:`.
+
+While `run` runs, play a video or a stream with speech in it. Without `--source`, Hermeneus listens to all system audio.
 
 The key is typed only at Hermes's masked prompt, so it never appears on a command line or in your shell history. To add or change it later, use **Settings > Tools & Keys** in Hermes Desktop.
 
