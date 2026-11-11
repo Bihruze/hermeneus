@@ -365,7 +365,7 @@ Only a translation goes on screen. The prompt asks for the translation alone, on
 - A reply is rejected when the model talks about its task ("I need to output just the Turkish text", a "Note:" label the speech does not have), when it repeats the speech word for word, when half or more of its words are copied from the speech, or when it is not written in the target language's script. Names, brands, numbers, quoted phrases, addresses and single shared words such as "pizza" do not count as copied.
 - For an English target only notes that are clearly about the task, and not in the speech, are rejected. "Let me correct that." is kept.
 
-A rejected line shows "Not translated", and its reply is never shown, spoken or printed. On the 170 translated lines of three real audited sessions, the checks rejected none, kept the corrected part of the one reply with notes, and cut the copied start off the one reply that began in English.
+A rejected line shows "Not translated", and its reply is never shown, spoken or printed. On the 170 translated lines of three recorded real sessions, the checks rejected none, kept the corrected part of the one reply with notes, and cut the copied start off the one reply that began in English.
 
 ## Voices
 
