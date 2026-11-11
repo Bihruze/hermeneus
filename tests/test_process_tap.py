@@ -807,6 +807,37 @@ def test_default_player_uses_the_quiet_tone_without_a_virtual_device(monkeypatch
     assert 20 * np.log10(tap_doctor.AUDIBLE_AMPLITUDE / np.sqrt(2)) > tap_doctor.MIN_RMS_DBFS + 6
 
 
+
+def _failing_device_list(monkeypatch):
+    import sounddevice as sd
+
+    def boom():
+        raise RuntimeError("PortAudio not initialized")
+    monkeypatch.setattr(sd, "query_devices", boom)
+    made = []
+    monkeypatch.setattr(tap_doctor, "TonePlayer",
+                        lambda device=None, amplitude=None: made.append((device, amplitude)) or object())
+    return made
+
+
+def test_doctor_skips_the_tone_when_the_device_list_fails(monkeypatch):
+    made = _failing_device_list(monkeypatch)
+    hal = FakeHAL()
+    r = tap_doctor.check_process_tap(
+        backend_factory=lambda **kw: ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID, **kw),
+        app_name=lambda: "Terminal")
+    assert made == []
+    assert not r.ok and r.code == tap_doctor.NO_TEST_PLAYER
+    assert "skipped" in r.message and "PortAudio not initialized" in r.message
+
+
+def test_default_player_uses_the_default_output_on_a_failed_list_only_when_asked(monkeypatch):
+    made = _failing_device_list(monkeypatch)
+    with pytest.raises(tap_doctor.DeviceListError):
+        tap_doctor.default_player()
+    tap_doctor.default_player(allow_default_output=True)
+    assert made == [(None, tap_doctor.AUDIBLE_AMPLITUDE)]
+
 def test_doctor_passes_on_the_quiet_tone_and_says_it_may_be_heard():
     r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, sine(440, 4800, amp=tap_doctor.AUDIBLE_AMPLITUDE, start=i * 4800))
                                             for i in range(10)])

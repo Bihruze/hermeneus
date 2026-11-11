@@ -113,12 +113,17 @@ class TonePlayer:
 VIRTUAL_OUTPUT_MARKERS = ("blackhole", "vb-cable", "vb-audio", "loopback audio", "soundflower")
 
 
+class DeviceListError(RuntimeError):
+    """The output devices could not be listed, so it is unknown whether a virtual device exists."""
+
+
 def virtual_output_device(query_devices: Optional[Callable[[], list]] = None) -> Optional[str]:
     """Name of an installed virtual output device (BlackHole, VB-Cable, ...), which nobody hears.
 
     A per-process tap captures a process on whatever device it plays to (measured with a player
     on BlackHole 2ch and BlackHole 16ch), so the doctor plays its tone there when one exists.
     Two-channel devices come first: a mono mixdown of a 16-channel device arrives 18 dB lower.
+    Raises DeviceListError when the device list cannot be read.
     """
     try:
         if query_devices is None:
@@ -126,16 +131,26 @@ def virtual_output_device(query_devices: Optional[Callable[[], list]] = None) ->
 
             query_devices = sd.query_devices
         devices = [dict(d) for d in query_devices()]
-    except Exception:
-        return None
+    except Exception as exc:
+        raise DeviceListError(f"{type(exc).__name__}: {exc}") from exc
     found = [d for d in devices if d.get("max_output_channels", 0) > 0
              and any(m in str(d.get("name", "")).casefold() for m in VIRTUAL_OUTPUT_MARKERS)]
     found.sort(key=lambda d: (d.get("max_output_channels", 0) != 2, d.get("max_output_channels", 0)))
     return str(found[0]["name"]) if found else None
 
 
-def default_player() -> "TonePlayer":
-    device = virtual_output_device()
+def default_player(allow_default_output: bool = False) -> "TonePlayer":
+    """The tone player: on a virtual device when one is installed, else on the default output.
+
+    When the device list cannot be read, the default output is used only if the caller passes
+    ``allow_default_output``; otherwise DeviceListError propagates and the tone is skipped.
+    """
+    try:
+        device = virtual_output_device()
+    except DeviceListError:
+        if not allow_default_output:
+            raise
+        device = None
     if device:
         return TonePlayer(device=device, amplitude=VIRTUAL_AMPLITUDE)
     return TonePlayer(device=None, amplitude=AUDIBLE_AMPLITUDE)
@@ -160,10 +175,13 @@ def analyse(pcm: np.ndarray, rate: int = ENGINE_SAMPLE_RATE) -> dict:
 def check_process_tap(*, timeout_s: float = 30.0,
                       backend_factory: Optional[Callable[..., ProcessTapBackend]] = None,
                       player_factory: Optional[Callable[[], object]] = None,
-                      app_name: Optional[Callable[[], Optional[str]]] = None) -> DoctorResult:
+                      app_name: Optional[Callable[[], Optional[str]]] = None,
+                      allow_default_output: bool = False) -> DoctorResult:
     """Start and stop the full capture once against a test tone and report what happened.
 
-    Never raises. The optional arguments exist for tests.
+    Never raises. ``allow_default_output`` lets the tone play on the default output when the
+    device list cannot be read; without it that case skips the tone. The other optional
+    arguments exist for tests.
     """
     app_name = app_name or responsible_app_name
     try:
@@ -174,7 +192,12 @@ def check_process_tap(*, timeout_s: float = 30.0,
     if not ok:
         return DoctorResult(False, UNAVAILABLE, why)
     try:
-        player = (player_factory or default_player)()
+        player = player_factory() if player_factory else default_player(allow_default_output)
+    except DeviceListError as exc:
+        return DoctorResult(False, NO_TEST_PLAYER,
+                            "The audio check was skipped: the list of output devices could not be read "
+                            f"({exc}), so the doctor could not find a device you do not hear and did not "
+                            "play the test tone on your speakers.")
     except Exception as exc:
         return DoctorResult(False, NO_TEST_PLAYER, f"No test sound could be played: {exc}")
     chunks: list[tuple[float, bytes]] = []
