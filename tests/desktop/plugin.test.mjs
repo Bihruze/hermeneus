@@ -449,3 +449,38 @@ test('register contributes one pane and one status bar item and opens the event 
   assert.equal(contributions[0].data.placement, 'bottom')
   assert.equal(ctx.socketPath, '/events')
 })
+
+test('the overlay switch posts visible and follows what the backend answers', async () => {
+  let visible = false
+  const ctx = fakeCtx({
+    '/lines': { seq: 1, reset: true, events: [] },
+    '/status': { state: 'live', message: '' },
+    '/overlay': (path, opts) => {
+      if (opts?.method === 'POST') {
+        visible = opts.body.visible
+      }
+
+      return Promise.resolve({ visible, pid: visible ? 7 : null })
+    }
+  })
+  const ctrl = createController(ctx)
+
+  await ctrl.setOverlay(true)
+  assert.deepEqual(ctrl.overlay.get(), { visible: true, busy: false, error: '' })
+  assert.deepEqual(ctx.calls.at(-1), { path: '/overlay', opts: { method: 'POST', body: { visible: true } } })
+
+  visible = false // the overlay closed by itself (session stopped, or its own menu)
+  await ctrl.refreshOverlay()
+  assert.equal(ctrl.overlay.get().visible, false)
+})
+
+test('an overlay refusal shows as an error and leaves the switch off', async () => {
+  const ctx = fakeCtx({
+    '/overlay': () => Promise.reject(new Error('no translation session is running'))
+  })
+  const ctrl = createController(ctx)
+
+  await ctrl.setOverlay(true)
+  assert.equal(ctrl.overlay.get().visible, false)
+  assert.match(ctrl.overlay.get().error, /no translation session/)
+})

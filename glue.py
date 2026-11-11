@@ -36,7 +36,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "context_segments": 3,
     overlay_page.KEY_ENABLED: False,
     overlay_page.KEY_PORT: overlay_page.DEFAULT_PORT,
-    **{k: v for k, v in overlay_settings.DEFAULTS.items() if k != overlay_settings.KEY_AUTO},
+    **overlay_settings.DEFAULTS,
 }
 
 

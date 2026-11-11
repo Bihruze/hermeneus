@@ -105,6 +105,8 @@ hermes hermeneus devices           # audio sources and output devices
 hermes hermeneus run --to tr       # live subtitles in this terminal
 hermes hermeneus status            # the session state
 hermes hermeneus stop              # stop the running session
+hermes hermeneus overlay show      # float the subtitles above other apps (see Subtitle overlay)
+hermes hermeneus overlay hide      # close the overlay; the session keeps running
 hermes hermeneus overlay-page on   # subtitles on a 127.0.0.1 page for OBS (off by default)
 ```
 
@@ -119,7 +121,7 @@ hermes hermeneus overlay-page on   # subtitles on a 127.0.0.1 page for OBS (off 
 | `--voice VOICE_ID` | ElevenLabs voice id for spoken translation. |
 | `--json` | Print every event as one JSON line. |
 
-`doctor`, `devices`, `status`, `stop` and `overlay-page` also take `--json`.
+`doctor`, `devices`, `status`, `stop`, `overlay` and `overlay-page` also take `--json`.
 
 `run` prints one translated line per segment, prefixed with the speaker label Scribe gave it, for example `[s1:speaker_0] ...`. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
 
@@ -152,6 +154,8 @@ In a Hermes session:
 /translate start --to tr --speak --device "External Headphones" --voice <voice id>
 /translate status
 /translate stop
+/translate overlay show
+/translate overlay hide
 ```
 
 `/translate` on its own shows the status. `start` takes the same session flags as `hermes hermeneus run` (`--to`, `--source`, `--speak`, `--device`, `--voice`). The session runs inside that Hermes process and stops when the process exits or the plugin is unloaded. A missing choice ends the command with a message that names the flag to pass; nothing waits for input.
@@ -170,6 +174,17 @@ The pane talks to the Hermes gateway through the plugin's backend routes under `
 > Screenshot placeholder (W16): docs/screenshots/pane-subtitles.png, the Subtitles tab during a session.
 >
 > Screenshot placeholder (W16): docs/screenshots/pane-doctor.png, the Doctor tab.
+
+### Subtitle overlay
+
+The overlay is a strip near the bottom of the screen that floats above every other app, so the subtitles stay in view while you watch a video in Chrome or another app, including a full-screen video. It shows the current translation in large text and the sentence that was heard in small text under it. A line still being spoken appears at once in a lighter colour and its translation takes its place when it arrives. Text that does not fit in the line limit rolls upwards, and older lines leave first.
+
+- Open it with `hermes hermeneus overlay show`, `/translate overlay show`, the **Subtitle overlay** switch in the pane or the overlay button next to the status bar item. It needs a running session. Turn on the `overlay` setting to open it with every session.
+- It closes by itself when the session stops, and with `overlay hide`, the same switch or button, or **Hide overlay** in its menu.
+- It never takes keyboard focus and clicks pass through it to the app underneath. Only the small grip at its left edge takes the mouse: drag the grip to move the strip, right-click it for the width (narrow, medium, wide), **Reset position** and **Hide overlay**. The position and width are remembered for each display.
+- It follows the system light or dark appearance and uses the Hermes Desktop default theme values (font, text colours, speaker colours, radius). A different Desktop skin does not change the overlay.
+- Text size, line count, the original line, background opacity and speaker names are the `overlay_*` settings below. A running overlay applies changed settings at the next `overlay show`.
+- The overlay opens only on the Mac where the request comes from: a slash command from a chat platform such as Telegram, or a Desktop connected to a remote backend, is refused with a message.
 
 ## Configuration
 
@@ -191,6 +206,12 @@ Command flags override the settings for one session.
 | `output_device` | Spoken translation output | str | `""` | | Output device for spoken translation. It must not feed the audio source. |
 | `voice_id` | Voice | str | `""` | | ElevenLabs voice id for spoken translation. Empty uses the default voice Talia. |
 | `context_segments` | Context lines | int | `3` | | Earlier lines sent with each translation request (0 to 10). |
+| `overlay` | Subtitle overlay | bool | `false` | | Open the floating subtitle overlay with every session. It floats above other apps on this Mac and never takes keyboard focus. |
+| `overlay_text_size` | Overlay text size | int | `26` | | Translation text size in the overlay, in points (14 to 64). |
+| `overlay_max_lines` | Overlay lines | int | `2` | | Lines of translation the overlay shows before older text rolls off (1 to 3). |
+| `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
+| `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
+| `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
 
@@ -260,10 +281,11 @@ Prices change; the ElevenLabs page is the reference.
 - **Which audio is captured.** With the process tap you choose one source: one app with its helper processes (for example Google Chrome), or all system audio except Hermeneus itself. Microphones are not captured. With the fallback, Hermeneus reads the virtual device, which carries whatever you route to it.
 - **Permission.** The process tap needs the macOS System Audio Recording permission for the app that runs Hermes (System Settings > Privacy & Security > Screen & System Audio Recording). The virtual device fallback is an input device, so macOS asks for the Microphone permission for that app instead.
 - **Background capture worker.** The process tap runs in a separate Python worker process, started with the session. It stops when the session stops: Hermeneus closes the worker's input, waits up to 5 seconds, then sends SIGTERM and finally SIGKILL. The worker also stops when its input closes because Hermes exited, on SIGTERM, SIGINT or SIGHUP, and at interpreter exit. It gets a minimal environment (PATH, HOME, TMPDIR, LANG, LC_ALL, LC_CTYPE and its own PYTHONPATH), so no API key, token or other secret of the Hermes process reaches it. The fallback runs no extra process.
+- **Overlay window process.** The subtitle overlay is a separate Python process (`python -m hermeneus_engine.overlay`, started with the interpreter Hermes runs on and Hermes's import path), because macOS windows belong to a process's main thread. It runs only while you have it open, draws two borderless windows above other apps on every Space and next to full-screen windows, and reads subtitles from the local session socket. It ends when the session stops, on `overlay hide` or SIGTERM. It needs no macOS permission, opens no network connection and no TCP port, and does not read the keyboard; it only takes mouse clicks on its own grip. It refuses to start without a desktop session (over SSH or in a background service).
 - **Session thread.** One session runs at a time, inside the Hermes process that started it, on its own thread. Unloading the plugin stops it.
 - **Local socket.** Other Hermes processes reach the session through a Unix domain socket at `<HERMES_HOME>/plugin-data/hermeneus/run/sock` (by default `~/.hermes/plugin-data/hermeneus/run/sock`), mode 0600 inside a 0700 directory. The Desktop pane uses routes mounted on Hermes's own server.
 - **Overlay page (off by default).** Only after `hermes hermeneus overlay-page on` (setting `overlay_page`), the process that runs the session listens on TCP port 47821 (`overlay_page_port`) on 127.0.0.1 only, never on another interface, while the session runs. It serves one page and a Server-Sent Events stream of the subtitle lines (original, translation, speaker number, session state). Every address needs a random token that is new each session; requests without it get 403, and requests whose Host header is not `127.0.0.1` or `localhost` with that port get 403, which blocks DNS rebinding. It answers GET and HEAD only, sends no CORS headers, has no control routes and loads nothing from the internet. It stops when the session ends, when the plugin is unloaded and with its process. Any program running as you on this Mac that learns the address can read the subtitles.
-- **Files written.** A lock file at `run/lock` next to the socket holds the owning process id, its kind (CLI, Hermes or gateway), the start time and the socket path, and is emptied when the session stops. Nothing else is written.
+- **Files written.** A lock file at `run/lock` next to the socket holds the owning process id, its kind (CLI, Hermes or gateway), the start time and the socket path, and is emptied when the session stops. The subtitle overlay keeps four small files in `<HERMES_HOME>/plugin-data/hermeneus/overlay/` (a 0700 directory): `lock` (its process id while it runs), `settings.json` (the overlay settings it was given), `positions.json` (its place and width per display) and `overlay.log` (its error output, replaced at each start). No subtitle text is written. Nothing else is written.
 - **No audio or transcript stored.** Subtitles stay in memory, the last 200 lines, and are gone when the session ends. No audio and no transcript is written to disk.
 - **Shell commands.** Hermeneus runs `system_profiler SPAudioDataType -json` (read only) to read audio device names and to check that spoken output cannot be captured again. The process tap worker is started as `python -m hermeneus_engine.capture._tap_worker` with the interpreter Hermes runs on.
 - **Third-party software.** BlackHole 2ch or VB-Cable is needed only for the fallback. You install it yourself from its official source; Hermeneus does not bundle, download or install any driver.
@@ -333,6 +355,8 @@ To undo the setup, choose your speakers again in System Settings > Sound and del
 
 - macOS only in this release. Windows and Linux support is planned.
 - One session at a time. A second start reports the running session.
+- The overlay is macOS only. A Windows equivalent (a layered, topmost, non-activating window behind the same interface in `hermeneus_engine/overlay/app.py`) is designed but not built.
+- The overlay was measured above a native full-screen window in its own Space on one built-in display. Several displays and moving between ordinary Spaces were not measured.
 - The doctor cannot read the System Audio Recording permission and shows it as a warning.
 - The process tap reads audio before the system output volume is applied, so the volume setting does not change what Hermeneus hears.
 - Spoken translation covers 32 languages and needs an output device.
