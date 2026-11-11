@@ -537,6 +537,8 @@ def test_original_follows_the_translation_when_it_rolls():
     view = build_view(m, 0, width=20, measure=chars, max_lines=1, show_speaker=False, show_original=True)
     assert "".join(r.text for r in view.lines[0]).endswith("dokuz on")
     assert view.original.startswith("\u2026") and view.original.endswith("eight")
+    # Matching share: 2 of 10 translation words shown, so 2 of 8 original words.
+    assert view.original == "\u2026seven eight"
     view = build_view(m, 0, width=60, measure=chars, max_lines=1, show_speaker=False, show_original=True)
     assert view.original == "one two three four five six seven eight"  # nothing rolled: the start
     assert fit_tail("the quick brown fox", 8, chars, Run("", PENDING)) == "\u2026fox"

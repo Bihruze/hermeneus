@@ -10,6 +10,7 @@ keeps the newest ones, so a long passage rolls upwards like film subtitles.
 
 from __future__ import annotations
 
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -350,19 +351,29 @@ def build_view(model: OverlayModel, now: float, *, width: float, measure: Measur
     runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original)
     lines = layout(runs, width, measure, max_lines, show_speaker) if runs else ()
     if original:
-        fit = fit_tail if _rolled(runs[-1], lines) else fit_head
-        original = fit(original, width, original_measure or measure, Run(original, PENDING))
+        share = _shown_share(runs[-1], lines)
+        if share < 1.0:
+            # The translation rolled: show the matching end of the original, cut at its front.
+            words = original.split()
+            keep = max(1, math.ceil(len(words) * share))
+            tail = " ".join(words[-keep:])
+            original = fit_tail(("\u2026" if keep < len(words) else "") + tail, width,
+                                original_measure or measure, Run(original, PENDING))
+        else:
+            original = fit_head(original, width, original_measure or measure, Run(original, PENDING))
     return View(lines, original, notice)
 
 
-def _rolled(newest: Run, lines: tuple[tuple[Run, ...], ...]) -> bool:
-    """True when the start of the newest translation rolled off the top.
-
-    Then the original shows its end too, so both lines show the same part of
-    the sentence; otherwise both show its start.
-    """
-    shown = " ".join(" ".join(r.text.split()) for row in lines for r in row if r.kind not in (LABEL, MARK))
-    return " ".join(newest.text.split()) not in shown
+def _shown_share(newest: Run, lines: tuple[tuple[Run, ...], ...]) -> float:
+    """The share of the newest translation's words still on screen (1.0 when its start is shown)."""
+    words = newest.text.split()
+    shown = " ".join(r.text for row in lines for r in row if r.kind not in (LABEL, MARK)).split()
+    if not words:
+        return 1.0
+    for k in range(len(words), 0, -1):  # the longest end of the translation that ends what is shown
+        if shown[-k:] == words[-k:]:
+            return k / len(words)
+    return 1.0
 
 
 def fit_tail(text: str, width: float, measure: Measure, run: Run) -> str:
