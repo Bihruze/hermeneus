@@ -44,7 +44,7 @@ You need:
 
    ![The ELEVENLABS key field in Settings > Tools & Keys, holding a test key](docs/media/setup-key-saved.png)
 
-4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again**.
+4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again** (see [the permission](#the-system-audio-recording-permission) if it still fails).
 5. **Start.** The translation model is your main Hermes model, unless you pinned one for **Live translation**. The subtitle language is your Hermes or system language. Both are filled in. The source is all system audio by default. Press **Start**, then play a video or a stream with speech in it. Subtitles appear in the pane and in the floating strip above your other apps.
 
 If the pane is closed, click **Hermeneus** in the status bar. Until setup is complete, that click opens the pane instead of starting. After the first run, one click on **Hermeneus** starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
@@ -81,7 +81,7 @@ macOS asks for this permission the first time Hermeneus captures audio through a
 
 1. Click **Allow** when macOS shows the prompt.
 2. If you clicked **Don't Allow** or no prompt appeared, open **System Settings > Privacy & Security > Screen & System Audio Recording**. Under **System Audio Recording Only**, turn on the app that runs Hermes. The full Screen & System Audio Recording entry also works, but Hermeneus needs only the audio part.
-3. Quit and reopen that app, then run the check again.
+3. Run the check again: **Check again** in the setup, or `hermes hermeneus doctor`. Each check captures through a new worker process, so the app does not have to restart first. If the check still reports silence, quit and reopen that app and check once more.
 
 Without the permission macOS delivers silence instead of audio. The setup, the doctor and a running session all report that, with the fix above. A session waits up to 30 seconds for capture to start while the prompt is open.
 
@@ -506,7 +506,7 @@ It checks the macOS version, which capture backends can run, the System Audio Re
 | `macOS` | Older than 13, or older than 14.2 (warning: only the fallback works) | Update macOS to 14.2 or later, or set up the fallback. |
 | `capture: process-tap` | Process taps are not available on this Mac | Process taps need macOS 14.2 or later; use the fallback on older macOS. |
 | `capture: virtual-device` | No BlackHole or VB-Cable input found | Needed only for the fallback. Install BlackHole 2ch and run the doctor again. |
-| `permission: system audio recording` | The test tone arrived as silence, or the check was skipped with `--no-audio-check` (warning) | Allow the app that runs Hermes under **System Settings > Privacy & Security > Screen & System Audio Recording** (System Audio Recording Only is enough), quit and reopen it, and run the doctor again. |
+| `permission: system audio recording` | The test tone arrived as silence, or the check was skipped with `--no-audio-check` (warning) | Allow the app that runs Hermes under **System Settings > Privacy & Security > Screen & System Audio Recording** (System Audio Recording Only is enough) and run the doctor again. If it still fails, quit and reopen that app first. |
 | `audio source` | No capture backend can run | See the capture lines above it. |
 | `permission: microphone (virtual device)` | Fallback only; the first start asks macOS | Allow the app that runs Hermes under **Privacy & Security > Microphone**, then start again. |
 | `system sound reaches the virtual device` | Fallback only; the system output does not include the virtual device | Create a Multi-Output Device and choose it as the system output (see the fallback). |
