@@ -69,7 +69,7 @@ from Foundation import NSObject
 
 from ..overlay_settings import OverlaySettings
 from . import theme
-from .model import FAILED, LABEL, PENDING, Run, View
+from .model import FAILED, LABEL, MARK, PENDING, Run, View
 from .placement import MIN_WIDTH_PT, WIDTH_PRESETS, Display, Rect, display_key
 
 PAD_X = 20.0  # text inset from the strip's sides; the grip and the resize handle sit inside them
@@ -321,7 +321,7 @@ class MacPanel:
         if font is None:
             size = settings.text_size
             stack = self.palette().font
-            if kind == LABEL:
+            if kind in (LABEL, MARK):
                 font = resolve_font(stack, round(size * LABEL_SCALE), theme.WEIGHT_LABEL)
             elif kind == "original":
                 font = resolve_font(stack, max(12, round(size * ORIGINAL_SCALE)), theme.WEIGHT_TEXT)
@@ -333,7 +333,7 @@ class MacPanel:
     def measure(self, text: str, run: Run, settings: OverlaySettings) -> float:
         attrs = {NSFontAttributeName: self._font_for(run.kind, settings)}
         width = NSAttributedString.alloc().initWithString_attributes_(text, attrs).size().width
-        return width + (6.0 if run.kind == LABEL and text.strip() else 0.0)
+        return width + (6.0 if run.kind in (LABEL, MARK) and text.strip() else 0.0)
 
     def measure_original(self, text: str, settings: OverlaySettings) -> float:
         attrs = {NSFontAttributeName: self._font_for("original", settings)}
@@ -496,6 +496,9 @@ class MacPanel:
         font = self._font_for(run.kind, s)
         if run.kind == LABEL:
             color = p.speaker(run.speaker or 1)
+            text = run.text + "  "
+        elif run.kind == MARK:
+            color = p.failed_color  # --ui-red, the colour the pane gives a failed line's caption
             text = run.text + "  "
         else:
             # A line still being spoken and an untranslated line use secondary text (74%), as on the page.

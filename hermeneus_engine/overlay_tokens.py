@@ -18,6 +18,8 @@ Token to overlay role, the same on both surfaces:
 ``--ui-text-primary``       translation (``styles.css:364``, base at 94%)
 ``--ui-text-secondary``     original and a line still being spoken (74%, :365)
 ``--ui-text-tertiary``      notices (54%, :366)
+``--ui-red``                "not translated" marker on a failed line, as the pane
+                            marks it (``styles.css:243``, dark ``:613``)
 ``--ui-stroke-secondary``   hairline, as on the popover (``popover.tsx:31``)
 ``--ui-blue`` ... ``--ui-yellow``  speaker colours, in the pane's order
                             (``styles.css:243-249``, dark ``:613-615``)
@@ -111,6 +113,12 @@ class Palette:
     radius_px: float = FALLBACK_RADIUS_PX
     font: str = FALLBACK_FONT
     source: str = "fallback"
+    failed: Optional[Rgba] = None  # --ui-red; None means the nous value for this mode
+
+    @property
+    def failed_color(self) -> Rgba:
+        """The colour of the "not translated" marker, as the pane marks a failed line (``--ui-red``)."""
+        return self.failed if self.failed is not None else _RED[self.dark]
 
     def speaker(self, number: int) -> Rgba:
         return self.speakers[(number - 1) % len(self.speakers)]
@@ -132,6 +140,8 @@ def _nous(dark: bool) -> Palette:
                    speakers=tuple(Rgba.hex(s) for s in speakers))
 
 
+# --ui-red, light styles.css:243 and dark :613; the pane colours a failed line's caption with it.
+_RED = {False: Rgba.hex("#cf2d56"), True: Rgba.hex("#e75e78")}
 FALLBACK = {False: _nous(False), True: _nous(True)}
 
 
@@ -201,9 +211,14 @@ def palette_from_payload(payload: Any) -> Palette:
     font = payload.get("font", FALLBACK_FONT)
     if not isinstance(font, str) or len(font) > 300:
         raise ThemeError("font must be a short string")
+    failed = None
+    if colors.get("failed") is not None:  # optional: a pane from before this field sends none
+        failed = parse_color(colors.get("failed"))
+        if failed is None:
+            raise ThemeError("colors.failed is not a CSS colour")
     name = payload.get("name", "")
     return Palette(dark=mode == "dark", speakers=speaker_colors, radius_px=float(radius), font=font,
-                   source=f"desktop:{name}"[:80] if isinstance(name, str) else "desktop", **parsed)
+                   source=f"desktop:{name}"[:80] if isinstance(name, str) else "desktop", failed=failed, **parsed)
 
 
 def palette_to_json(p: Palette) -> str:
@@ -216,8 +231,10 @@ def palette_from_json(raw: str) -> Optional[Palette]:
         data = json.loads(raw)
         speakers = tuple(Rgba(**c) for c in data.pop("speakers"))
         colors = {k: Rgba(**data.pop(k)) for k in COLOR_TOKENS}
+        failed = Rgba(**data["failed"]) if data.get("failed") else None
         return Palette(speakers=speakers, dark=bool(data["dark"]), radius_px=float(data.get("radius_px", FALLBACK_RADIUS_PX)),
-                       font=str(data.get("font", FALLBACK_FONT)), source=str(data.get("source", "desktop")), **colors)
+                       font=str(data.get("font", FALLBACK_FONT)), source=str(data.get("source", "desktop")),
+                       failed=failed, **colors)
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
 
@@ -226,7 +243,7 @@ def css_vars(p: Palette) -> dict:
     """The palette as the 127.0.0.1 page's CSS variables."""
     out = {"--surface": p.surface.css(), "--text-primary": p.text.css(), "--text-secondary": p.text_secondary.css(),
            "--text-tertiary": p.text_tertiary.css(), "--stroke": p.stroke.css(), "--radius": f"{p.radius_px}px",
-           "--font-sans": p.font}
+           "--font-sans": p.font, "--failed": p.failed_color.css()}
     for i, color in enumerate(p.speakers[:6], start=1):
         out[f"--speaker-{i}"] = color.css()
     return out

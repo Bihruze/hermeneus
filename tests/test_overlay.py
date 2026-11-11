@@ -16,7 +16,7 @@ from hermeneus_engine.overlay import control
 from hermeneus_engine.overlay.app import OverlayApp
 from hermeneus_engine.overlay.follower import follow
 from hermeneus_engine.overlay.model import (FAILED, LABEL, PENDING, TRANSLATED, OverlayModel, Run, build_view,
-                                            compose, fit_head, layout, wrap)
+                                            compose, fit_head, fit_tail, layout, wrap, MARK)
 from hermeneus_engine.overlay.placement import Display, Positions, Rect, Spot, frame_for, spot_for
 from hermeneus_engine.overlay.service import OverlayService
 
@@ -90,10 +90,11 @@ def test_failed_line_shows_its_original_and_speaker_labels_follow_relabel():
     m.apply(line(2, "b", "failed", "Fast talk", "", "s1:speaker_1"), 0)
     runs, _, _ = compose(m, 0, show_speaker=True, show_original=True)
     assert [(r.text, r.kind) for r in runs] == [("Speaker 1", LABEL), ("Merhaba", TRANSLATED),
-                                                ("Speaker 2", LABEL), ("Fast talk", FAILED)]
+                                                ("Speaker 2", LABEL), ("Not translated", MARK),
+                                                ("Fast talk", FAILED)]
     m.apply({"type": "relabel", "seq": 3, "from": "s1:speaker_1", "to": "s1:speaker_0"}, 0)
     runs, _, _ = compose(m, 0, show_speaker=True, show_original=True)
-    assert [r.text for r in runs] == ["Speaker 1", "Merhaba", "Fast talk"]
+    assert [r.text for r in runs] == ["Speaker 1", "Merhaba", "Not translated", "Fast talk"]
 
 
 def test_reset_and_new_owner_hello_drop_lines_and_quiet_lines_clear():
@@ -525,3 +526,32 @@ def test_show_spawns_the_child_with_the_allowlisted_env(data_dir, monkeypatch):
 
     control.show(data_dir, ovs.OverlaySettings(), session_running=True, popen=popen, **OK)
     assert "ELEVENLABS_API_KEY" not in seen and "SOME_PROVIDER_TOKEN" not in seen and "PYTHONPATH" in seen
+
+
+
+def test_original_follows_the_translation_when_it_rolls():
+    # Before: the translation showed its end while the original showed its start (A3 re-audit N1).
+    m = OverlayModel()
+    m.apply(line(1, "a", "translated", "one two three four five six seven eight",
+                 "bir iki üç dört beş altı yedi sekiz dokuz on"), 0)
+    view = build_view(m, 0, width=20, measure=chars, max_lines=1, show_speaker=False, show_original=True)
+    assert "".join(r.text for r in view.lines[0]).endswith("dokuz on")
+    assert view.original.startswith("\u2026") and view.original.endswith("eight")
+    view = build_view(m, 0, width=60, measure=chars, max_lines=1, show_speaker=False, show_original=True)
+    assert view.original == "one two three four five six seven eight"  # nothing rolled: the start
+    assert fit_tail("the quick brown fox", 8, chars, Run("", PENDING)) == "\u2026fox"
+
+
+def test_a_failed_line_carries_a_marker():
+    # Before: a failed line looked like a line still being spoken (A3 re-audit N2).
+    m = OverlayModel()
+    m.apply(line(1, "a", "failed", "Fast talk", "", "s1:speaker_0"), 0)
+    m.apply(line(2, "b", "partial", "still talking", "", "s1:speaker_0"), 0)
+    runs, _, _ = compose(m, 0, show_speaker=False, show_original=False)
+    assert [(r.text, r.kind) for r in runs] == [("Not translated", MARK), ("Fast talk", FAILED),
+                                                ("still talking", PENDING)]
+    rows = layout(runs, 200, chars, 2, False)
+    assert rows[0][0].kind == MARK
+    assert tok.FALLBACK[False].failed_color == tok.Rgba.hex("#cf2d56")
+    assert tok.FALLBACK[True].failed_color == tok.Rgba.hex("#e75e78")
+    assert tok.css_vars(tok.FALLBACK[True])["--failed"] == tok.Rgba.hex("#e75e78").css()
