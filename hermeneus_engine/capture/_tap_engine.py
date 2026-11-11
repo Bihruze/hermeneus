@@ -1,12 +1,13 @@
 """One process tap session: tap, private aggregate device, IOProc and conversion.
 
 This runs inside the capture worker process (see ``_tap_worker``). Two readers
-exist. The default, ``portaudio``, opens the private aggregate as a PortAudio
-input and drains it with blocking reads, so no Python code runs on the realtime
-thread (see ``_pa_reader``). The ``ioproc`` reader installs an IOProc through
-PyObjC whose Python block only copies each buffer into a queue; it is kept as
-the fallback when sounddevice is not importable. Either way a converter thread
-resamples to engine format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
+exist. The default, ``ioproc``, installs an IOProc through PyObjC whose Python
+block only copies each buffer into a queue; the worker is otherwise idle, so the
+block gets the GIL at once. The ``portaudio`` reader opens the private aggregate
+as a PortAudio input and drains it without a Python callback (see
+``_pa_reader``); it measured worse in the worker (see ``_tap_worker.main``) and
+stays available on request. Either way a converter thread resamples to engine
+format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
 converter thread also:
 
 * follows the processes the tap should cover (app helpers that start later,
