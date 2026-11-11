@@ -400,6 +400,8 @@ export function createController(ctx, clock = () => Date.now()) {
   const store = atom(createSubtitleState())
   const link = atom({ state: 'connecting', error: '' })
   const action = atom({ busy: false, error: '' })
+  // The native subtitle overlay (hermeneus_engine/overlay), shown and hidden through POST /overlay.
+  const overlay = atom({ visible: false, busy: false, error: '' })
   const stored = ctx.storage.get('prefs', {})
   const prefs = atom({ ...DEFAULT_PREFS, ...(stored && typeof stored === 'object' ? stored : {}) })
 
@@ -491,6 +493,38 @@ export function createController(ctx, clock = () => Date.now()) {
     if (quiet >= (running ? QUIET_WHILE_RUNNING_MS : QUIET_WHILE_IDLE_MS)) {
       void resync()
     }
+
+    // The overlay closes by itself when the session stops or from its own menu.
+    if (running || overlay.get().visible) {
+      void refreshOverlay()
+    }
+  }
+
+  async function refreshOverlay() {
+    try {
+      const result = await ctx.rest('/overlay')
+
+      if (result && typeof result.visible === 'boolean' && !overlay.get().busy) {
+        overlay.set({ ...overlay.get(), visible: result.visible })
+      }
+    } catch {
+      // The next tick asks again.
+    }
+  }
+
+  async function setOverlay(visible) {
+    if (overlay.get().busy) {
+      return
+    }
+
+    overlay.set({ ...overlay.get(), busy: true, error: '' })
+
+    try {
+      const result = await ctx.rest('/overlay', { method: 'POST', body: { visible } })
+      overlay.set({ visible: result?.visible === true, busy: false, error: '' })
+    } catch (error) {
+      overlay.set({ ...overlay.get(), busy: false, error: errorText(error) })
+    }
   }
 
   function setPrefs(patch) {
@@ -533,7 +567,23 @@ export function createController(ctx, clock = () => Date.now()) {
     void resync()
   }
 
-  return { action, connect, link, onFrame, prefs, resync, rest: ctx.rest, setPrefs, start, stop, store, tick }
+  return {
+    action,
+    connect,
+    link,
+    onFrame,
+    overlay,
+    prefs,
+    refreshOverlay,
+    resync,
+    rest: ctx.rest,
+    setOverlay,
+    setPrefs,
+    start,
+    stop,
+    store,
+    tick
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -585,7 +635,12 @@ const EN = {
   doctorError: error => `Doctor failed: ${error}`,
   doctorShape: 'Doctor returned an answer this pane cannot read.',
   check: { ok: 'ok', warn: 'warning', fail: 'failed' },
-  statusBar: state => `Hermeneus: ${state}`
+  statusBar: state => `Hermeneus: ${state}`,
+  overlay: 'Subtitle overlay',
+  overlayHint: 'Floats the current line above other apps on this Mac',
+  showOverlay: 'Show subtitle overlay',
+  hideOverlay: 'Hide subtitle overlay',
+  overlayError: error => `Overlay: ${error}`
 }
 
 const LOCALES = { en: EN }
@@ -684,6 +739,7 @@ const S = {
     fontSize: '0.6875rem',
     color: 'var(--ui-text-tertiary)'
   },
+  chipGroup: { display: 'inline-flex', alignItems: 'center', gap: sp(1) },
   chipText: { maxWidth: sp(64), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   visuallyHidden: {
     position: 'absolute',
@@ -797,6 +853,7 @@ function Controls({ ctrl }) {
   const state = useValue(ctrl.store)
   const prefs = useValue(ctrl.prefs)
   const action = useValue(ctrl.action)
+  const overlay = useValue(ctrl.overlay)
   const devices = useQuery({
     // Outputs depend on the source: the backend lists only the outputs that are safe to
     // speak into with that source (docs/events.md, GET /devices).
@@ -889,6 +946,21 @@ function Controls({ ctrl }) {
               t('speak')
             ]
           }),
+          // Look-and-feel proposal for Seher: the overlay switch sits with the session controls.
+          jsxs('label', {
+            style: S.switchLabel,
+            title: t('overlayHint'),
+            children: [
+              jsx(Switch, {
+                'aria-label': t('overlay'),
+                checked: running && overlay.visible,
+                disabled: !running || overlay.busy,
+                onCheckedChange: on => void ctrl.setOverlay(on),
+                size: 'xs'
+              }),
+              t('overlay')
+            ]
+          }),
           jsx(Picker, {
             disabled: running || !prefs.speak || !speakable || outputs.length === 0,
             label: t('output'),
@@ -917,7 +989,8 @@ function Controls({ ctrl }) {
       }),
       devices.isError
         ? jsx('div', { role: 'alert', style: S.alert, children: t('devicesError', errorText(devices.error)) })
-        : null
+        : null,
+      overlay.error ? jsx('div', { role: 'alert', style: S.alert, children: t('overlayError', overlay.error) }) : null
     ]
   })
 }
@@ -1195,9 +1268,12 @@ function StatusChip({ ctrl }) {
   const state = useValue(ctrl.store)
   const status = state.status?.state
   const label = stateLabel(t, status)
-  const last = RUNNING_STATES.has(status) && state.lastTranslated ? state.lastTranslated.translation : ''
+  const overlay = useValue(ctrl.overlay)
+  const running = RUNNING_STATES.has(status)
+  const last = running && state.lastTranslated ? state.lastTranslated.translation : ''
+  const overlayLabel = overlay.visible ? t('hideOverlay') : t('showOverlay')
 
-  return jsx(Tip, {
+  const chip = jsx(Tip, {
     label: last || t('statusBar', label),
     children: jsxs('span', {
       'aria-label': t('statusBar', label),
@@ -1209,6 +1285,30 @@ function StatusChip({ ctrl }) {
         last ? jsx('span', { style: S.chipText, children: truncate(last, 80) }) : null
       ]
     })
+  })
+
+  if (!running) {
+    return chip
+  }
+
+  // Look-and-feel proposal for Seher: one icon button next to the chip shows or hides the overlay.
+  return jsxs('span', {
+    style: S.chipGroup,
+    children: [
+      chip,
+      jsx(Tip, {
+        label: overlayLabel,
+        children: jsx(Button, {
+          'aria-label': overlayLabel,
+          'aria-pressed': overlay.visible,
+          disabled: overlay.busy,
+          onClick: () => void ctrl.setOverlay(!overlay.visible),
+          size: 'icon-xs',
+          variant: overlay.visible ? 'secondary' : 'ghost',
+          children: jsx(icons.PanelBottom, {})
+        })
+      })
+    ]
   })
 }
 
