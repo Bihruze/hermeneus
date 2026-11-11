@@ -12,8 +12,13 @@
   they are one device (BlackHole uses one name for both sides on macOS).
   The MME host API cuts names to 31 characters, so the same cable can also
   appear as "CABLE Input (VB-Audio Virtual C" or "CABLE Output (VB-Audio Virtual ".
-  The rule therefore keys on the leading "CABLE[-X] Input|Output (VB" and
-  ignores the rest of the name.
+  The rule therefore keys on the product part before " Input (VB" or
+  " Output (VB" and ignores the rest: CABLE, CABLE-A to CABLE-D, Hi-Fi Cable,
+  VoiceMeeter, VoiceMeeter Aux, VoiceMeeter VAIO3. Different products, and
+  differently numbered cables, never share a key. Windows names an endpoint
+  "{name} ({card})", for example "CABLE Output (VB-Audio Virtual Cable)"; the
+  Hi-Fi Cable and VoiceMeeter strings are modelled on that scheme, not read
+  from a machine (README, Windows assumptions).
 """
 
 from __future__ import annotations
@@ -49,17 +54,16 @@ def prefer_one(matches: Sequence[int], devices: Sequence[dict], hostapis: Callab
 
 
 _VB_SIDE = re.compile(r"\b(input|output)\b")
-# "CABLE Input (VB-Audio Virtual Cable)", "CABLE-A Output (VB-Audio Cable A)", and the
-# 31-character MME forms of both. The suffix after CABLE tells numbered cables apart.
-_VB_CABLE = re.compile(r"^cable(-[a-z0-9]+)?\s+(?:input|output)\s*\(vb")
+# "<product> Input (VB...)" / "<product> Output (VB...)", including MME's 31-character cuts.
+_VB_PAIR = re.compile(r"^(?P<product>\S.*?)\s+(?:input|output)\s*\(vb")
 
 
 def loopback_pair_key(name: str) -> Optional[str]:
     """A key shared by both sides of a VB-Audio cable, or None for any other device."""
     folded = (name or "").casefold().strip()
-    m = _VB_CABLE.match(folded)
+    m = _VB_PAIR.match(folded)
     if m:
-        return "vb-cable" + (m.group(1) or "")
+        return "vb:" + re.sub(r"\s+", " ", m.group("product"))
     if "vb-audio" not in folded:
         return None
     return re.sub(r"\s+", " ", _VB_SIDE.sub("", folded)).strip()

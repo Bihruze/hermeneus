@@ -512,7 +512,7 @@ From the A5 review (parity and packaging):
 
 - Hermes on Windows puts plugin dependencies on `sys.path` the way it does on macOS, so the worker finds them through the parent's search path.
 - PortAudio lists each endpoint once per host API under the same name, and the WASAPI entry plays (the device list shape is modelled, not read from a Windows machine).
-- The VB-CABLE names are "CABLE Input (VB-Audio Virtual Cable)" and "CABLE Output (VB-Audio Virtual Cable)" (numbered cables "CABLE-A Input" and so on).
+- The VB-Audio device names follow "{product} Input|Output ({card})", for example "CABLE Input (VB-Audio Virtual Cable)" and "CABLE Output (VB-Audio Virtual Cable)", "CABLE-A Input", "Hi-Fi Cable Input" and "VoiceMeeter Aux Output", and MME cuts them to 31 characters. Only the CABLE form is confirmed in published material; the feedback guard pairs the two sides of each product by that pattern.
 - A hosted Windows runner has no audio endpoint (so CI proves installs, imports, the lock, the transport and the doctor, not capture).
 - An app that quits keeps the stream open and silent until it starts again, and the capture follows the new process.
 
