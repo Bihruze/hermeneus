@@ -201,14 +201,20 @@ class FlashSpeaker:
         self.voice_id = config.voice_id
         self.status_message = ""     # read by the session and shown with its status
         self._voice_failed = ""
+        self.last_error = ""         # latest server error for a segment; the session shows it
         self.connects = 0
         self.metrics: list[UtteranceMetrics] = []
 
     # ------------------------------------------------------------- public API
 
     async def start(self, language: Optional[str] = None) -> None:
-        """Open playback (runs the feedback check) and, given a language, pre-open the socket."""
-        self._playback.start()
+        """Open playback (runs the feedback check) and, given a language, pre-open the socket.
+
+        The feedback check reads the audio inventory (about 0.3 s measured with
+        system_profiler), so playback opens on a worker thread and the event
+        loop keeps moving audio and subtitles meanwhile.
+        """
+        await asyncio.to_thread(self._playback.start)
         if language:
             async with self._conn_lock:
                 await self._ensure_connected(normalize_language(language))
@@ -254,6 +260,11 @@ class FlashSpeaker:
         except Exception as exc:
             self._fail(ctx, exc)
             raise TtsError(self._redact(str(exc))) from None
+
+    def health(self) -> str:
+        """Empty while spoken output can play; otherwise why it cannot (the output device is gone)."""
+        check = getattr(self._playback, "health", None)
+        return check() if callable(check) else ""
 
     async def close(self) -> None:
         """Close the socket and stop playback. Safe to call more than once."""
@@ -341,6 +352,10 @@ class FlashSpeaker:
         status = getattr(getattr(exc, "response", None), "status_code", None)
         if status in (401, 403):
             return f"ElevenLabs rejected the API key for spoken translation (HTTP {status})."
+        if status == 429:
+            return ("ElevenLabs is rate limiting spoken translation or the quota is used up (HTTP 429).")
+        if status == 402:
+            return "ElevenLabs reports no credits left for spoken translation (HTTP 402)."
         if status is not None:
             return f"ElevenLabs refused the spoken translation connection (HTTP {status})."
         return self._redact(f"Could not connect to ElevenLabs for spoken translation: "
@@ -455,6 +470,7 @@ class FlashSpeaker:
                 self._on_voice_unavailable(text)
                 return
             log.warning("spoken output server message: %s", text)
+            self.last_error = text
             if ctx is not None:
                 self._end(ctx, "failed", error=text)
 
