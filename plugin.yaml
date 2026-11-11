@@ -57,3 +57,33 @@ config_schema:
     default: 3
     label: "Context lines"
     description: "Earlier lines sent with each translation request (0 to 10)."
+  overlay:
+    type: bool
+    default: false
+    label: "Subtitle overlay"
+    description: "Open the floating subtitle overlay with every session. It floats above other apps on this Mac and never takes keyboard focus."
+  overlay_text_size:
+    type: int
+    default: 26
+    label: "Overlay text size"
+    description: "Translation text size in the overlay, in points (14 to 64)."
+  overlay_max_lines:
+    type: int
+    default: 2
+    label: "Overlay lines"
+    description: "Lines of translation the overlay shows before older text rolls off (1 to 3)."
+  overlay_show_original:
+    type: bool
+    default: true
+    label: "Overlay shows the original"
+    description: "Show the heard sentence in small text under its translation."
+  overlay_opacity:
+    type: int
+    default: 80
+    label: "Overlay background opacity"
+    description: "Background opacity of the overlay in percent (0 to 100). The text stays fully opaque."
+  overlay_show_speaker:
+    type: bool
+    default: true
+    label: "Overlay speaker names"
+    description: "Show Speaker 1, Speaker 2 and their colours in the overlay."

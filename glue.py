@@ -15,6 +15,7 @@ from typing import Any, Optional, Sequence
 
 from .hermeneus_engine.components import HermesServices
 from .hermeneus_engine.contracts import ChatMessage, TranslationError
+from .hermeneus_engine.overlay_settings import DEFAULTS as OVERLAY_DEFAULTS
 
 PLUGIN_NAME = "hermeneus"
 AUX_TASK = "live_translate"
@@ -33,6 +34,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "output_device": "",
     "voice_id": "",
     "context_segments": 3,
+    **OVERLAY_DEFAULTS,
 }
 
 
