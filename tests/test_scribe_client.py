@@ -333,6 +333,46 @@ async def test_late_language_event_does_not_label_the_next_commit(fake):
     await client.close()
 
 
+async def test_language_event_before_its_commit_is_applied_without_waiting(fake):
+    # Scribe sends committed_transcript_with_timestamps first on VAD commits
+    # (W20 capture V_default.jsonl: 15 of 15 commits).
+    async def script(conn):
+        await conn.started()
+        await conn.send("committed_transcript_with_timestamps", text="Hello world.", language_code="en")
+        await conn.send("committed_transcript", text="Hello world.", segment_index=0)
+        await conn.send("partial_transcript", text="next")
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [script]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(language_wait=30.0, drain_quiet=0.1))
+    await client.start()
+    events = await collect(client, lambda ev, out: isinstance(ev, PartialTranscript), timeout=2.0)
+    [committed] = of(events, CommittedTranscript)
+    assert committed.language_code == "en"
+    assert client.stats.languages_missed == 0
+    await client.close()
+
+
+async def test_early_language_event_for_other_text_does_not_release_commit(fake):
+    async def script(conn):
+        await conn.started()
+        await conn.send("committed_transcript_with_timestamps", text="something else", language_code="de")
+        await conn.send("committed_transcript", text="Hello world.", segment_index=0)
+        await conn.send("partial_transcript", text="next")
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [script]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(language_wait=0.15, drain_quiet=0.1))
+    await client.start()
+    events = await collect(client, lambda ev, out: isinstance(ev, PartialTranscript))
+    [committed] = of(events, CommittedTranscript)
+    assert committed.language_code is None
+    assert client.stats.languages_missed == 1
+    await client.close()
+
+
 async def test_empty_commit_is_skipped_with_its_diarization(fake):
     async def script(conn):
         await conn.started()
@@ -377,14 +417,18 @@ async def test_audio_chunks_from_capture_thread(fake):
     await client.close()
     chunks = [m for m in conn.received if m["message_type"] == "input_audio_chunk"]
     sizes = [len(base64.b64decode(m["audio_base_64"])) for m in chunks]
-    assert sizes[:-1] == [3200] * 10 and sizes[-1] == 0
+    assert sizes[:-1] == [640] * 50 and sizes[-1] == 0
     assert all(m["sample_rate"] == 16000 for m in chunks)
-    assert [m["commit"] for m in chunks] == [False] * 10 + [True]
+    assert [m["commit"] for m in chunks] == [False] * 50 + [True]
     assert conn.audio() == bytes(sent)
     assert "previous_text" not in chunks[0]
     assert set(chunks[0]) == {"message_type", "audio_base_64", "commit", "sample_rate"}
     await asyncio.wait_for(conn.closed_by_client.wait(), 2)
     assert conn.ws.close_code == 1000
+
+
+def test_default_chunk_is_20_ms():
+    assert ScribeTuning().chunk_ms == 20 and ScribeTuning().chunk_bytes == 640
 
 
 async def test_queue_drops_oldest_audio_when_full(fake):
@@ -763,8 +807,9 @@ async def test_pause_commit_after_soft_limit(fake):
     # 0.4 s of speech, then 0.2 s of silence, then speech again.
     await feed_and_close(client, fake.conns[0], [loud(3200)] * 4 + [bytes(3200)] * 2 + [loud(3200)] * 2)
     flags = commit_flags(fake.conns[0])
-    # The commit follows the second quiet chunk (200 ms quiet >= 120 ms), then the close commit.
-    assert flags == [False] * 6 + [True] + [False] * 2 + [True]
+    # 20 ms chunks: the soft limit is reached at chunk 15; chunks 21 to 30 are
+    # quiet, and the commit follows chunk 26 (120 ms of quiet), then the close commit.
+    assert flags == [False] * 26 + [True] + [False] * 14 + [True]
     assert client.stats.pause_commits == 1 and client.stats.hard_commits == 0
 
 
@@ -774,14 +819,15 @@ async def test_hard_commit_without_pause(fake):
     await client.start()
     await collect(client, status_is(SttState.LIVE))
     await feed_and_close(client, fake.conns[0], [loud(3200)] * 7)
-    assert commit_flags(fake.conns[0]) == [False] * 5 + [True] + [False] * 2 + [True]
+    # 35 chunks of 20 ms; the hard limit of 0.5 s is reached after chunk 25.
+    assert commit_flags(fake.conns[0]) == [False] * 25 + [True] + [False] * 10 + [True]
     assert client.stats.hard_commits == 1
 
 
 async def test_server_commit_resets_segment_length(fake):
     async def script(conn):
         await conn.started()
-        for _ in range(4):
+        for _ in range(20):  # 0.4 s of 20 ms chunks
             await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
         await conn.send("committed_transcript", text="vad commit", segment_index=0)
         await conn.closed_by_client.wait()
@@ -796,7 +842,7 @@ async def test_server_commit_resets_segment_length(fake):
     await collect(client, lambda ev, out: isinstance(ev, CommittedTranscript))
     await feed_and_close(client, fake.conns[0], [loud(3200)] * 4)
     # 0.8 s sent in total, but never 0.6 s since the server commit.
-    assert commit_flags(fake.conns[0]) == [False] * 8 + [True]
+    assert commit_flags(fake.conns[0]) == [False] * 40 + [True]
     assert client.stats.hard_commits == 0
 
 
@@ -814,9 +860,10 @@ async def test_rotation_switches_at_a_pause_in_sent_audio(fake):
     while len(fake.conns) < 2 or len(fake.conns[0].audio()) + len(fake.conns[1].audio()) < 14 * 3200:
         await asyncio.sleep(0.01)
     await client.close()
-    # The old session got everything up to and including the 200 ms pause; the new one starts after it.
-    assert fake.conns[0].audio() == b"".join(plan[:10])
-    assert fake.conns[1].audio() == b"".join(plan[10:])
+    # The switch happens once 120 ms of the pause has been sent (six 20 ms chunks).
+    split = 8 * 3200 + 120 * 32
+    assert fake.conns[0].audio() == b"".join(plan)[:split]
+    assert fake.conns[1].audio() == b"".join(plan)[split:]
     assert client.stats.rotations == 1
 
 
