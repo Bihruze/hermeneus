@@ -818,3 +818,104 @@ async def test_rotation_switches_at_a_pause_in_sent_audio(fake):
     assert fake.conns[0].audio() == b"".join(plan[:10])
     assert fake.conns[1].audio() == b"".join(plan[10:])
     assert client.stats.rotations == 1
+
+
+# ---------------------------------------------------------------- bounded close
+
+
+def answer_final_commit(delay: float = 0.1, hold_close: float = 0.0, text: str = "tail words"):
+    async def script(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m.get("commit") is True)
+        await asyncio.sleep(delay)
+        await conn.send("committed_transcript", text=text, segment_index=0)
+        await conn.send("committed_transcript_with_timestamps", text=text, language_code="en")
+        await conn.send("diarized_transcript", segment_index=0, text=text,
+                        words=[{"text": text, "speaker_id": "speaker_0"}])
+        if hold_close:
+            # Stop reading, so the client's close frame goes unanswered for a while.
+            conn.ws.transport.pause_reading()
+            await asyncio.sleep(hold_close)
+            conn.ws.transport.resume_reading()
+        await conn.closed_by_client.wait()
+    return script
+
+
+async def test_close_returns_once_the_final_commit_is_answered(fake):
+    fake.scripts = [answer_final_commit(delay=0.1)]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(drain_quiet=2.0, close_budget=3.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(3200), 0)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=3.0)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed < 0.6  # no drain_quiet wait after the answer
+    [committed] = of(events, CommittedTranscript)
+    assert (committed.text, committed.language_code) == ("tail words", "en")
+    assert events.index(committed) < len(events) - 1
+    assert set(client.stats.close_ms) >= {"audio sent", "final commit sent", "socket closed", "closed"}
+    await asyncio.wait_for(fake.conns[0].closed_by_client.wait(), 2)
+    assert fake.conns[0].ws.close_code == 1000
+
+
+async def test_close_is_bounded_when_the_server_delays_its_close_frame(fake):
+    fake.scripts = [answer_final_commit(delay=0.2, hold_close=3.0)]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(drain_quiet=0.5, close_timeout=2.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(3200), 0)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=1.0)
+    assert len(fake.conns[0].audio()) == 3200  # audio queued just before close() was sent
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 1.1
+    # Text that arrived inside the budget is emitted before CLOSED.
+    assert [c.text for c in of(events, CommittedTranscript)] == ["tail words"]
+    assert events[-1].state == SttState.CLOSED
+    assert "forced" not in client.stats.close_ms
+    # The client sent its close frame with code 1000 before giving up on the reply.
+    await asyncio.wait_for(fake.conns[0].closed_by_client.wait(), 5)
+    assert fake.conns[0].ws.close_code == 1000
+
+
+async def test_close_is_bounded_when_the_server_never_answers(fake):
+    async def silent(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m.get("commit") is True)
+        conn.ws.transport.pause_reading()
+        await asyncio.sleep(3)
+        conn.ws.transport.resume_reading()
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [silent]
+    client = make_client(fake, tuning=ScribeTuning(drain_quiet=5.0, close_timeout=5.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=0.5)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 0.6 and events[-1].state == SttState.CLOSED
+
+
+async def test_close_while_connecting_is_bounded(fake):
+    async def slow(conn):
+        await asyncio.sleep(3)
+        await conn.started()
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [slow]
+    client = make_client(fake)
+    await client.start()
+    await asyncio.sleep(0.1)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=0.4)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 0.5 and events[-1].state == SttState.CLOSED
+    assert "forced" in client.stats.close_ms
