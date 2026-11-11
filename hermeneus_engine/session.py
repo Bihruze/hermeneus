@@ -237,7 +237,6 @@ class FrameQueue:
         self.bytes_in = 0
         self.chunks_dropped = 0
         self.bytes_dropped = 0
-        self.last_chunk = b""  # newest chunk handed on; the session samples it to notice silence
 
     def put(self, pcm: bytes, captured_ns: int) -> None:
         """Called from the capture thread."""
@@ -272,8 +271,6 @@ class FrameQueue:
             batch = list(self._chunks)
             self._chunks.clear()
             self._bytes = 0
-        if batch:
-            self.last_chunk = batch[-1][0]
         for pcm, captured_ns in batch:
             try:
                 self._consumer(pcm, captured_ns)
@@ -413,6 +410,7 @@ class TranslationSession:
         self._last_chunks_in = -1
         self._no_audio = False      # the no-audio message is showing
         self._gated = False         # silent chunks are held back from speech to text
+        self._sampled_silent: Optional[bool] = None  # the last sampled chunk was digital silence
         self._applying: list[str] = []
         self._jobs: set[asyncio.Task] = set()
         self.stats: dict[str, int] = {"lines_committed": 0, "lines_translated": 0,
@@ -595,8 +593,9 @@ class TranslationSession:
     def _check_audio(self) -> None:
         """Every metrics tick: has the capture delivered sound in the last NO_AUDIO_S seconds?
 
-        No audio path cost while sound flows: the tick looks at the chunk
-        counter and the newest chunk only. Once digital silence has lasted
+        No audio path cost while sound flows: once per tick the FrameQueue
+        consumer is swapped for ``_sample_audio``, which looks at one chunk,
+        swaps itself back and passes the chunk on. Once digital silence has lasted
         NO_AUDIO_S, the FrameQueue consumer becomes ``_gate_audio``, which
         drops silent chunks and hands the first chunk with sound straight
         back to speech to text.
@@ -607,11 +606,15 @@ class TranslationSession:
         count = fq.chunks_in
         if count == self._last_chunks_in:
             kind = "none"
-        elif _is_silent(fq.last_chunk):
-            kind = "silent"
+        elif self._sampled_silent is None:
+            kind = "unknown"  # no chunk sampled since the last tick yet
         else:
-            kind = ""
+            kind = "silent" if self._sampled_silent else ""
         self._last_chunks_in = count
+        self._sampled_silent = None
+        fq._consumer = self._sample_audio
+        if kind == "unknown":
+            return
         if not kind:
             self._quiet_since_ns = 0
             if self._no_audio:
@@ -629,6 +632,13 @@ class TranslationSession:
         if not self._no_audio:
             self._no_audio = True
             self._publish_status("live", messages.no_audio(self.options.source.label))
+
+    def _sample_audio(self, pcm: bytes, captured_ns: int) -> None:
+        """FrameQueue consumer for one chunk per metrics tick."""
+        self._sampled_silent = _is_silent(pcm)
+        if self._frames is not None and self._frames._consumer == self._sample_audio:
+            self._frames._consumer = self._c.stt.send_audio
+        self._c.stt.send_audio(pcm, captured_ns)
 
     def _gate_audio(self, pcm: bytes, captured_ns: int) -> None:
         """FrameQueue consumer while the source is silent."""
