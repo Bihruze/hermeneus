@@ -119,10 +119,17 @@ class ScribeTuning:
 
     Defaults and their reasons:
 
-    * ``chunk_ms=100``: the commit strategy guide says "Send audio chunks of
+    * ``chunk_ms=20``: the commit strategy guide says "Send audio chunks of
       0.1 - 1 second in length" and "Smaller chunks result in lower latency".
-      100 ms is the smallest documented size, 3200 bytes of pcm_16000. No page
-      states the ``chunk_size_exceeded`` threshold (UNVERIFIED).
+      20 ms is below that documented range on purpose. A chunk waits in the
+      buffer until it is full, so its oldest sample is delayed by the chunk
+      length. Measured against Scribe v3 Live on the same 180 s of speech (W20
+      latency audit): word first seen in a partial p50 669 ms at 20 ms chunks,
+      699 ms at 50 ms, 725 ms at 100 ms, with 0 errors over 15414 chunks and no
+      backlog in the socket write buffer at 20 ms. In the full pipeline,
+      pipeline minus a 20 ms control at p50 went from +56 ms (100 ms chunks)
+      to -27 ms (run noise). 20 ms is 640 bytes of pcm_16000. No page states
+      the ``chunk_size_exceeded`` threshold (UNVERIFIED).
     * ``queue_seconds=5``: audio kept while no session can take it. It covers
       the first backoff steps plus a handshake. A longer backlog would be
       replayed behind live audio and delay every later subtitle by its length.
@@ -164,7 +171,7 @@ class ScribeTuning:
       Set either value to 0 to disable that trigger.
     """
 
-    chunk_ms: int = 100
+    chunk_ms: int = 20
     queue_seconds: float = 5.0
     backoff_base: float = 0.5
     backoff_cap: float = 10.0
