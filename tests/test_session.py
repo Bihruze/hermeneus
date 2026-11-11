@@ -419,7 +419,8 @@ async def test_finished_sentence_is_released_at_a_pause_and_lines_carry_timings(
     await wait_for(lambda: "speech_end" in rt.bus.lines()[0].timings_ns)
     events, _ = rt.bus.events_after(None)
     timings = [e for e in events if e["type"] == "line"][0]["timings"]
-    assert set(timings) >= {"capture_ms", "speech_end_ms", "committed_ms", "released_ms", "translated_ms"}
+    assert set(timings) >= {"capture_ms", "speech_end_ms", "released_ms", "translated_ms"}
+    assert "committed_ms" not in timings  # released at the pause, before Scribe's commit
     # capture of the first word: 0.5 s after the first sample
     assert abs(timings["capture_ms"] - ((base + 500_000_000) - rt.session._started_ns) / 1e6) < 1.0
     summary = rt.session.metrics()["latency_ms"]

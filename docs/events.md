@@ -40,13 +40,17 @@ higher. After a gap (socket dropped, process restarted) it asks
   capture timestamps use. `capture_ms` is the capture time of the line's
   first word and `speech_end_ms` the end of its last word (Scribe word times
   mapped per chunk with `metrics.StreamClock`; they arrive with Scribe's
-  diarized words, so usually after the translation). `committed_ms` and
-  `released_ms` are when the line was sent to translation, `translated_ms`
+  diarized words, so usually after the translation). `released_ms` is when
+  the line was sent to translation. `committed_ms` is present only when that
+  happened at Scribe's commit; a line released earlier, at a sentence
+  boundary or at a pause, has `released_ms` and no `committed_ms`. `translated_ms`
   when its translation arrived, `tts_first_audio_ms` when its first spoken
   audio arrived. A stage that has not happened, or could not be measured,
-  is absent. After a Scribe session rotation or reconnect, word times are no
-  longer mapped (the client does not expose where the new session's audio
-  starts), so `capture_ms` and `speech_end_ms` are absent from then on.
+  is absent. The Scribe client gives word times over its whole audio stream
+  (`ScribeLiveClient(stream_times=True)`), so the mapping holds through
+  rotations, idle closes and reconnects. If the client had to drop queued
+  audio, later word times would be shifted, so `capture_ms` and
+  `speech_end_ms` are left out from then on.
   Lines are released at a sentence end as soon as more words follow it, or,
   at a pause, once the audio after the sentence's last word reaches 1.3 s
   with no new word (`sentences.DEFAULT_PAUSE_MS`).

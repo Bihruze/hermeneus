@@ -215,7 +215,9 @@ def build(options: SessionOptions, services: HermesServices,
         speaker = speaker_factory(options.voice_id or "", options.output_device or "", options.source)
 
     capture = capture_backend(options.source.backend, on_capture_error)
-    stt = load("stt")(SttConfig(commit_strategy=options.commit_strategy), services.get_secret)
+    # stream_times: word times count from the start of everything this client
+    # sent, so the session maps them to capture time across Scribe sessions.
+    stt = load("stt")(SttConfig(commit_strategy=options.commit_strategy), services.get_secret, stream_times=True)
     translator = load("translator")(services.llm, context_segments=options.context_segments)
     scheduler_cls = load("scheduler")
 
