@@ -1,6 +1,6 @@
 # Hermeneus on Windows (preview)
 
-This page holds the Windows details. The README's [Platforms](../README.md#platforms) section has the summary.
+This page holds the Windows details. The README's [Windows (preview)](../README.md#windows-preview) section has the summary.
 
 Status: implemented and reviewed against documentation, not yet run on a Windows machine. macOS is tested on real audio; Windows is not. The catalog entry lists macOS only, so `hermes plugins install hermeneus` refuses to install on Windows. To try the preview, install from the repository URL; Hermes v0.23.1 does not gate loading on the `platforms` field of `plugin.yaml`.
 

@@ -8,8 +8,9 @@ Hermeneus listens to any voice playing on your computer and shows it in your lan
 
 Hermeneus is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/), an open-source AI agent that you use from a terminal, from chat apps or from the Hermes Desktop app.
 
-<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build with the owner. Until then this image is missing. -->
+<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build. Move the line below out of this comment once the file exists.
 <p align="center"><img src="docs/media/strip-live.gif" alt="The floating subtitle strip translating a live news stream into Turkish" width="100%"></p>
+-->
 
 ## The name
 
@@ -19,7 +20,7 @@ In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* m
 
 ### Apps and platforms
 
-Hermeneus captures the sound an app plays, so it does not depend on the site or app. The marks below say what has run on real audio with this release.
+Hermeneus captures the sound an app plays, so it does not depend on the site or app. The marks below say what has run on real audio, and on which build.
 
 | App or platform | Status |
 | --- | --- |
@@ -34,8 +35,8 @@ Hermeneus captures the sound an app plays, so it does not depend on the site or 
 | Device | Status |
 | --- | --- |
 | Mac with macOS 14.2 or later | Tested on real audio (on macOS 27.0.1). Driverless capture through a Core Audio process tap. |
-| Mac with macOS 13 to 14.1 | Uses a virtual audio device that you install yourself, such as BlackHole 2ch (see [the fallback](#fallback-virtual-device-with-a-multi-output-device)). The fallback ran on real speech on a newer macOS, not yet on macOS 13 to 14.1 itself. |
-| Windows | Preview, not yet run on a Windows machine. See [docs/windows.md](docs/windows.md). |
+| Mac with macOS 13 to 14.1 | Uses a virtual audio device that you install yourself, such as BlackHole 2ch (see [the fallback](#fallback-virtual-device-with-a-multi-output-device)). The fallback ran with synthetic speech through VB-Cable on macOS 27.0.1, not yet on macOS 13 to 14.1 itself. |
+| Windows | Preview (see [Windows (preview)](#windows-preview)). |
 | Linux | Planned. |
 
 ### Where subtitles appear
@@ -51,7 +52,7 @@ Details for each are under [Using Hermeneus](#using-hermeneus).
 
 <table>
 <tr>
-<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane in Hermes Desktop during a session" width="100%"></picture><br><sub>The Desktop pane during a session</sub></td>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane in Hermes Desktop, with sample lines" width="100%"></picture><br><sub>The Desktop pane, with sample lines</sub></td>
 <td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/strip-dark.png"><img src="docs/media/strip-light.png" alt="An offscreen render of the floating subtitle strip over a drawn background" width="100%"></picture><br><sub>The floating strip (an offscreen render; a live capture follows)</sub></td>
 </tr>
 <tr>
@@ -93,7 +94,7 @@ The lists come from [`hermeneus_engine/languages.py`](hermeneus_engine/languages
 3. **Translate.** Your Hermes model translates each finished sentence, with up to 3 earlier lines as context.
 4. **Show or speak.** The line appears in the strip, the pane, the OBS page and the terminal, and ElevenLabs Flash v2.5 can read it aloud.
 
-A translated line is ready about 2.1 to 2.3 s after the sentence ends (median on real ElevenLabs and Claude Haiku 5.5; see [Measured latency](#measured-latency)).
+A translated line is ready about 2 s after the sentence ends (median, three real recorded clips with ElevenLabs Scribe v3 Live and Claude Haiku 5.5; see [Subtitle pace](#subtitle-pace)).
 
 ## Quick start
 
@@ -121,7 +122,7 @@ You need:
 
 5. **Start.** The translation model is your main Hermes model, unless you pinned one for **Live translation**. The subtitle language is your Hermes or system language. Both are filled in. The source is all system audio by default. Press **Start**, then play a video or a stream with speech in it. Subtitles appear in the pane and in the floating strip above your other apps.
 
-   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane during a session, with translated lines" width="100%"></picture>
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane in Hermes Desktop, with sample lines" width="100%"></picture>
 
 If the pane is closed, click **Hermeneus** in the status bar. Until setup is complete, that click opens the pane instead of starting. After the first run, one click on **Hermeneus** starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
 
@@ -346,7 +347,7 @@ From a chat platform such as Telegram or Slack, `/translate start` and `/transla
 
 | Stage | Median | p95 | Measured from | Sample |
 | --- | --- | --- | --- | --- |
-| Sentence released for translation | 1.01 s | 1.37 s | the plugin's own estimate of the sentence end (`status --json`) | 69 sentences, both kinds of speech below |
+| Sentence released for translation | 1.01 s | 1.37 s | the plugin's own estimate of the sentence end (`status --json`) | 69 sentences: every sentence the plugin released in that run. The two rows below count only the 53 of them matched to a sentence end in the audio file. |
 | Translated line | 2.33 s | 2.64 s | the sentence end in the audio file | 32 sentences of speech with pauses between sentences |
 | Translated line | 2.12 s | 2.68 s | the sentence end in the audio file | 21 sentences of continuous news-style speech |
 | First spoken audio (with `--speak`) | 1.07 s | 1.89 s | the request to ElevenLabs text to speech | 2 utterances in a separate run, a weak sample |
@@ -434,12 +435,7 @@ Spoken translation uses ElevenLabs Flash v2.5. The default voice is Talia (`OZ0L
 
 ## Platforms
 
-| Platform | Status |
-| --- | --- |
-| macOS 14.2 and later | Tested with real audio. Process tap, no driver needed. |
-| macOS 13 to 14.1 | Works with a virtual device that you install yourself (see below). |
-| Windows | Preview, not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). |
-| Linux | Planned. |
+The status of each device is under [Devices](#devices).
 
 ### Fallback: virtual device with a Multi-Output Device
 
@@ -549,7 +545,7 @@ Prices change; the ElevenLabs page is the reference.
 
 ## Limits
 
-- Hermeneus is tested on macOS only (see [Platforms](#platforms)).
+- Hermeneus is tested on macOS only (see [Devices](#devices)).
 - One session runs at a time. A second start reports the running session.
 - The floating strip is macOS only. It was measured above a native full-screen window in its own Space (a macOS desktop) on one built-in display. Several displays and moving between ordinary Spaces were not measured.
 - Your model sets how far subtitles trail the speech and how good they are in a given language.
