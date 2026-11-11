@@ -44,7 +44,7 @@ DEFAULTS: dict[str, Any] = {
     KEY_OPACITY: 90,
     KEY_SHOW_SPEAKER: True,
     KEY_STYLE: "banner",
-    KEY_PACE: "read",
+    KEY_PACE: "live",
     KEY_READING_CPS: 0,
 }
 

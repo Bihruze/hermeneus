@@ -301,8 +301,8 @@ Order: a line whose translation is still on its way holds the lines after it for
 
 When speech is faster than reading speed, `overlay_pace` decides:
 
-- `read` (read everything, the default): every unit keeps its full reading time, so the subtitles may fall behind fast speech and catch up in pauses.
-- `live` (follow live): while more than 3 s of reading waits, units go up faster, down to half their reading time and never under the minimum. Scroll back to read what went by.
+- `read` (read everything): every unit keeps its full reading time, so the subtitles may fall behind fast speech and catch up in pauses.
+- `live` (follow live, the default): while more than 3 s of reading waits, units go up faster, down to half their reading time and never under the minimum. Scroll back to read what went by.
 
 Measured lag on real audio (the A7 audit): two real sessions with ElevenLabs Scribe v3 Live and translation by anthropic/claude-haiku-5-5 into Turkish, audio taken from the player. Each session's time-stamped events were then replayed through the overlay code with an offscreen strip at the default settings, 860 pt wide. "Production" is speech end to translation ready. "First" and "last" are speech end to a line's first and last part on screen.
 
@@ -340,7 +340,7 @@ Command flags override the settings for one session.
 | `overlay_opacity` | Overlay background opacity | int | `90` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | Overlay speaker numbers | bool | `true` | | Mark a new speaker with a small number in the speaker's colour at the start of the turn's first row. |
 | `overlay_style` | Overlay style | str | `banner` | banner, theme | banner (the default) uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. theme follows the Hermes Desktop theme. |
-| `overlay_pace` | Subtitle pace | str | `read` | read, live | read (read everything): every line stays up for its reading time, so the subtitles may fall behind fast speech. live (follow live): when more than 3 s of text is waiting, lines go up faster, down to half their reading time. No text is ever dropped; scroll back in the overlay to read it again. |
+| `overlay_pace` | Subtitle pace | str | `live` | read, live | read (read everything): every line stays up for its reading time, so the subtitles may fall behind fast speech. live (follow live): when more than 3 s of text is waiting, lines go up faster, down to half their reading time. No text is ever dropped; scroll back in the overlay to read it again. |
 | `overlay_reading_cps` | Reading speed | int | `0` | | Characters per second a subtitle line is given (5 to 30). 0 uses the subtitle language: Turkish 17, English 20, most others 17. |
 | `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |

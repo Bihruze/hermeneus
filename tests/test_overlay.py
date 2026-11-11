@@ -42,11 +42,11 @@ def test_settings_defaults_and_clamping():
     s = ovs.from_settings({})
     # Overlay on by default (W29); target language only and a solid background by default (W28: the owner G6 finding).
     assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (True, 26, 2, False, 90, True)
-    assert (s.pace, s.reading_cps) == ("read", 0)
+    assert (s.pace, s.reading_cps) == ("live", 0)
     s = ovs.from_settings({"overlay_pace": "LIVE", "overlay_reading_cps": 3})
     assert (s.pace, s.reading_cps) == ("live", 5)
     s = ovs.from_settings({"overlay_pace": "fast", "overlay_reading_cps": 99})
-    assert (s.pace, s.reading_cps) == ("read", 30)
+    assert (s.pace, s.reading_cps) == ("live", 30)
     s = ovs.from_settings({"overlay_text_size": 200, "overlay_max_lines": 0, "overlay_opacity": "-5",
                            "overlay_show_original": "off", "overlay": "yes", "overlay_show_speaker": 0})
     assert (s.text_size, s.max_lines, s.opacity, s.show_original, s.auto, s.show_speaker) == (64, 1, 0, False, True, False)

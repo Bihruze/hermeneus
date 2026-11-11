@@ -67,7 +67,7 @@ test('a failed line shows its marker, and its original only when originals are o
 })
 
 test('the queue puts a line up when its turn comes: reading speed, minimum time, order, hold', () => {
-  const settings = O.resolveSettings({ max_lines: 3 }, '')
+  const settings = O.resolveSettings({ max_lines: 3, pace: 'read' }, '')
   const tr = (seq, id, text, target = 'tr') =>
     ({ type: 'line', seq, line: { line_id: id, state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: target } })
   const first = 'Bu cümle tam otuz dört karakterdir.' // 35 characters: 35 / 17 s in Turkish
@@ -99,7 +99,7 @@ test('the queue puts a line up when its turn comes: reading speed, minimum time,
 })
 
 test('follow live speeds up while text waits, never below the minimum or half the reading time', () => {
-  const read = O.resolveSettings({ max_lines: 3 }, '')
+  const read = O.resolveSettings({ max_lines: 3, pace: 'read' }, '')
   const live = O.resolveSettings({ max_lines: 3, pace: 'live' }, '')
   const text = 'Cümle burada bitiyor ve sonra devam ediyor ve bitiyor.' // 54 characters
   const fill = () => {
@@ -176,7 +176,7 @@ test('URL query parameters override the shared settings and are clamped', () => 
   const base = { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true }
   assert.deepEqual(
     { ...O.resolveSettings(base, '') },
-    { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto', pace: 'read', reading_cps: 0 }
+    { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto', pace: 'live', reading_cps: 0 }
   )
   assert.deepEqual(
     { ...O.resolveSettings(base, '?text_size=500&max_lines=0&show_original=0&opacity=-5&show_speaker=off&theme=dark&pace=LIVE&reading_cps=2') },
@@ -299,7 +299,7 @@ test('a long line is split into units the way the native strip splits it (pace.s
 })
 
 test('the page paces a long line unit by unit, each its own reading time, and shows every word', () => {
-  const settings = Object.assign(O.resolveSettings({ max_lines: 2 }, ''), { unit_chars: 42 })
+  const settings = Object.assign(O.resolveSettings({ max_lines: 2, pace: 'read' }, ''), { unit_chars: 42 })
   const text = 'Belediye meclisi yeni bütçeyi onayladığı için yarın sabah bir basın toplantısı yapılacak ve ayrıntılar açıklanacak'
   let s = O.applyEvent(O.createState(), { type: 'line', seq: 1, line: { line_id: 'a', state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: 'tr' } }, 0)
   const seen = []

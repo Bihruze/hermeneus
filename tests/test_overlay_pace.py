@@ -420,9 +420,9 @@ def test_under_half_opacity_text_is_light_with_a_dark_edge_in_every_theme():
     assert theme.see_through(dark, 10) is dark
 
 
-def test_defaults_are_target_only_read_everything_and_a_solid_background():
+def test_defaults_are_target_only_follow_live_and_a_solid_background():
     s = ovs.OverlaySettings()
-    assert (s.show_original, s.pace, s.opacity, s.reading_cps) == (False, "read", 90, 0)
+    assert (s.show_original, s.pace, s.opacity, s.reading_cps) == (False, "live", 90, 0)
 
 
 def test_a_marker_for_a_whole_line_keeps_its_row():
