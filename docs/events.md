@@ -43,6 +43,7 @@ higher. After a gap (socket dropped, process restarted) it asks
   (`audio_chunks_in`, `audio_chunks_dropped`, `audio_dropped_ms`,
   `audio_queued_ms`, `lines_committed`, `lines_translated`, `lines_failed`,
   `speak_errors`, `sentences_released_early`, `settings_changes`,
+  `silent_chunks_held` (digital silence not sent to speech to text),
   `translation_backlog`, `uptime_s`). Failure messages and where they appear
   are listed in `docs/failures.md`. When translations fail, `message` names the reason and the
   fix once, again when it changes, and at most every 30 s otherwise; it is
