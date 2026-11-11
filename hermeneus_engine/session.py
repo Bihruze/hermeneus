@@ -65,6 +65,10 @@ DEFAULT_MAX_QUEUED_SECONDS = 2.0
 # stop() closes every stage in parallel under this deadline, which keeps a
 # stop (including a SIGINT in ``hermes hermeneus run``) under two seconds.
 STOP_TIMEOUT_S = 1.5
+# The STT client's own close budget (stt/scribe.py close(timeout=)). It
+# commits trailing audio and waits for that transcript; 1.2 s leaves room
+# inside STOP_TIMEOUT_S for the last line to reach the bus.
+STT_CLOSE_TIMEOUT_S = 1.2
 
 METRICS_INTERVAL_S = 2.0
 
@@ -106,7 +110,7 @@ class SttClient(Protocol):
     async def start(self) -> None: ...
     def send_audio(self, pcm: bytes, captured_ns: int) -> None: ...
     def events(self) -> AsyncIterator[SttEvent]: ...
-    async def close(self) -> None: ...
+    async def close(self, timeout: Optional[float] = None) -> None: ...
 
 
 class LineScheduler(Protocol):
@@ -376,6 +380,7 @@ class TranslationSession:
         self._speaker_error_seen = ""
         self._slow_ns: deque = deque()
         self._speech_task: Optional[asyncio.Task] = None
+        self._stt_task: Optional[asyncio.Task] = None
         self._speaking = False
         self._want_speech = False
         self._settings_lock: Optional[asyncio.Lock] = None
@@ -439,7 +444,8 @@ class TranslationSession:
         try:
             self._scheduler = self._c.scheduler_factory(self._on_translated)
             await self._c.stt.start()
-            self._tasks.append(asyncio.create_task(self._stt_loop(), name="hermeneus:stt-events"))
+            self._stt_task = asyncio.create_task(self._stt_loop(), name="hermeneus:stt-events")
+            self._tasks.append(self._stt_task)
             self._tasks.append(asyncio.create_task(self._metrics_loop(), name="hermeneus:metrics"))
             if self.options.speak and self._c.speaker is not None:
                 start_speaker = getattr(self._c.speaker, "start", None)
@@ -482,8 +488,12 @@ class TranslationSession:
                     task.cancel()
             if self._speech_task is not None and self._speech_task not in self._tasks:
                 self._tasks.append(self._speech_task)
+            # The STT event loop keeps running: the client emits the transcript
+            # of the trailing audio while it closes, and that last sentence
+            # must reach the bus. It ends with the client's CLOSED event, or
+            # is cancelled at the deadline below.
             for task in self._tasks:
-                if task is not current:
+                if task is not current and task is not self._stt_task:
                     task.cancel()
             # The stages are independent once audio stops, so they close in
             # parallel under one deadline. A step that overruns is logged and
@@ -492,7 +502,7 @@ class TranslationSession:
             if self._capture_started:
                 self._capture_started = False
                 steps["capture stop"] = _in_daemon_thread(self._c.capture.stop, "hermeneus-capture-stop")
-            steps["speech to text close"] = self._c.stt.close()
+            steps["speech to text close"] = self._c.stt.close(timeout=STT_CLOSE_TIMEOUT_S)
             if self._scheduler is not None:
                 steps["translation close"] = self._scheduler.aclose()
             if self._c.speaker is not None:
@@ -511,6 +521,8 @@ class TranslationSession:
             for fut in late:
                 logger.warning("hermeneus: %s took longer than %.1fs; continuing shutdown", pending[fut],
                                STOP_TIMEOUT_S)
+                if fut is self._stt_task:
+                    fut.cancel()
             self._publish_status(final_state, message)
             self._done.set()
 
@@ -685,6 +697,11 @@ class TranslationSession:
         if early:
             self.stats["sentences_released_early"] += 1
         assert self._scheduler is not None
+        if self._state == "stopping":
+            # The last sentence arrived while the session closes; translation is already shutting down.
+            self._store(replace(line, state=LineState.FAILED,
+                                error="Not translated: the session stopped while this sentence arrived."))
+            return line
         try:
             self._scheduler.submit(replace(line, timings_ns=dict(timings)))
         except Exception as exc:

@@ -342,3 +342,31 @@ async def test_model_failure_reason_reaches_the_status_once(data_dir):
             messages.append(e["message"])
     assert messages.count("Translation failed: the model provider reports insufficient credits (nous).") == 1
     await rt.close()
+
+
+async def test_last_sentence_emitted_during_stt_close_reaches_the_bus(data_dir):
+    """F17: the STT client commits trailing audio inside close(); that line must not be lost."""
+    rt, rig = await started(data_dir)
+    await wait_for(lambda: rt.bus.status()["state"] == "live")
+    rig.stt.emit(PartialTranscript("and finally"))
+    await wait_for(lambda: any(l.original == "and finally" for l in rt.bus.lines()))
+    rig.stt.on_close = [CommittedTranscript("and finally the end.", segment_index=3)]
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await rt.close()
+    assert loop.time() - t0 < 1.5
+    assert rig.stt.close_timeout == 1.2
+    [line] = [l for l in rt.bus.lines() if l.original]
+    assert line.original == "and finally the end." and line.state == LineState.FAILED
+    assert line.error == "Not translated: the session stopped while this sentence arrived."
+    assert rt.bus.status()["state"] == "idle"
+
+
+async def test_stt_loop_is_cancelled_at_the_stop_deadline(data_dir):
+    rt, rig = await started(data_dir, make_rig(stt=FakeStt(close_delay=5.0)))
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await rt.close()
+    assert loop.time() - t0 < 2.0
+    await asyncio.sleep(0)
+    assert rt.session._stt_task.cancelled()

@@ -68,6 +68,8 @@ class FakeStt:
         self.live_on_start = live_on_start
         self.closed = False
         self.close_delay = close_delay
+        self.close_timeout: Optional[float] = None
+        self.on_close: list = []  # events emitted during close()
 
     async def start(self) -> None:
         self._queue = asyncio.Queue()
@@ -87,7 +89,11 @@ class FakeStt:
                 return
             yield event
 
-    async def close(self) -> None:
+    async def close(self, timeout: Optional[float] = None) -> None:
+        self.close_timeout = timeout
+        for event in self.on_close:
+            await asyncio.sleep(0.01)  # the transcript of trailing audio arrives while closing
+            self._queue.put_nowait(event)
         if self.close_delay:
             await asyncio.sleep(self.close_delay)
         self.closed = True
