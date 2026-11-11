@@ -15,6 +15,7 @@ from typing import Any, Optional, Sequence
 
 from .hermeneus_engine.components import HermesServices
 from .hermeneus_engine.contracts import ChatMessage, TranslationError
+from .hermeneus_engine.messages import MODEL_FIX
 
 PLUGIN_NAME = "hermeneus"
 AUX_TASK = "live_translate"
@@ -104,16 +105,16 @@ def describe_llm_error(exc: BaseException, provider: str = "auto") -> str:
     if "insufficient_credits" in low or "requires available credits" in low or "insufficient credit" in low \
             or "balance is too low" in low or ("402" in low and "payment" in low):
         return (f"Translation failed: the model provider reports insufficient credits{where}. "
-                "Pick another model under auxiliary.live_translate.")
+                f"Add credits with that provider, or pick another model with: {MODEL_FIX}")
     if "401" in low or "403" in low or "invalid api key" in low or "unauthorized" in low or "authentication" in low:
         return (f"Translation failed: the model provider rejected the credentials{where}. "
-                "Check that provider with: hermes model")
+                "Check that provider's key, or pick another provider with: hermes model")
     if "429" in low or "rate limit" in low or "rate_limit" in low or "too many requests" in low:
         return (f"Translation failed: the model provider is rate limiting{where}. "
                 "Lines will translate again when it allows more requests.")
     if "model_not_found" in low or "does not exist" in low or "unknown model" in low:
         return (f"Translation failed: the model provider does not offer the configured model{where}. "
-                "Pick another model under auxiliary.live_translate.")
+                f"Pick another model with: {MODEL_FIX}")
     if len(text) > 160:
         text = text[:157] + "..."
     return f"Translation failed: {type(exc).__name__}: {text}" if text else f"Translation failed: {type(exc).__name__}."

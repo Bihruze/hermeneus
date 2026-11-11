@@ -234,7 +234,8 @@ def test_llm_errors_become_plain_reasons_with_the_fix():
                           "'code': 'insufficient_credits_for_paid_model'}")
     assert glue.describe_llm_error(credit, "nous") == (
         "Translation failed: the model provider reports insufficient credits (nous). "
-        "Pick another model under auxiliary.live_translate.")
+        "Add credits with that provider, or pick another model with: "
+        "hermes model (Configure auxiliary models > Live translation)")
     InstallError = type("InstallError", (RuntimeError,), {})
     err = InstallError("venv: installation of extra 'anthropic' declined")
     err.cause = "installation of extra 'anthropic' declined"
@@ -252,3 +253,55 @@ async def test_llm_call_turns_provider_errors_into_translation_errors():
     call = pkg.glue.make_llm_call(Failing(), provider="openai")
     with pytest.raises(TranslationError, match="rejected the credentials"):
         await call([{"role": "user", "content": "x"}])
+
+
+# -- set and voices ------------------------------------------------------------------
+
+async def test_slash_set_changes_a_running_session_and_refuses_without_one(data_dir):
+    from pipeline_fakes import SOURCE2
+    plugin, rig = make_plugin(data_dir, sources=(SOURCE, SOURCE2))
+    assert (await plugin.slash("set --to de")).startswith("Not changed: No translation session is running.")
+    await plugin.slash("start --to tr --source BlackHole")
+    await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
+    text = await plugin.slash("set --to de --speak on --device Speakers --voice v7")
+    assert text == ("Changed: subtitles now go into de from the next sentence. Applying spoken translation in "
+                    "the background; /translate status shows the result.")
+    bus = plugin.controller.local_bus
+    await wait_for(lambda: bus.status()["mode"] == "both")
+    status = await plugin.slash("status")
+    assert status == ("Translation is live from BlackHole 2ch into de. Spoken translation is on "
+                      "(voice v7, output Speakers).")
+    assert (await plugin.slash("set --mode voice")) == "Changed: mode is voice only (subtitles hidden)."
+    assert (await plugin.slash("set --source 'All system'")).startswith("Applying source")
+    await wait_for(lambda: bus.status()["source"]["source_id"] == "system")
+    assert (await plugin.slash("set --speak maybe")).startswith("Not changed: argument --speak")
+    assert (await plugin.slash("set")).startswith("Not changed: nothing to change.")
+    assert (await plugin.slash("set --source Nowhere")).startswith("Not changed: no audio source called 'Nowhere'")
+    await plugin.slash("stop")
+
+
+def test_cli_set_and_voices(data_dir, monkeypatch):
+    from hermeneus_engine.tts.voice_catalog import VoiceCatalog
+    plugin, rig = make_plugin(data_dir)
+    parser = argparse.ArgumentParser()
+    commands.setup_cli(parser)
+    out, err = io.StringIO(), io.StringIO()
+    args = parser.parse_args(["set", "--to", "de"])
+    assert commands.cmd_set(plugin, args, out=out, err=err) == 1
+    assert err.getvalue().startswith("hermeneus: not changed: No translation session is running.")
+    args = parser.parse_args(["set", "--speak", "off", "--json"])
+    out = io.StringIO()
+    commands.cmd_set(plugin, args, out=out, err=err)
+    assert json.loads(out.getvalue())["ok"] is False
+
+    body = {"voices": [{"voice_id": "OZ0L6eISlOejga3XjDFt", "name": "Talia", "category": "premade",
+                        "verified_languages": [{"language": "tr", "model_id": "eleven_flash_v2_5"}]}]}
+    plugin.voice_catalog = VoiceCatalog(lambda: "k", fetch=lambda *a: body)
+    out = io.StringIO()
+    assert commands.cmd_voices(plugin, parser.parse_args(["voices"]), out=out, err=err) == 0
+    assert out.getvalue().splitlines() == ["Voices on this ElevenLabs account (pass one with --voice):",
+                                           "  Talia (default)  OZ0L6eISlOejga3XjDFt  [premade]  tr"]
+    plugin.voice_catalog = VoiceCatalog(lambda: None)
+    err = io.StringIO()
+    assert commands.cmd_voices(plugin, parser.parse_args(["voices"]), out=out, err=err) == 1
+    assert err.getvalue().startswith("hermeneus: Voices: no ElevenLabs API key is set.")
