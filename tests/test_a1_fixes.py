@@ -112,3 +112,62 @@ async def test_e16_slow_message_clears_on_the_first_success():
     await wait_for(lambda: bus.lines()[-1].state == LineState.TRANSLATED)
     assert not bus.status()["message"].startswith("Translation:")
     await s.stop()
+
+
+# -- E6: the configured voice applies when speech turns on mid-session ---------------------
+
+async def test_e6_configured_voice_and_device_apply_when_speech_turns_on():
+    from pipeline_fakes import SOURCE
+    from hermeneus_engine.options import Choices, resolve
+    opts = resolve(Choices(to="tr", source="BlackHole"), {"voice_id": "seher-voice", "output_device": "AirPods"},
+                   [SOURCE])
+    assert (opts.speak, opts.voice_id, opts.output_device) == (False, "seher-voice", "AirPods")
+    rig = make_rig()
+    bus = SubtitleBus()
+    s = TranslationSession(opts, rig.build(opts, lambda e: None), bus, metrics_interval_s=0.01)
+    await s.start()
+    await wait_for(lambda: bus.status()["state"] == "live")
+    assert bus.status()["voice_id"] is None  # shown only while speech is on
+    s.apply_settings({"speak": True})
+    await wait_for(lambda: bus.status()["speak"] is True)
+    assert (rig.speakers[0].voice_id, rig.speakers[0].device) == ("seher-voice", "AirPods")
+    await s.stop()
+
+
+# -- E7: a voice chosen while speech is off is kept and answered; unknown ids are refused -----
+
+async def test_e7_voice_while_speech_is_off_is_kept_for_the_next_start():
+    rig = make_rig()
+    s, bus = await live_session(rig)
+    result = s.apply_settings({"voice_id": "v7", "output_device": "Speakers"})
+    assert result["accepted"] == {"voice_id": "v7", "output_device": "Speakers"} and result["applying"] == []
+    s.apply_settings({"speak": True})
+    await wait_for(lambda: bus.status()["speak"] is True)
+    assert rig.speakers[0].voice_id == "v7"
+    await s.stop()
+
+
+async def test_e7_slash_set_refuses_a_voice_not_on_the_account(tmp_path):
+    from plugin_loader import load_plugin_package
+    from pipeline_fakes import SOURCE, remove_tmpdir, short_tmpdir
+    from hermeneus_engine.tts.voice_catalog import VoiceCatalog
+    commands = load_plugin_package().commands
+    data_dir = short_tmpdir()
+    try:
+        rig = make_rig()
+        plugin = commands.Plugin(None, owner="test", settings=lambda: {}, data_dir=lambda: data_dir, build=rig.build,
+                                 list_sources=lambda: ([SOURCE], []))
+        body = {"voices": [{"voice_id": "v1", "name": "Ada"}]}
+        plugin.voice_catalog = VoiceCatalog(lambda: "k", fetch=lambda *a: body)
+        await plugin.slash("start --to tr --source BlackHole")
+        await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
+        # No list fetched yet: nothing to check against, the change goes through.
+        assert (await plugin.slash("set --voice v9")) == "Changed: voice v9 is used when speech turns on."
+        await asyncio.to_thread(plugin.voice_catalog.list)
+        assert (await plugin.slash("set --voice nope")) == (
+            "Not changed: voice 'nope' is not on this ElevenLabs account. List the voices with: hermes hermeneus voices")
+        assert (await plugin.slash("set --voice v1")) == "Changed: voice v1 is used when speech turns on."
+        await plugin.slash("stop")
+    finally:
+        plugin.unload()
+        remove_tmpdir(data_dir)

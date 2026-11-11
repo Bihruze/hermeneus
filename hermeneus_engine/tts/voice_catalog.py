@@ -141,6 +141,15 @@ class VoiceCatalog:
             self._cache = {slot: (now, result)}
         return result
 
+    def cached(self) -> Optional[VoiceList]:
+        """The last list fetched within the cache time, without asking ElevenLabs; None when there is none."""
+        now = self._clock()
+        with self._lock:
+            for fetched_at, result in self._cache.values():
+                if now - fetched_at < self._ttl:
+                    return result
+        return None
+
     def _fetch_all(self, key: str) -> list[VoiceInfo]:
         seen: dict[str, VoiceInfo] = {}
         token: Optional[str] = None

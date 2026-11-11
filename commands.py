@@ -145,6 +145,12 @@ class Plugin:
             raise UsageError("nothing to change. Pass at least one of --to, --mode, --speak, --voice, "
                              "--device, --source.")
         changes = dict(changes)
+        voice = str(changes.get("voice_id") or "").strip()
+        known = self.voice_catalog.cached()
+        if voice and known is not None and voice not in {v.voice_id for v in known.voices}:
+            # Checked against the account's list when one was fetched recently (E7); never a network call here.
+            raise UsageError(f"voice {voice!r} is not on this ElevenLabs account. List the voices with: "
+                             "hermes hermeneus voices")
         if changes.get("source") is not None and (refusal := remote_refusal(platform, self.settings())):
             raise RemoteStartRefused(refusal)
         if changes.get("source") is not None:
@@ -263,6 +269,10 @@ def describe_set(result: dict) -> str:
         parts.append(f"subtitles now go into {accepted['target_language']} from the next sentence")
     if "mode" in accepted:
         parts.append(f"mode is {_MODE_TEXT.get(accepted['mode'], accepted['mode'])}")
+    if "voice_id" in accepted:
+        parts.append(f"voice {accepted['voice_id']} is used when speech turns on")
+    if "output_device" in accepted:
+        parts.append(f"output {accepted['output_device']} is used when speech turns on")
     text = ("Changed: " + "; ".join(parts) + ".") if parts else ""
     if applying:
         names = ", ".join(_FIELD_NAMES.get(f, f) for f in applying)

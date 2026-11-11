@@ -986,6 +986,13 @@ class TranslationSession:
         elif opts.speak and speak and new_subtitles != opts.subtitles:
             accepted["mode"] = "both" if new_subtitles else "voice"
         self.options = replace(self.options, target_language=target, subtitles=new_subtitles)
+        if not speak:
+            # Speech stays off: a new voice or output device is kept for the next time speech turns on (E7).
+            if str(changes.get("voice_id") or "").strip() and voice != cur_voice:
+                accepted["voice_id"] = voice
+            if str(changes.get("output_device") or "").strip() and device != cur_device:
+                accepted["output_device"] = device
+            self.options = replace(self.options, voice_id=voice, output_device=device or None)
         self._want_speech = speak
         stop_speech = opts.speak and not speak
         if stop_speech:

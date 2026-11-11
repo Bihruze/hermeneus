@@ -64,7 +64,7 @@ def test_voice_order_is_flag_then_setting_then_default():
     assert resolve(Choices(**base), {"voice_id": "  "}, [SOURCE]).voice_id == DEFAULT_VOICE_ID
     assert resolve(Choices(**base), {"voice_id": "cfg"}, [SOURCE]).voice_id == "cfg"
     assert resolve(Choices(voice="flag", **base), {"voice_id": "cfg"}, [SOURCE]).voice_id == "flag"
-    assert resolve(Choices(to="tr", source="BlackHole"), {"voice_id": "cfg"}, [SOURCE]).voice_id is None
+    assert resolve(Choices(to="tr", source="BlackHole"), {"voice_id": "cfg"}, [SOURCE]).voice_id == "cfg"  # kept for speech turned on later (E6)
 
 
 def test_flags_win_over_settings_and_codes_go_out_as_iso639_1():
