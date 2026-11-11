@@ -51,6 +51,70 @@ def parse_slash_start(raw_args: Sequence[str]) -> argparse.Namespace:
     return parser.parse_args(list(raw_args))
 
 
+_ON = {"on", "true", "yes", "1"}
+_OFF = {"off", "false", "no", "0"}
+
+
+def on_off(value: str) -> bool:
+    text = str(value).strip().lower()
+    if text in _ON:
+        return True
+    if text in _OFF:
+        return False
+    raise argparse.ArgumentTypeError(f"expected on or off, not {value!r}")
+
+
+def add_set_arguments(parser: argparse.ArgumentParser) -> None:
+    """Flags for a change while running (hermes hermeneus set, /translate set)."""
+    parser.add_argument("--to", dest="to", metavar="LANG", help="new subtitle language, for example de")
+    parser.add_argument("--mode", choices=("subtitles", "both", "voice"),
+                        help="subtitles only, subtitles and voice, or voice only (subtitles hidden in the displays)")
+    parser.add_argument("--speak", type=on_off, metavar="on|off", help="turn spoken translation on or off")
+    parser.add_argument("--voice", metavar="VOICE_ID", help="ElevenLabs voice id (see: hermes hermeneus voices)")
+    parser.add_argument("--device", metavar="OUTPUT", help="output device for spoken translation")
+    parser.add_argument("--source", metavar="NAME", help="new audio source (see: hermes hermeneus devices)")
+
+
+def parse_slash_set(raw_args: Sequence[str]) -> argparse.Namespace:
+    parser = _Parser(prog="/translate set", add_help=False)
+    add_set_arguments(parser)
+    return parser.parse_args(list(raw_args))
+
+
+def changes_from_namespace(ns: Any) -> dict:
+    """The ``set`` changes a parsed command asks for. The source stays a name until it is resolved."""
+    out: dict[str, Any] = {}
+    for attr, key in (("to", "target_language"), ("mode", "mode"), ("speak", "speak"),
+                      ("voice", "voice_id"), ("device", "output_device"), ("source", "source")):
+        value = getattr(ns, attr, None)
+        if value is not None and value != "":
+            out[key] = value
+    return out
+
+
+SET_BODY_FIELDS = ("mode", "speak", "target_language", "voice_id", "output_device", "source")
+
+
+def changes_from_mapping(body: Mapping[str, Any]) -> dict:
+    """The ``set`` changes in a POST /settings body. Unknown fields raise UsageError."""
+    unknown = sorted(set(body) - set(SET_BODY_FIELDS))
+    if unknown:
+        raise UsageError(f"unknown setting {unknown[0]!r}; settable: {', '.join(SET_BODY_FIELDS)}")
+    out = {k: v for k, v in body.items() if v is not None and v != ""}
+    if "speak" in out and not isinstance(out["speak"], bool):
+        try:
+            out["speak"] = on_off(out["speak"])
+        except argparse.ArgumentTypeError as exc:
+            raise UsageError(f"speak: {exc}") from None
+    return out
+
+
+def resolve_source_change(wanted: Any, sources: Sequence[CaptureSource]) -> dict:
+    """A source name or {backend, source_id} as the full source dict the session takes."""
+    s = match_source(wanted, sources)
+    return {"backend": s.backend, "source_id": s.source_id, "label": s.label, "detail": s.detail}
+
+
 def split_args(raw: str) -> list[str]:
     try:
         return shlex.split(raw or "")
@@ -65,6 +129,7 @@ class Choices:
     speak: Optional[bool] = None
     device: Optional[str] = None
     voice: Optional[str] = None
+    mode: Optional[str] = None  # subtitles, both or voice; decides speak when given
 
     @classmethod
     def from_namespace(cls, ns: Any) -> "Choices":
@@ -80,7 +145,7 @@ class Choices:
         return cls(to=body.get("target_language") or body.get("to"), source=body.get("source"),
                    speak=None if speak is None else bool(speak),
                    device=body.get("output_device") or body.get("device"),
-                   voice=body.get("voice_id") or body.get("voice"))
+                   voice=body.get("voice_id") or body.get("voice"), mode=body.get("mode") or None)
 
 
 def _text(value: Any) -> str:
@@ -161,6 +226,12 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
     target = lang.iso639_1 or lang.iso639_3
 
     speak = choices.speak if choices.speak is not None else bool(settings.get("speak", False))
+    subtitles = True
+    if choices.mode is not None:
+        mode = str(choices.mode).strip().lower()
+        if mode not in ("subtitles", "both", "voice"):
+            raise UsageError(f"mode must be subtitles, both or voice, not {choices.mode!r}")
+        speak, subtitles = mode != "subtitles", mode != "voice"
 
     source = pick_source(choices.source, settings, sources)
 
@@ -191,4 +262,5 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
 
     return SessionOptions(source=source, target_language=target, speak=speak,
                           output_device=device if speak else None, commit_strategy=strategy,
-                          voice_id=voice if speak else None, context_segments=context_segments)
+                          voice_id=voice if speak else None, context_segments=context_segments,
+                          subtitles=subtitles)

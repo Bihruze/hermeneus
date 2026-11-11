@@ -178,6 +178,46 @@ def test_api_relays_a_session_owned_by_another_process(api, data_dir):
     assert asyncio.run(scenario())["state"] == "live"
 
 
+def test_api_settings_changes_the_running_session_and_refuses_clearly(api):
+    client, _module, plugin, rig = api
+    idle = client.post("/api/plugins/hermeneus/settings", json={"target_language": "de"})
+    assert idle.status_code == 409 and idle.json()["detail"].startswith("No translation session is running")
+    body = {"source": {"backend": "virtual-device", "source_id": "BlackHole 2ch"}, "target_language": "tr"}
+    assert client.post("/api/plugins/hermeneus/start", json=body).status_code == 200
+    r = client.post("/api/plugins/hermeneus/settings", json={"target_language": "de", "speak": "on",
+                                                              "output_device": "Speakers"})
+    assert r.status_code == 200
+    reply = r.json()
+    assert reply["ok"] and reply["accepted"] == {"target_language": "de"} and reply["applying"] == ["speak"]
+    for _ in range(200):
+        if client.get("/api/plugins/hermeneus/status").json()["mode"] == "both":
+            break
+        time.sleep(0.01)
+    status = client.get("/api/plugins/hermeneus/status").json()
+    assert (status["target_language"], status["mode"], status["output_device"]) == ("de", "both", "Speakers")
+    bad = client.post("/api/plugins/hermeneus/settings", json={"colour": "red"})
+    assert bad.status_code == 400 and "unknown setting 'colour'" in bad.json()["detail"]
+    refused = client.post("/api/plugins/hermeneus/settings", json={"target_language": "af"})
+    assert refused.status_code == 409 and "does not support Afrikaans" in refused.json()["detail"]
+    assert refused.json()["session"]["target_language"] == "de"
+    client.post("/api/plugins/hermeneus/stop")
+
+
+def test_api_voices_lists_the_account_and_reports_errors(api, monkeypatch):
+    client, _module, plugin, _rig = api
+    from hermeneus_engine.tts.voice_catalog import VoiceCatalog
+    body = {"voices": [{"voice_id": "v1", "name": "Ada", "category": "premade",
+                        "verified_languages": [{"language": "de", "model_id": "eleven_flash_v2_5"}]}],
+            "has_more": False}
+    plugin.voice_catalog = VoiceCatalog(lambda: "k", fetch=lambda url, headers, timeout: body)
+    r = client.get("/api/plugins/hermeneus/voices").json()
+    assert r["voices"] == [{"voice_id": "v1", "name": "Ada", "category": "premade", "flash_languages": ["de"],
+                            "is_default": False}]
+    plugin.voice_catalog = VoiceCatalog(lambda: None)
+    r = client.get("/api/plugins/hermeneus/voices")
+    assert r.status_code == 502 and r.json()["detail"].startswith("Voices: no ElevenLabs API key is set.")
+
+
 def test_api_overlay_routes(api):
     client, module, plugin, _rig = api
     assert client.get("/api/plugins/hermeneus/overlay").json() == {"visible": False, "pid": None}

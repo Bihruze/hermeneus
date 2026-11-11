@@ -17,15 +17,21 @@ from . import glue
 from .hermeneus_engine import components, doctor, overlay_page
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
-from .hermeneus_engine.options import Choices, UsageError, add_session_arguments, parse_slash_start, resolve, split_args
+from .hermeneus_engine.ipc import SettingsRefused
+from .hermeneus_engine.options import (Choices, UsageError, add_session_arguments, add_set_arguments,
+                                       changes_from_namespace, parse_slash_set, parse_slash_start, resolve,
+                                       resolve_source_change, split_args)
+from .hermeneus_engine.tts.voice_catalog import VoiceCatalog, VoiceListError
 from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
 from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_window
 
 SLASH_USAGE = ("usage: /translate start [--to LANG] [--source NAME] [--speak] "
-               "[--device OUTPUT] [--voice VOICE_ID] | /translate stop | /translate status | "
-               "/translate overlay show|hide|status")
+               "[--device OUTPUT] [--voice VOICE_ID] | /translate set [--to LANG] [--mode subtitles|both|voice] "
+               "[--speak on|off] [--voice VOICE_ID] [--device OUTPUT] [--source NAME] "
+               "| /translate stop | /translate status | /translate voices "
+               "| /translate overlay show|hide|status")
 
 # Errors a start can raise that carry a message meant for the user.
 START_ERRORS = (UsageError, SessionBusy, FeedbackRiskError, components.ComponentUnavailable, RuntimeError,
@@ -48,6 +54,7 @@ class Plugin:
         self.controller = Controller(data_dir or glue.data_dir, owner=owner)
         self._build = build
         self._list_sources = list_sources or components.list_sources
+        self.voice_catalog = VoiceCatalog(lambda: glue.get_secret(components.SECRET_NAME))
         self._save_setting = save_setting
         self.overlay = OverlayService(lambda: self.controller.data_dir, self.settings, self.controller.status)
 
@@ -101,6 +108,31 @@ class Plugin:
         note = await self.overlay.auto(platform)
         return {**status, "overlay_message": note} if note else status
 
+    async def set(self, changes: dict) -> dict:
+        """Change the running session. Answers at once; raises UsageError or SettingsRefused.
+
+        A source name is matched against the sources this Mac offers now, so
+        the session receives the full source and never lists devices itself.
+        """
+        if not changes:
+            raise UsageError("nothing to change. Pass at least one of --to, --mode, --speak, --voice, "
+                             "--device, --source.")
+        changes = dict(changes)
+        if changes.get("source") is not None:
+            sources, problems = await asyncio.to_thread(self._list_sources)
+            try:
+                changes["source"] = resolve_source_change(changes["source"], sources)
+            except UsageError as exc:
+                if not sources and problems:
+                    raise UsageError(f"{exc} ({'; '.join(problems)})") from None
+                raise
+        return await self.controller.set(changes)
+
+    async def voices(self, refresh: bool = False) -> dict:
+        """The account's voices (cached briefly). Raises VoiceListError with a plain message."""
+        result = await asyncio.to_thread(self.voice_catalog.list, refresh=refresh)
+        return result.to_dict()
+
     def unload(self) -> None:
         """on_unload: stop a session this process owns and remove its socket and lock."""
         self.controller.stop_local(timeout=2.0)
@@ -121,6 +153,12 @@ class Plugin:
                 return f"Could not start translation: {exc}"
             note = status.get("overlay_message")
             return describe_status(status) + (f" {note}" if note else "")
+        if sub == "set":
+            try:
+                result = await self.set(changes_from_namespace(parse_slash_set(rest)))
+            except (UsageError, SettingsRefused) as exc:
+                return f"Not changed: {exc}"
+            return describe_set(result)
         if sub == "overlay":
             return await self.slash_overlay(rest, context.get("platform"))
         if rest:
@@ -129,6 +167,11 @@ class Plugin:
             return describe_status(await self.controller.stop())
         if sub == "status":
             return describe_status(await self.controller.status())
+        if sub == "voices":
+            try:
+                return describe_voices(await self.voices())
+            except VoiceListError as exc:
+                return str(exc)
         return SLASH_USAGE
 
     async def slash_overlay(self, rest: list, platform: Optional[str]) -> str:
@@ -158,10 +201,51 @@ def describe_status(status: dict) -> str:
         parts.append(f"into {status['target_language']}")
     text = " ".join(parts) + "."
     if status.get("speak"):
-        text += " Spoken translation is on."
+        voice = f" (voice {status['voice_id']}" if status.get("voice_id") else ""
+        device = (f", output {status['output_device']})" if status.get("output_device") else ")") if voice else ""
+        text += (" Spoken translation is on, subtitles hidden" if status.get("mode") == "voice"
+                 else " Spoken translation is on") + voice + device + "."
+    if status.get("applying"):
+        text += " Applying: " + ", ".join(_FIELD_NAMES.get(f, f) for f in status["applying"]) + "."
     if status.get("message") and status.get("message") not in ("live", state):
         text += f" {status['message']}"
     return text
+
+
+_FIELD_NAMES = {"source": "source", "speak": "spoken translation", "voice_id": "voice",
+                "output_device": "output device", "target_language": "subtitle language", "mode": "mode"}
+_MODE_TEXT = {"subtitles": "subtitles only", "both": "subtitles and voice", "voice": "voice only (subtitles hidden)"}
+
+
+def describe_set(result: dict) -> str:
+    """One line for an accepted change: what is in effect now, what is still being applied."""
+    accepted = result.get("accepted") or {}
+    applying = result.get("applying") or []
+    parts = []
+    if "target_language" in accepted:
+        parts.append(f"subtitles now go into {accepted['target_language']} from the next sentence")
+    if "mode" in accepted:
+        parts.append(f"mode is {_MODE_TEXT.get(accepted['mode'], accepted['mode'])}")
+    text = ("Changed: " + "; ".join(parts) + ".") if parts else ""
+    if applying:
+        names = ", ".join(_FIELD_NAMES.get(f, f) for f in applying)
+        text += (" " if text else "") + (f"Applying {names} in the background; "
+                                         "/translate status shows the result.")
+    if not text:
+        text = "Nothing changed: the session already runs with these settings."
+    return text
+
+
+def describe_voices(payload: dict) -> str:
+    voices = payload.get("voices") or []
+    if not voices:
+        return "No voices on this ElevenLabs account."
+    rows = []
+    for v in voices:
+        langs = ", ".join(v.get("flash_languages") or []) or "no verified Flash v2.5 languages listed"
+        default = " (default)" if v.get("is_default") else ""
+        rows.append(f"  {v['name']}{default}  {v['voice_id']}  [{v.get('category') or 'unknown'}]  {langs}")
+    return "Voices on this ElevenLabs account (pass one with --voice):\n" + "\n".join(rows)
 
 
 # -- CLI ------------------------------------------------------------------------
@@ -184,6 +268,12 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     p_stop.add_argument("--json", action="store_true")
     p_status = sub.add_parser("status", help="show the session state")
     p_status.add_argument("--json", action="store_true")
+    p_set = sub.add_parser("set", help="change the running session: language, mode, voice, output, source")
+    add_set_arguments(p_set)
+    p_set.add_argument("--json", action="store_true")
+    p_voices = sub.add_parser("voices", help="list the voices on your ElevenLabs account")
+    p_voices.add_argument("--json", action="store_true")
+    p_voices.add_argument("--refresh", action="store_true", help="ask ElevenLabs again instead of the 60 s cache")
     p_overlay = sub.add_parser("overlay", help="show or hide the floating subtitle overlay on this Mac")
     p_overlay.add_argument("overlay_action", nargs="?", choices=("show", "hide", "status"), default="status")
     p_overlay.add_argument("--json", action="store_true")
@@ -209,13 +299,46 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
             return _print_status(asyncio.run(plugin.controller.stop()), args)
         if command == "status":
             return _print_status(asyncio.run(plugin.controller.status()), args)
+        if command == "set":
+            return cmd_set(plugin, args)
+        if command == "voices":
+            return cmd_voices(plugin, args)
         if command == "overlay":
             return asyncio.run(cmd_overlay(plugin, args))
         if command == "overlay-page":
             return cmd_overlay_page(plugin, args)
-        print("usage: hermes hermeneus {doctor,devices,run,stop,status,overlay,overlay-page}", file=sys.stderr)
+        print("usage: hermes hermeneus {doctor,devices,run,stop,status,set,voices,overlay,overlay-page}",
+              file=sys.stderr)
         return 2
     return handle
+
+
+def cmd_set(plugin: "Plugin", args: argparse.Namespace, *, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
+    as_json = bool(getattr(args, "json", False))
+    try:
+        result = asyncio.run(plugin.set(changes_from_namespace(args)))
+    except (UsageError, SettingsRefused) as exc:
+        if as_json:
+            print(json.dumps({"ok": False, "message": str(exc)}), file=out)
+        else:
+            print(f"hermeneus: not changed: {exc}", file=err)
+        return 2 if isinstance(exc, UsageError) else 1
+    print(json.dumps(result) if as_json else describe_set(result), file=out)
+    return 0
+
+
+def cmd_voices(plugin: "Plugin", args: argparse.Namespace, *, out: TextIO = sys.stdout,
+               err: TextIO = sys.stderr) -> int:
+    try:
+        payload = asyncio.run(plugin.voices(refresh=bool(getattr(args, "refresh", False))))
+    except VoiceListError as exc:
+        if getattr(args, "json", False):
+            print(json.dumps({"ok": False, "message": str(exc)}), file=out)
+        else:
+            print(f"hermeneus: {exc}", file=err)
+        return 1
+    print(json.dumps(payload, indent=2) if getattr(args, "json", False) else describe_voices(payload), file=out)
+    return 0
 
 
 async def cmd_overlay(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys.stdout,

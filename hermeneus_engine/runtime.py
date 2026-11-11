@@ -30,7 +30,7 @@ from typing import Callable, Optional
 
 from .bus import SubtitleBus
 from .ipc import BusServer
-from .session import SessionComponents, SessionOptions, TranslationSession
+from .session import SessionComponents, SessionOptions, SettingRefused, TranslationSession
 
 logger = logging.getLogger(__name__)
 
@@ -204,7 +204,8 @@ class SessionRuntime:
                             "socket": str(sock)})
         try:
             remove_stale_socket(sock)
-            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_overlay=self._overlay_request)
+            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_set=self.apply_settings,
+                                     on_overlay=self._overlay_request)
             await self._server.start()
             loop = asyncio.get_running_loop()
 
@@ -232,6 +233,13 @@ class SessionRuntime:
             return {"type": "overlay", "running": False, "url": None, "port": None,
                     "error": "this session was started without the overlay page"}
         return await asyncio.to_thread(self.overlay_page.switch, on, port)
+
+    def apply_settings(self, changes: dict) -> dict:
+        """Live change for the running session (socket op ``set``). Raises SettingRefused."""
+        session = self.session
+        if session is None:
+            raise SettingRefused("The session is still starting; try the change again in a moment.")
+        return session.apply_settings(changes)
 
     def request_stop(self) -> None:
         """Ask the run to stop. Safe from the runtime's loop thread."""

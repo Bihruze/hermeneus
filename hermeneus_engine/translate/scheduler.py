@@ -21,6 +21,13 @@ Lines start in submission order, so every line ahead of a line has an earlier
 or equal deadline and finishes by it. Each line is therefore delivered no
 later than its own deadline, apart from event loop scheduling delay.
 
+Target language
+---------------
+A line that carries ``target_language`` is translated into that language;
+otherwise into the scheduler's ``target_language``. The session stamps each
+line when it commits it, so a change of target while running applies from
+the next committed sentence and lines already queued keep their language.
+
 Merging adjacent backlog lines into one call is not implemented: the
 ``SubtitleLine`` contract has no state for a line whose translation was
 delivered on another line. The report requests that contract change.
@@ -160,18 +167,24 @@ class TranslationScheduler:
             self._tasks.add(task)
             task.add_done_callback(self._tasks.discard)
 
+    def _target_of(self, entry: _Entry) -> str:
+        return entry.line.target_language or self._target
+
     def _context_for(self, entry: _Entry) -> list[ContextLine]:
         if self.context_segments <= 0:
             return []
+        target = self._target_of(entry)
         earlier = [e for e in self._history if e.seq < entry.seq and e.line.original.strip()]
-        return [ContextLine(text=e.line.original, speaker_id=e.line.speaker_id, translation=e.translation)
+        # A translation into another language would show the model the wrong target.
+        return [ContextLine(text=e.line.original, speaker_id=e.line.speaker_id,
+                            translation=e.translation if self._target_of(e) == target else None)
                 for e in earlier[-self.context_segments:]]
 
     async def _run(self, entry: _Entry, budget_s: float) -> None:
         line = entry.line
         try:
             translation = await self._translator.translate(
-                line.original, source_language=line.source_language, target_language=self._target,
+                line.original, source_language=line.source_language, target_language=self._target_of(entry),
                 context=self._context_for(entry), speaker_id=line.speaker_id, timeout_s=budget_s)
         except asyncio.CancelledError:
             raise
@@ -192,7 +205,7 @@ class TranslationScheduler:
         timings["translated"] = self._clock()
         entry.result = dataclasses.replace(
             entry.line, state=LineState.FAILED if failed else LineState.TRANSLATED,
-            translation="" if failed else translation, error=failed, target_language=self._target,
+            translation="" if failed else translation, error=failed, target_language=self._target_of(entry),
             timings_ns=timings)
         self._finished[entry.seq] = entry
         self._deliver_ready()

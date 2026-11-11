@@ -14,6 +14,9 @@ reads JSON lines back:
     is disconnected and should subscribe again with its last seq.
 ``{"op": "stop"}``
     ``{"type": "ok"}``, then the session stops.
+``{"op": "set", "changes": {"mode"?, "speak"?, "target_language"?, "voice_id"?, "output_device"?, "source"?}}``
+    ``{"type": "set", "ok": true, "accepted": {...}, "applying": [...], "status": {...}}`` at once, or
+    ``{"type": "error", "ok": false, "message": "<why, and the fix>"}``.
 ``{"op": "overlay", "on": <true, false or null>, "port": <int or null>}``
     switches the 127.0.0.1 overlay page (null only asks) and answers
     ``{"type": "overlay", "running", "url", "port", "error"}``.
@@ -29,7 +32,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from .bus import SubtitleBus
 
@@ -45,16 +48,26 @@ class SessionUnavailable(ConnectionError):
     """No session answers on the socket."""
 
 
+class SettingsRefused(ValueError):
+    """The session refused a ``set`` request. The message says why and what to do."""
+
+
+# set handler: takes the changes, returns {"accepted", "applying", "status"} or raises ValueError.
+SetHandler = Callable[[dict], dict]
+
+
 def _encode(event: dict) -> bytes:
     return (json.dumps(event, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
 
 
 class BusServer:
     def __init__(self, path: Path, bus: SubtitleBus, *, on_stop: Callable[[], None],
+                 on_set: Optional[SetHandler] = None,
                  on_overlay: Optional[Callable[[Optional[bool], Optional[int]], Awaitable[dict]]] = None) -> None:
         self.path = Path(path)
         self._bus = bus
         self._on_stop = on_stop
+        self._on_set = on_set
         self._on_overlay = on_overlay
         self._server: Optional[asyncio.AbstractServer] = None
         self._clients: set[asyncio.Task] = set()
@@ -122,6 +135,8 @@ class BusServer:
         elif op == "subscribe":
             await self._stream(request, writer)
             return
+        elif op == "set":
+            writer.write(_encode(self._set(request.get("changes"))))
         elif op == "overlay":
             on, port = request.get("on"), request.get("port")
             if self._on_overlay is None:
@@ -133,6 +148,20 @@ class BusServer:
         else:
             writer.write(_encode({"type": "error", "message": f"unknown op {op!r}"}))
         await writer.drain()
+
+    def _set(self, changes: Any) -> dict:
+        if not isinstance(changes, dict) or not changes:
+            return {"type": "error", "ok": False, "message": "set needs a non-empty changes object"}
+        if self._on_set is None:
+            return {"type": "error", "ok": False, "message": "this session does not take changes while running"}
+        try:
+            result = self._on_set(changes)
+        except ValueError as exc:
+            return {"type": "error", "ok": False, "message": str(exc)}
+        except Exception as exc:  # a broken change must not take the socket down
+            logger.exception("hermeneus: set request failed")
+            return {"type": "error", "ok": False, "message": f"the change failed: {exc}"}
+        return {"type": "set", "ok": True, **result}
 
     async def _stream(self, request: dict, writer: asyncio.StreamWriter) -> None:
         sub = self._bus.subscribe()
@@ -204,6 +233,13 @@ class SessionClient:
         reply = await self._request({"op": "stop"})
         if reply.get("type") != "ok":
             raise SessionUnavailable(f"stop refused: {reply}")
+
+    async def set(self, changes: dict) -> dict:
+        """Apply live changes. Returns the ``set`` reply; raises SettingsRefused or SessionUnavailable."""
+        reply = await self._request({"op": "set", "changes": changes})
+        if reply.get("type") != "set":
+            raise SettingsRefused(str(reply.get("message") or reply))
+        return reply
 
     async def overlay(self, on: Optional[bool] = None, port: Optional[int] = None) -> dict:
         """Switch the overlay page (None only asks). Raises SessionUnavailable when the owner cannot."""
