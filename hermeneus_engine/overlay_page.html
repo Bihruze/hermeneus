@@ -6,45 +6,12 @@
 <meta name="referrer" content="no-referrer">
 <title>Hermeneus subtitles</title>
 <style>
-/* Colour and type values are copied from Hermes Desktop so the page matches the app.
-   Light: apps/desktop/src/styles.css:206 (--theme-foreground), :214 (--theme-card-seed),
-   :243-249 (--ui-* accents), :364-365 (text at 94% and 74% of the base colour),
-   :476-478 (--dt-font-sans), :159 and :501 (--radius-lg with --radius-scalar 0.2).
-   Dark: styles.css:612-614 (dark --ui-green and --ui-cyan) and the Nous dark palette in
-   apps/shared/src/theme-presets.ts:155-156 (background, foreground) and :163 (primary). */
+/* Colours, type and spacing come from the shared overlay token table; the server writes them
+   here for each request (overlay_page.theme_css). */
+/*HERMENEUS_THEME*/
 :root {
-  --surface: #ffffff;
-  --text-primary: rgba(23, 23, 26, 0.94);
-  --text-secondary: rgba(23, 23, 26, 0.74);
-  --speaker-1: #0053fd;
-  --speaker-2: #1f8a65;
-  --speaker-3: #db704b;
-  --speaker-4: #9e94d5;
-  --speaker-5: #4c7f8c;
-  --speaker-6: #c08532;
-  --font-sans: 'Segoe WPC', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif,
-    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', emoji;
-  --radius: calc(0.2 * 0.75rem);
   --text-size: 26px;
   --box-opacity: 0.8;
-}
-@media (prefers-color-scheme: dark) {
-  :root:not([data-theme="light"]) {
-    --surface: #0d1117;
-    --text-primary: rgba(230, 237, 243, 0.94);
-    --text-secondary: rgba(230, 237, 243, 0.74);
-    --speaker-1: #4a84fe;
-    --speaker-2: #55a583;
-    --speaker-5: #6f9ba6;
-  }
-}
-:root[data-theme="dark"] {
-  --surface: #0d1117;
-  --text-primary: rgba(230, 237, 243, 0.94);
-  --text-secondary: rgba(230, 237, 243, 0.74);
-  --speaker-1: #4a84fe;
-  --speaker-2: #55a583;
-  --speaker-5: #6f9ba6;
 }
 html, body {
   margin: 0;
@@ -71,8 +38,12 @@ html, body {
   max-width: min(92vw, 40em);
   padding: 0.2em 0.55em;
   border-radius: var(--radius);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
   text-align: center;
   color: var(--text-primary);
+  font-weight: var(--text-weight);
   text-shadow: 0 0 0.1em var(--surface), 0 0 0.25em var(--surface);
   overflow-wrap: anywhere;
 }
@@ -86,13 +57,13 @@ html, body {
   opacity: var(--box-opacity);
 }
 .original {
-  display: block;
-  font-size: 0.62em;
+  order: var(--original-order);
+  font-size: var(--original-scale);
   color: var(--text-secondary);
 }
 .speaker {
-  font-size: 0.62em;
-  font-weight: 600;
+  font-size: var(--label-scale);
+  font-weight: var(--label-weight);
   margin-inline-end: 0.5em;
 }
 .speaker[data-slot="1"] { color: var(--speaker-1); }
@@ -102,7 +73,8 @@ html, body {
 .speaker[data-slot="5"] { color: var(--speaker-5); }
 .speaker[data-slot="6"] { color: var(--speaker-6); }
 .text { transition: color 120ms linear; }
-.pending .text { color: var(--text-secondary); }
+.pending .text { color: var(--text-pending); }
+.failed .text { color: var(--text-failed); }
 </style>
 </head>
 <body>
@@ -258,6 +230,7 @@ html, body {
         id: line.line_id,
         text: translated ? line.translation : line.original,
         pending: line.state === 'partial' || line.state === 'committed',
+        failed: line.state === 'failed',
         original: settings.show_original && translated && line.original !== '' ? line.original : '',
         speaker: settings.show_speaker && number !== null ? 'Speaker ' + number : '',
         slot: number === null ? 0 : ((number - 1) % SPEAKER_SLOTS) + 1
@@ -265,7 +238,30 @@ html, body {
     })
   }
 
+  var VAR_NAME = /^--[a-z0-9-]+$/
+
+  /** The CSS variables to set for a theme event ({tokens: theme_tokens()} from the server):
+   *  the forced mode when ?theme= names one, otherwise Desktop's mode when the pane sent a
+   *  theme, otherwise the system appearance. */
+  function themeVars(tokens, mode, prefersDark) {
+    if (!tokens || typeof tokens !== 'object') return null
+    var pick = mode === 'light' || mode === 'dark' ? tokens[mode]
+      : tokens.follow_system === false ? tokens['default']
+        : tokens[prefersDark ? 'dark' : 'light']
+    var out = {}
+    var sources = [tokens.common, pick]
+    for (var i = 0; i < sources.length; i++) {
+      var src = sources[i]
+      if (!src || typeof src !== 'object') return null
+      for (var name in src) {
+        if (has(src, name) && VAR_NAME.test(name) && typeof src[name] === 'string') out[name] = src[name]
+      }
+    }
+    return out
+  }
+
   root.HermeneusOverlay = {
+    themeVars: themeVars,
     DEFAULTS: DEFAULTS,
     LIMITS: LIMITS,
     resolveSettings: resolveSettings,
@@ -331,6 +327,7 @@ html, body {
       node.speaker.setAttribute('data-slot', String(view.slot))
       setText(node.text, view.text)
       node.root.classList.toggle('pending', view.pending)
+      node.root.classList.toggle('failed', view.failed)
       if (container.children[i] !== node.root) container.insertBefore(node.root, container.children[i] || null)
       keep[view.id] = true
     }
@@ -342,7 +339,29 @@ html, body {
     })
   }
 
+  var theme = null
+  var darkQuery = root.matchMedia ? root.matchMedia('(prefers-color-scheme: dark)') : null
+
+  function applyTheme() {
+    var vars = themeVars(theme, settings.theme, darkQuery !== null && darkQuery.matches)
+    if (vars === null) return
+    Object.keys(vars).forEach(function (name) {
+      docStyle.setProperty(name, vars[name])
+    })
+  }
+
+  if (darkQuery !== null && darkQuery.addEventListener) {
+    darkQuery.addEventListener('change', function () {
+      if (theme !== null) applyTheme()
+    })
+  }
+
   function dispatch(event) {
+    if (event && event.type === 'theme') {
+      theme = event.tokens
+      applyTheme()
+      return
+    }
     var next = applyEvent(state, event)
     if (next !== state) {
       state = next
