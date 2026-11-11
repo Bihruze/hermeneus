@@ -356,3 +356,22 @@ def test_a_stale_or_dead_marker_does_not_block_a_start(data_dir):
     assert onboarding.audio_check_running(data_dir, now=lambda: 101.0) is False
     path.write_text("not json")
     assert onboarding.audio_check_running(data_dir) is False
+
+
+def test_the_auditors_probe_now_gives_failed_and_incomplete(monkeypatch, data_dir):
+    """A6-1 exactly as probes/test_a6.py drove it: components.load cannot import the process tap."""
+    components = importlib.import_module(f"{pkg.__name__}.hermeneus_engine.components")
+    real_load = components.load
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+
+    def fake_load(name):
+        if name == "capture.process-tap":
+            raise components.ComponentUnavailable(f"{name} is not part of this build (numpy is missing)")
+        return real_load(name)
+
+    monkeypatch.setattr(components, "load", fake_load)
+    check = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available)
+    state = check.state()
+    assert state["state"] == "failed" and "(numpy)" in state["message"] and "Restart gateway" in state["message"]
+    setup = onboarding.setup_state(key_set=True, audio=state, model={}, language={"code": "en"})
+    assert setup["complete"] is False

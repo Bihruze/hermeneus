@@ -352,6 +352,7 @@ def process_tap_available() -> tuple[bool, str]:
         return False, "this computer does not use the macOS process tap"
     from .hermeneus_engine import components
     try:
+        components.load("capture.process-tap")  # names the missing module, e.g. "(numpy is missing)"
         backend = components.capture_backend("process-tap")
     except components.ComponentUnavailable as exc:
         raise AudioLibrariesMissing(str(exc), name=_missing_name(str(exc))) from None
@@ -369,7 +370,7 @@ def _missing_name(text: str) -> str:
     """The module named in a 'process-tap is not part of this build (numpy is missing)' reason, else the text."""
     if "(" in text and text.endswith("is missing)"):
         return text.rsplit("(", 1)[1][: -len(" is missing)")]
-    return text
+    return "the capture module"
 
 
 def _marker(data_dir: Any) -> Path:
