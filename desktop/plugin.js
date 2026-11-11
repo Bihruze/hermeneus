@@ -534,6 +534,8 @@ export function voiceLabel(voices, voiceId, fallback) {
 /** Overlay look settings the pane offers (plugin.yaml overlay_* keys, hermeneus_engine/overlay_settings.py). */
 export const OVERLAY_TEXT_SIZES = Object.freeze([20, 26, 34, 44])
 export const OVERLAY_OPACITIES = Object.freeze([0, 40, 80, 90, 100])
+/** Rows: 1 to 6, as the native strip can be dragged to (overlay_settings.MAX_LINES_MAX). */
+export const OVERLAY_LINES = Object.freeze([1, 2, 3, 4, 5, 6])
 
 /** Theme tokens the overlays draw with (hermeneus_engine/overlay_tokens.py keeps the same table). */
 export const OVERLAY_COLOR_TOKENS = Object.freeze({
@@ -694,10 +696,27 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
 
       if (!overlay.get().busy) {
         takeOverlay(result)
+        await takeResize(result)
       }
     } catch {
       // The next tick asks again.
     }
+  }
+
+  /** The user dragged the native strip to a number of rows (GET /overlay answers `resized`): save it as
+   *  overlay_max_lines the way the look controls do, so the pane, the page and the config agree. */
+  function takeResize(result) {
+    const rows = result?.resized?.max_lines
+
+    if (!Number.isInteger(rows) || rows < OVERLAY_LINES[0] || rows > OVERLAY_LINES.at(-1)) {
+      return undefined
+    }
+
+    if (result.settings && result.settings.max_lines === rows) {
+      return undefined
+    }
+
+    return setOverlayLook({ overlay_max_lines: rows })
   }
 
   // Plugin settings are written the way Desktop's own Settings form writes them
@@ -2213,7 +2232,7 @@ function OverlayLook({ ctrl }) {
         style: S.lookPanel,
         children: [
           pick('text_size', OVERLAY_TEXT_SIZES, t('overlayTextSize')),
-          pick('max_lines', [1, 2, 3], t('overlayLines')),
+          pick('max_lines', OVERLAY_LINES, t('overlayLines')),
           pick('opacity', OVERLAY_OPACITIES, t('overlayOpacity')),
           toggle('show_original', t('overlayOriginal')),
           toggle('show_speaker', t('overlaySpeaker')),

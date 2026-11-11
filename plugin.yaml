@@ -89,7 +89,7 @@ config_schema:
     type: int
     default: 2
     label: "Overlay lines"
-    description: "Lines of translation the overlay shows before older text rolls off (1 to 3)."
+    description: "Lines of translation the overlay shows before older text rolls off (1 to 6). Dragging the floating strip's height saves it too."
   overlay_show_original:
     type: bool
     default: false

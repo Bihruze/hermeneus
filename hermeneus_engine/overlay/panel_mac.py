@@ -3,9 +3,13 @@
 The strip is a borderless ``NSPanel`` with ``NSWindowStyleMaskNonactivatingPanel``
 that ignores the mouse, so every click goes to the app underneath. Small
 child panels take the mouse: the grip at the left edge moves the strip (right
-click opens a menu: width presets, reset position, hide), the handle at the
-right edge resizes its width, and the history tab above the strip's right end
-opens the history (click, or scroll over it). While the history is open the
+click opens a menu: width presets, reset position, hide; a double click
+gives back the default size), the handle at the right edge resizes its width,
+the handle at the top edge its height and the one in the top right corner
+both (the bottom edge stays put; on release the height snaps to whole rows,
+``OverlayApp.resized``), and the history tab above the strip's right end
+opens the history (click, or scroll over it). Each handle shows a resize
+cursor while the pointer is over it. While the history is open the
 strip itself takes the mouse: scrolling over it moves through earlier rows, a
 click on it or on the "Back to live" tab above it returns to live, and so does
 eight seconds without a scroll (``app.HISTORY_IDLE_S``). Then it ignores the
@@ -44,6 +48,9 @@ from AppKit import (
     NSBackingStoreBuffered,
     NSBezierPath,
     NSColor,
+    NSCursor,
+    NSCursorFrameResizeDirectionsAll,
+    NSCursorFrameResizePositionTopRight,
     NSEvent,
     NSFloatingWindowLevel,
     NSFont,
@@ -62,6 +69,10 @@ from AppKit import (
     NSShadowAttributeName,
     NSStrokeColorAttributeName,
     NSStrokeWidthAttributeName,
+    NSTrackingActiveAlways,
+    NSTrackingArea,
+    NSTrackingInVisibleRect,
+    NSTrackingMouseEnteredAndExited,
     NSView,
     NSWindowCollectionBehaviorCanJoinAllSpaces,
     NSWindowCollectionBehaviorFullScreenAuxiliary,
@@ -77,12 +88,16 @@ from ..overlay_settings import OverlaySettings
 from ..overlay_tokens import STRIP_RADIUS_PX
 from . import theme
 from .model import FAILED, LABEL, MARK, PENDING, Run, Strings, View
-from .placement import MIN_WIDTH_PT, WIDTH_PRESETS, Display, Rect, display_key
+from ..overlay_settings import MAX_LINES_MAX, MAX_LINES_MIN
+from .placement import WIDTH_PRESETS, Display, Rect, display_key, resize_frame
 
 PAD_X = 20.0  # text inset from the strip's sides; the grip and the resize handle sit inside them
 PAD_Y = 10.0
 HANDLE_W = 10.0
 HANDLE_INSET = 5.0
+TOP_HANDLE_W = 36.0  # the top edge handle: a short bar in the strip's top padding
+CORNER = 14.0  # the top right corner handle, a square
+RESIZE_ROLES = ("right", "top", "corner")
 LINE_SPACING = 1.22
 ORIGINAL_SCALE = 0.58
 LABEL_SCALE = 0.62
@@ -189,27 +204,56 @@ class HermeneusOverlayTextView(HermeneusOverlayOwnedView):
             self.owner._draw_text(self)
 
 
+def handle_cursor(role: str):
+    """The pointer over a handle: an open hand on the grip, resize arrows on the edges and the corner."""
+    if role == "right":
+        return NSCursor.resizeLeftRightCursor()
+    if role == "top":
+        return NSCursor.resizeUpDownCursor()
+    if role == "corner":
+        if NSCursor.respondsToSelector_("frameResizeCursorFromPosition:inDirections:"):  # macOS 15 and later
+            return NSCursor.frameResizeCursorFromPosition_inDirections_(NSCursorFrameResizePositionTopRight,
+                                                                        NSCursorFrameResizeDirectionsAll)
+        return NSCursor.crosshairCursor()
+    return NSCursor.openHandCursor()
+
+
 class HermeneusOverlayHandleView(HermeneusOverlayOwnedView):
-    """A grip (``role`` "move") or a width handle (``role`` "resize"). Takes the mouse without activating."""
+    """The grip (``role`` "move") or a resize handle (``role`` "right", "top" or "corner"). Takes the mouse
+    without activating; nothing around it does, so clicks next to it still reach the app underneath."""
 
     def acceptsFirstMouse_(self, _event):
         return True
 
-    def mouseDown_(self, _event):
-        if self.owner is not None:
-            self.start = (NSEvent.mouseLocation(), self.owner.strip.frame())
+    def mouseEntered_(self, _event):
+        handle_cursor(self.role).set()
+
+    def mouseExited_(self, _event):
+        if getattr(self, "start", None) is None:  # while dragging the pointer may run ahead of the handle
+            NSCursor.arrowCursor().set()
+
+    def mouseDown_(self, event):
+        if self.owner is None:
+            return
+        if self.role == "move" and event.clickCount() == 2:
+            self.start = None
+            self.owner.on_reset_size()
+            return
+        self.start = (NSEvent.mouseLocation(), self.owner.strip.frame())
 
     def mouseDragged_(self, _event):
         start = getattr(self, "start", None)
         if self.owner is None or start is None:
             return
         now = NSEvent.mouseLocation()
+        handle_cursor(self.role).set()
         self.owner._dragged(self.role, start[1], now.x - start[0].x, now.y - start[0].y)
 
     def mouseUp_(self, _event):
         if self.owner is not None and getattr(self, "start", None) is not None:
             self.start = None
-            self.owner._drag_ended()
+            self.owner._drag_ended(self.role)
+            NSCursor.arrowCursor().set()
 
     def rightMouseDown_(self, event):
         if self.owner is not None:
@@ -285,6 +329,23 @@ def _view(cls, frame, owner, **attrs):
     return view
 
 
+def handle_frames(frame: Rect) -> dict:
+    """Where the grip and the resize handles sit for a strip at ``frame``: ``{panel attribute: (x, y, w, h)}``.
+    All lie inside the strip: the grip and the width handle in the side padding, the height handle in the top
+    padding, the corner square in the top right corner, above the width handle."""
+    top = frame.y + frame.h
+    right = frame.x + frame.w
+    below_corner = frame.h - CORNER  # the side handles stay under the corner square
+    h = max(16.0, min(40.0, below_corner - PAD_Y))
+    y = frame.y + max(0.0, (below_corner - h) / 2)
+    return {
+        "grip": (frame.x + HANDLE_INSET, frame.y + (frame.h - h) / 2, HANDLE_W, h),
+        "sizer": (right - HANDLE_INSET - HANDLE_W, y, HANDLE_W, h),
+        "top_handle": (frame.x + (frame.w - TOP_HANDLE_W) / 2, top - HANDLE_W, TOP_HANDLE_W, HANDLE_W),
+        "corner": (right - CORNER, top - CORNER, CORNER, CORNER),
+    }
+
+
 class MacPanel:
     """``app.Panel`` for macOS."""
 
@@ -294,9 +355,12 @@ class MacPanel:
                  on_hide: Callable[[], None] = lambda: None,
                  on_scroll: Callable[[int], None] = lambda rows: None,
                  on_live: Callable[[], None] = lambda: None,
+                 on_resized: Callable[[Rect, bool], None] = lambda r, rows: None,
+                 on_reset_size: Callable[[], None] = lambda: None,
                  appearance: Optional[str] = None, motion: Optional[bool] = None, halo: bool = True) -> None:
         self.on_moved, self.on_width, self.on_reset, self.on_hide = on_moved, on_width, on_reset, on_hide
         self.on_scroll, self.on_live = on_scroll, on_live
+        self.on_resized, self.on_reset_size = on_resized, on_reset_size
         self.strings = Strings()
         self._wheel = 0.0  # scroll distance not yet a whole row
         self.view = View()
@@ -314,7 +378,9 @@ class MacPanel:
         self.strip_view.addSubview_(self.text_view)
         self.strip.setContentView_(self.strip_view)
         self.grip, self.grip_view = self._handle("move")
-        self.sizer, self.sizer_view = self._handle("resize")
+        self.sizer, self.sizer_view = self._handle("right")
+        self.top_handle, self.top_view = self._handle("top")
+        self.corner, self.corner_view = self._handle("corner")
         self.history_tab, self.history_view = self._tab("history")
         self.live_tab, self.live_view = self._tab("live")
         self._menu_target = HermeneusOverlayMenuTarget.alloc().initWithOwner_(self)
@@ -322,13 +388,20 @@ class MacPanel:
         if appearance is not None:  # renders for review pick an appearance; normal runs follow the system
             from AppKit import NSAppearance
             look = NSAppearance.appearanceNamed_(appearance)
-            for window in (self.strip, self.grip, self.sizer, self.history_tab, self.live_tab):
+            for window in (self.strip, self.grip, self.sizer, self.top_handle, self.corner, self.history_tab,
+                           self.live_tab):
                 window.setAppearance_(look)
 
     def _handle(self, role: str):
         panel = _make_panel(NSMakeRect(0, 0, HANDLE_W, 30), mouse=True)
         panel.setHasShadow_(False)
         view = _view(HermeneusOverlayHandleView, NSMakeRect(0, 0, HANDLE_W, 30), self, role=role, start=None)
+        # Enter and exit events even while another app is active, for the cursor. The view only reads its own
+        # pointer events, so this needs no permission.
+        area = NSTrackingArea.alloc().initWithRect_options_owner_userInfo_(
+            NSMakeRect(0, 0, 0, 0), NSTrackingMouseEnteredAndExited | NSTrackingActiveAlways | NSTrackingInVisibleRect,
+            view, None)
+        view.addTrackingArea_(area)
         panel.setContentView_(view)
         return panel, view
 
@@ -432,10 +505,8 @@ class MacPanel:
         if frame is None:
             f = self.strip.frame()
             frame = Rect(f.origin.x, f.origin.y, f.size.width, f.size.height)
-        h = max(20.0, min(40.0, frame.h - 2 * PAD_Y))
-        y = frame.y + (frame.h - h) / 2
-        self.grip.setFrame_display_(NSMakeRect(frame.x + HANDLE_INSET, y, HANDLE_W, h), True)
-        self.sizer.setFrame_display_(NSMakeRect(frame.x + frame.w - HANDLE_INSET - HANDLE_W, y, HANDLE_W, h), True)
+        for handle, rect in handle_frames(frame).items():
+            getattr(self, handle).setFrame_display_(NSMakeRect(*rect), True)
         top = frame.y + frame.h + TAB_GAP
         self.history_tab.setFrame_display_(NSMakeRect(frame.x + frame.w - 8 - 30, top, 30, TAB_H), True)
         live_w = self._tab_text_width(self.strings.back_to_live) + 24
@@ -457,7 +528,8 @@ class MacPanel:
         self.view, self.settings = view, settings
         self.strip_view.setNeedsDisplay_(True)
         self.text_view.setNeedsDisplay_(True)
-        for handle in (self.grip_view, self.sizer_view, self.history_view, self.live_view):
+        for handle in (self.grip_view, self.sizer_view, self.top_view, self.corner_view, self.history_view,
+                       self.live_view):
             handle.setNeedsDisplay_(True)
         self.strip.invalidateShadow()
         # The strip takes the mouse only while the history is open (scroll through it, click for live).
@@ -493,7 +565,7 @@ class MacPanel:
         NSAnimationContext.runAnimationGroup_completionHandler_(run, done)
 
     def set_visible(self, visible: bool) -> None:
-        handles = (self.grip, self.sizer)
+        handles = (self.grip, self.sizer, self.top_handle, self.corner)
         if visible:
             self.strip.orderFrontRegardless()  # never makeKeyAndOrderFront: no focus change
             for handle in handles:
@@ -518,6 +590,9 @@ class MacPanel:
         """The history tab while there is something to look back at; "back to live" while looking back."""
         self._show_child(self.history_tab, visible and (self.view.older or self.view.history))
         self._show_child(self.live_tab, visible and self.view.history)
+        # The history makes the strip taller for a while; its height is not the user's to drag then.
+        for handle in (self.top_handle, self.corner):
+            self._show_child(handle, visible and not self.view.history)
 
     def _scrolled(self, event) -> None:
         """Wheel or trackpad: whole rows back (up) or forward (down), as a text view scrolls."""
@@ -537,7 +612,8 @@ class MacPanel:
     # -- drawing ----------------------------------------------------------------------
 
     def _appearance_changed(self) -> None:
-        for name in ("strip_view", "text_view", "grip_view", "sizer_view", "history_view", "live_view"):
+        for name in ("strip_view", "text_view", "grip_view", "sizer_view", "top_view", "corner_view", "history_view",
+                     "live_view"):
             view = getattr(self, name, None)
             if view is not None:
                 view.setNeedsDisplay_(True)
@@ -695,13 +771,27 @@ class MacPanel:
     def _draw_handle(self, view) -> None:
         p = self.palette()
         bounds = view.bounds()
+        w, h = bounds.size.width, bounds.size.height
+        if view.role == "corner":
+            # Two short diagonal strokes in the top right corner, the usual sign of a resizable corner.
+            _color(p.text_tertiary).setStroke()
+            for reach in (7.0, 11.0):
+                line = NSBezierPath.bezierPath()
+                line.moveToPoint_((w - reach, h - 3.0))
+                line.lineToPoint_((w - 3.0, h - reach))
+                line.setLineWidth_(1.3)
+                line.setLineCapStyle_(1)
+                line.stroke()
+            return
         _color(p.text_tertiary).setFill()
-        cx = bounds.size.width / 2
-        columns = (-1, 1) if view.role == "move" else (0,)
-        for row in range(3):
-            for col in columns:
-                y = bounds.size.height / 2 + (row - 1) * 6
-                NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(cx + col * 2.5 - 1.25, y - 1.25, 2.5, 2.5)).fill()
+        cx, cy = w / 2, h / 2
+        if view.role == "top":
+            dots = [(cx + i * 6, cy) for i in (-1, 0, 1)]
+        else:
+            columns = (-1, 1) if view.role == "move" else (0,)
+            dots = [(cx + col * 2.5, cy + (row - 1) * 6) for row in range(3) for col in columns]
+        for x, y in dots:
+            NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(x - 1.25, y - 1.25, 2.5, 2.5)).fill()
 
     # -- interaction --------------------------------------------------------------------
 
@@ -709,13 +799,24 @@ class MacPanel:
         if role == "move":
             self.strip.setFrameOrigin_((start.origin.x + dx, start.origin.y + dy))
             return
-        width = max(MIN_WIDTH_PT, start.size.width + dx)
-        self.strip.setFrame_display_(NSMakeRect(start.origin.x, start.origin.y, width, start.size.height), True)
-        self._place_handles()
+        # The height follows the mouse while dragging; it snaps to whole rows on release (``OverlayApp.resized``).
+        screen = self.strip.screen() or NSScreen.mainScreen()
+        v = screen.visibleFrame()
+        original = bool(self.view.original)
+        frame = resize_frame(Rect(start.origin.x, start.origin.y, start.size.width, start.size.height), role, dx, dy,
+                             Rect(v.origin.x, v.origin.y, v.size.width, v.size.height),
+                             self.strip_height(self.settings, MAX_LINES_MIN, original),
+                             self.strip_height(self.settings, MAX_LINES_MAX, original))
+        self.strip.setFrame_display_(NSMakeRect(frame.x, frame.y, frame.w, frame.h), True)
+        self._place_handles(frame)
 
-    def _drag_ended(self) -> None:
+    def _drag_ended(self, role: str = "move") -> None:
         f = self.strip.frame()
-        self.on_moved(Rect(f.origin.x, f.origin.y, f.size.width, f.size.height))
+        rect = Rect(f.origin.x, f.origin.y, f.size.width, f.size.height)
+        if role == "move":
+            self.on_moved(rect)
+        else:
+            self.on_resized(rect, role != "right")
 
     def _menu(self):
         menu = NSMenu.alloc().initWithTitle_("Hermeneus overlay")

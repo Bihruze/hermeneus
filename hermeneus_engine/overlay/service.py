@@ -11,6 +11,7 @@ from ..overlay_settings import from_settings
 from ..overlay_tokens import ThemeError, palette_from_payload  # noqa: F401  (callers catch ThemeError)
 from ..runtime import lock_holder
 from . import control
+from .placement import wanted_rows
 from .control import OverlayUnavailable  # noqa: F401  (callers catch it from here)
 
 RUNNING = frozenset({"starting", "live", "reconnecting"})
@@ -46,10 +47,17 @@ class OverlayService:
         return await asyncio.to_thread(self._hide, self.data_dir)
 
     def status(self) -> dict:
-        """Open or not, and ``armed``: whether the ``overlay`` setting opens it with the next session."""
+        """Open or not, and ``armed``: whether the ``overlay`` setting opens it with the next session.
+
+        ``resized`` is there after the user dragged the strip to a number of rows the settings do not hold yet:
+        ``{"max_lines": n}``. The Desktop pane saves it as ``overlay_max_lines``, as its look controls do."""
         look = from_settings(self._settings())
         settings = {k: v for k, v in asdict(look).items() if k != "auto"}
-        return {**self._status_fn(self.data_dir), "armed": look.auto, "settings": settings}
+        out = {**self._status_fn(self.data_dir), "armed": look.auto, "settings": settings}
+        wanted = wanted_rows(control.positions_file(self.data_dir))
+        if wanted is not None and wanted != look.max_lines:
+            out["resized"] = {"max_lines": wanted}
+        return out
 
     def apply(self) -> dict:
         """Hand the current settings to an open overlay; it redraws within a second, without closing."""

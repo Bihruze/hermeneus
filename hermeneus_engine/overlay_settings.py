@@ -26,7 +26,7 @@ KEY_PACE = "overlay_pace"
 KEY_READING_CPS = "overlay_reading_cps"
 
 TEXT_SIZE_MIN, TEXT_SIZE_MAX = 14, 64
-MAX_LINES_MIN, MAX_LINES_MAX = 1, 3
+MAX_LINES_MIN, MAX_LINES_MAX = 1, 6  # 6: the rows the strip can be dragged to (and the history view)
 OPACITY_MIN, OPACITY_MAX = 0, 100
 # "banner" (the default, owner decision W28) is overlay_tokens.BANNER; "theme" follows Hermes Desktop
 # (overlay_tokens.FALLBACK or what the pane sent).
