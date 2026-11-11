@@ -14,6 +14,36 @@ This release is tested on macOS with real audio. Windows support is a preview: i
 4. The translated line appears in every place that is showing the session: the Desktop pane, the subtitle overlay, the overlay page, `hermes hermeneus run` in a terminal, and `/translate status`.
 5. With spoken translation on, the translated line goes to ElevenLabs Flash v2.5 over its multi-stream-input WebSocket and plays on the output device you picked. The mode decides what you get: subtitles only, subtitles and voice, or voice only.
 
+## Quick start
+
+### In Hermes Desktop (no terminal)
+
+> Draft for Seher's approval. Screenshots are placeholders until the look is approved; the counts are W29's, to be confirmed by the audit on a clean Hermes profile.
+
+1. **Install.** Open **Capabilities > Plugins** and press **Install from Git**. Enter `https://github.com/Bihruze/hermeneus`, press **Review repository**, then **Install**. Hermes installs the Python libraries Hermeneus needs, turns the plugin on and turns on its pane and status bar item. Once the catalog lists Hermeneus, its card's **Install** button does the same without the address.
+   > Screenshot placeholder: docs/screenshots/quick-start-1-install.png, the Install plugin dialog.
+2. **Open the pane.** Click **Hermeneus** in the status bar. The pane opens on **Set up live subtitles**.
+   > Screenshot placeholder: docs/screenshots/quick-start-2-setup.png.
+3. **ElevenLabs key.** Press **Create a key** (your browser opens ElevenLabs; give the key Speech to Text access, plus Text to Speech and Voices read if you want spoken translation). Then press **Add key in Hermes**: Hermes opens **Settings > Tools & Keys** at `ELEVENLABS_API_KEY`. Paste the key there and save. The key goes into Hermes's own key store, never into a chat or into the pane.
+   > Screenshot placeholder: docs/screenshots/quick-start-3-key.png.
+4. **System audio.** Back in the pane, press **Allow system audio**. macOS asks for System Audio Recording for Hermes; click **Allow**. Hermeneus starts and stops a short muted test capture and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again**.
+   > Screenshot placeholder: docs/screenshots/quick-start-4-audio.png.
+5. **Start.** The translation model is your main Hermes model and the subtitle language is your Hermes or system language, both already filled in. Press **Start**. Subtitles appear in the pane and in the floating overlay above your other apps.
+   > Screenshot placeholder: docs/screenshots/quick-start-5-live.png.
+
+After the first run, one click on **Hermeneus** in the status bar starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
+
+Optional: for subtitles closer to the speech, the pane's **Choose a faster model** opens **Settings > Models** at **Live translation**.
+
+### In a terminal
+
+```bash
+hermes plugins install Bihruze/hermeneus   # answer y to enable it and to install its Python packages
+hermes config set ELEVENLABS_API_KEY <key> # or enter it at the install prompt
+hermes hermeneus doctor                    # the first run shows the macOS System Audio Recording prompt
+hermes hermeneus run --to tr
+```
+
 ## Requirements
 
 - macOS 14.2 or later for the process tap. macOS 13 runs only with the virtual device fallback.
@@ -59,7 +89,7 @@ Then add your ElevenLabs key. Run this in your own terminal so the key does not 
 hermes config set ELEVENLABS_API_KEY <key>
 ```
 
-Hermes Desktop copies the plugin's desktop half (`desktop/plugin.js`) into `~/.hermes/desktop-plugins/` when the plugin is installed. Restart the gateway after enabling the plugin so the pane can reach its backend routes.
+Installed from a terminal, the pane and the status bar item stay off until you turn on the plugin's **Desktop** switch in Hermes Desktop under **Capabilities > Plugins** (press **Rescan** first if the row says "copying..."). Hermes switches the desktop half of a plugin package on only when Desktop's own install dialog installs it. See [Quick start](#quick-start).
 
 To remove it:
 
@@ -69,7 +99,7 @@ hermes plugins remove hermeneus
 
 ## First run
 
-In Hermes Desktop, turn on Hermeneus in Capabilities > Plugins. Desktop installs the pane and the status bar item switched off, as it does for the desktop half of every plugin package, and shows neither until the plugin is on.
+In Hermes Desktop the pane walks you through the first run (see [Quick start](#quick-start)); nothing below is needed there. From a terminal, run the doctor first.
 
 Run the doctor first:
 
@@ -247,7 +277,7 @@ The overlay is a strip near the bottom of the screen that floats above every oth
 - It closes by itself when the session stops, and with `overlay hide`, the same buttons, or **Hide overlay** in its menu.
 - It never takes keyboard focus and clicks pass through it to the app underneath. Only two small handles take the mouse: drag the grip at the left edge to move the strip, drag the handle at the right edge to change its width, right-click the grip for width presets, **Reset position** and **Hide overlay**. Position and width are remembered for each display.
 - It draws with the Hermes Desktop theme you use. The pane reads the theme's colours, radius and font on its own element and sends them to the backend, and both the overlay and the 127.0.0.1 page use them, in Desktop's light or dark. Until Desktop has sent a theme, the overlay uses the default Nous values and the system appearance.
-- `overlay_style: banner` swaps the theme for the Hermeneus banner colours (deep navy, a periwinkle edge, warm white text, speaker colours tuned to the navy) on both the overlay and the page. The default, `theme`, follows Desktop as above.
+- `overlay_style` picks the look, also from **Style** in the pane's overlay look menu. The default, `banner`, uses the Hermeneus banner colours (deep navy, a periwinkle edge, warm white text, speaker colours tuned to the navy) on both the overlay and the page. `theme` follows Desktop as above.
 - Text keeps a soft halo in the background colour, and below 50% background opacity a thin outline drawn behind opaque letters as well, so it stays readable on bright or dark video with no background at all.
 - The look popover next to the pane's overlay button sets text size, lines, background opacity, the original line and speaker names. These are the `overlay_*` settings below; a change there or in Settings reaches an open overlay without closing it.
 - The overlay opens only on the Mac where the request comes from: a slash command from a chat platform such as Telegram, or a Desktop connected to a remote backend, is refused with a message.
@@ -272,13 +302,13 @@ Command flags override the settings for one session.
 | `output_device` | Spoken translation output | str | `""` | | Output device for spoken translation. It must not feed the audio source. |
 | `voice_id` | Voice | str | `""` | | ElevenLabs voice id for spoken translation. Empty uses the default voice Talia. |
 | `context_segments` | Context lines | int | `3` | | Earlier lines sent with each translation request (0 to 10). |
-| `overlay` | Subtitle overlay | bool | `false` | | Open the floating subtitle overlay with every session. It floats above other apps on this Mac and never takes keyboard focus. |
+| `overlay` | Subtitle overlay | bool | `true` | | Open the floating subtitle overlay with every session started on this Mac. It floats above other apps and never takes keyboard focus. Turn it off to keep subtitles in the pane and the terminal only. |
 | `overlay_text_size` | Overlay text size | int | `26` | | Translation text size in the overlay, in points (14 to 64). |
 | `overlay_max_lines` | Overlay lines | int | `2` | | Lines of translation the overlay shows before older text rolls off (1 to 3). |
 | `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
 | `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
-| `overlay_style` | Overlay style | str | `theme` | theme, banner | theme follows the Hermes Desktop theme. banner uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. |
+| `overlay_style` | Overlay style | str | `banner` | banner, theme | banner uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. theme follows the Hermes Desktop theme. |
 | `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |

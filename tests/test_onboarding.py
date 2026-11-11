@@ -187,3 +187,26 @@ def test_open_privacy_settings_uses_open_with_the_privacy_url(monkeypatch):
     onboarding.open_privacy_settings(run=seen.append)
     assert seen == [["/usr/bin/open", onboarding.PRIVACY_URL]]
     assert "Privacy_ScreenCapture" in onboarding.PRIVACY_URL
+
+
+async def test_missing_plugin_libraries_ask_for_one_restart_not_a_skip(data_dir):
+    def unavailable():
+        raise ModuleNotFoundError("No module named 'objc'", name="objc")
+
+    check = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=unavailable)
+    state = check.state()
+    assert state["state"] == "failed" and "Quit and reopen Hermes" in state["message"] and "objc" in state["message"]
+
+    check, _ = _check([ModuleNotFoundError("No module named 'numpy'", name="numpy")], data_dir)
+    check.start()
+    await check.wait()
+    assert check.state()["state"] == "failed" and "numpy" in check.state()["message"]
+    assert "Check again" in check.state()["message"]
+
+
+def test_a_backend_check_that_raises_is_a_failure_not_a_skip(data_dir):
+    def broken():
+        raise RuntimeError("HAL busy")
+
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=broken).state()
+    assert state["state"] == "failed" and "HAL busy" in state["message"]

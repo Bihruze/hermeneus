@@ -59,6 +59,18 @@ AUDIO_NOT_NEEDED = "not_needed"  # no process tap here (virtual device or Window
 
 FALLBACK_LANGUAGE = "en"
 
+# Hermes installs plugin dependencies when the plugin is turned on; a process that started before
+# that cannot import them until it restarts (hermes_cli/plugins_activation.py:75-79).
+RESTART_MESSAGE = ("Hermeneus's audio libraries ({module}) are not loaded in this Hermes yet. Quit and "
+                   "reopen Hermes, then press Check again.")
+
+
+def missing_module_message(exc: BaseException) -> Optional[str]:
+    """The restart message for an import failure, else None."""
+    if isinstance(exc, ImportError):
+        return RESTART_MESSAGE.format(module=getattr(exc, "name", None) or str(exc))
+    return None
+
 
 def _now() -> float:
     return time.time()
@@ -196,8 +208,10 @@ class AudioCheck:
                 return dict(self._current)
         try:
             ok, why = self._available()
+        except ImportError as exc:  # never "not needed": the check itself cannot load yet
+            return {"state": AUDIO_FAILED, "message": missing_module_message(exc), "at": None}
         except Exception as exc:
-            ok, why = False, f"could not check: {exc}"
+            return {"state": AUDIO_FAILED, "message": f"Could not check the capture backend: {exc}", "at": None}
         if not ok:
             return {"state": AUDIO_NOT_NEEDED, "message": why, "at": None}
         saved = self._saved()
@@ -229,7 +243,8 @@ class AudioCheck:
                        "message": (f"The audio check did not finish within {int(self._deadline_s)} seconds. "
                                    f"If macOS is showing a prompt, answer it, then press Check again.")}
         except Exception as exc:
-            outcome = {"state": AUDIO_FAILED, "message": f"The audio check failed: {exc}"}
+            outcome = {"state": AUDIO_FAILED,
+                       "message": missing_module_message(exc) or f"The audio check failed: {exc}"}
         outcome["at"] = self._clock()
         if outcome["state"] in (AUDIO_OK, AUDIO_DENIED):
             self._save(outcome)
