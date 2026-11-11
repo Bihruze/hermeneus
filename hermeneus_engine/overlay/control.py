@@ -66,6 +66,20 @@ def positions_file(data_dir: Path) -> Path:
     return Path(data_dir) / OVERLAY_DIR / "positions.json"
 
 
+def theme_file(data_dir: Path) -> Path:
+    """The token values the Desktop pane last sent (``overlay_tokens``); read by both overlays."""
+    return Path(data_dir) / OVERLAY_DIR / "theme.json"
+
+
+def write_theme(data_dir: Path, palette) -> None:
+    from ..overlay_tokens import palette_to_json
+    overlay_dir(data_dir)
+    path = theme_file(data_dir)
+    tmp = path.with_suffix(".tmp")
+    tmp.write_text(palette_to_json(palette), encoding="utf-8")
+    os.replace(tmp, path)
+
+
 # -- environment checks -------------------------------------------------------------
 
 def _gui_session() -> bool:

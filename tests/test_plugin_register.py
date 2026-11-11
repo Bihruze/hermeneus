@@ -1,4 +1,6 @@
+import json
 import argparse
+import json
 import asyncio
 import importlib.util
 import sys
@@ -220,7 +222,8 @@ def test_api_voices_lists_the_account_and_reports_errors(api, monkeypatch):
 
 def test_api_overlay_routes(api):
     client, module, plugin, _rig = api
-    assert client.get("/api/plugins/hermeneus/overlay").json() == {"visible": False, "pid": None}
+    answer = client.get("/api/plugins/hermeneus/overlay").json()
+    assert answer["visible"] is False and answer["armed"] is False and answer["settings"]["max_lines"] == 2
     assert client.post("/api/plugins/hermeneus/overlay", json={"visible": "yes"}).status_code == 400
     # The test client is not on 127.0.0.1, so it is a remote Desktop: the overlay is refused, not opened there.
     answer = client.post("/api/plugins/hermeneus/overlay", json={"visible": True})
@@ -241,3 +244,21 @@ def test_surface_treats_a_proxied_loopback_request_as_remote(api):
     assert module._surface(req("192.168.1.20")) == "remote"
     for header in ("X-Forwarded-For", "Forwarded", "X-Real-IP", "X-Forwarded-Host"):
         assert module._surface(req("127.0.0.1", [(header, "203.0.113.7")])) == "remote", header
+
+
+THEME = {"mode": "dark", "name": "midnight",
+         "colors": {"surface": "rgb(22, 27, 34)", "text": "color(srgb 0.9 0.93 0.95 / 0.94)",
+                    "text_secondary": "rgba(230, 237, 243, 0.74)", "text_tertiary": "rgba(230, 237, 243, 0.54)",
+                    "stroke": "rgba(74, 132, 254, 0.2)",
+                    "speakers": ["rgb(0, 83, 253)", "#55a583", "rgb(219, 112, 75)"]},
+         "radius_px": 2.4, "font": "'Segoe WPC', -apple-system, sans-serif"}
+
+
+def test_api_overlay_theme_is_validated_and_stored(api, data_dir):
+    client, module, plugin, _rig = api
+    bad = client.post("/api/plugins/hermeneus/overlay/theme", json={**THEME, "mode": "sepia"})
+    assert bad.status_code == 400 and "mode" in bad.json()["detail"]
+    assert client.post("/api/plugins/hermeneus/overlay/theme", json=THEME).status_code == 200
+    stored = json.loads((data_dir / "overlay" / "theme.json").read_text())
+    assert stored["dark"] is True and stored["source"] == "desktop:midnight" and len(stored["speakers"]) == 3
+    assert client.post("/api/plugins/hermeneus/overlay/apply").json()["visible"] is False

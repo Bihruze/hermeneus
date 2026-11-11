@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+from dataclasses import asdict
 from pathlib import Path
 from typing import Awaitable, Callable, Optional
 
 from ..overlay_settings import from_settings
+from ..overlay_tokens import ThemeError, palette_from_payload  # noqa: F401  (callers catch ThemeError)
 from ..runtime import lock_holder
 from . import control
 from .control import OverlayUnavailable  # noqa: F401  (callers catch it from here)
@@ -44,7 +46,21 @@ class OverlayService:
         return await asyncio.to_thread(self._hide, self.data_dir)
 
     def status(self) -> dict:
-        return self._status_fn(self.data_dir)
+        """Open or not, and ``armed``: whether the ``overlay`` setting opens it with the next session."""
+        look = from_settings(self._settings())
+        settings = {k: v for k, v in asdict(look).items() if k != "auto"}
+        return {**self._status_fn(self.data_dir), "armed": look.auto, "settings": settings}
+
+    def apply(self) -> dict:
+        """Hand the current settings to an open overlay; it redraws within a second, without closing."""
+        if control.running_pid(self.data_dir) is not None:
+            control.write_settings(self.data_dir, from_settings(self._settings()))
+        return self.status()
+
+    def set_theme(self, payload) -> dict:
+        """Store the Desktop theme's token values (raises ThemeError); an open overlay repaints with them."""
+        control.write_theme(self.data_dir, palette_from_payload(payload))
+        return self.status()
 
     async def set_visible(self, visible: bool, platform: Optional[str] = None) -> dict:
         return await (self.show(platform) if visible else self.hide())

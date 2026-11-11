@@ -150,6 +150,19 @@ async def overlay(request: Request, body: Optional[dict] = Body(default=None)):
         return _error(409, str(exc), **plugin.overlay.status())
 
 
+@router.post("/overlay/apply")
+async def overlay_apply() -> dict:
+    return await asyncio.to_thread(plugin.overlay.apply)
+
+
+@router.post("/overlay/theme")
+async def overlay_theme(body: Optional[dict] = Body(default=None)):
+    try:
+        return await asyncio.to_thread(plugin.overlay.set_theme, body)
+    except _commands.ThemeError as exc:
+        return _error(400, str(exc))
+
+
 @router.get("/devices")
 async def devices(backend: Optional[str] = Query(None), source_id: Optional[str] = Query(None)) -> dict:
     return await asyncio.to_thread(_commands.devices_payload, backend, source_id)

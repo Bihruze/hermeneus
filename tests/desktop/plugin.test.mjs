@@ -10,6 +10,9 @@ const {
   applyEvent,
   applyResync,
   createController,
+  OVERLAY_COLOR_TOKENS,
+  OVERLAY_TEXT_SIZES,
+  overlayThemePayload,
   createSubtitleState,
   detectedLanguage,
   devicesPath,
@@ -462,39 +465,113 @@ test('settings posts the change and applies the status inside the answer', async
   assert.deepEqual(ctrl.store.get().status.applying, ['speak'])
 })
 
-test('the overlay switch posts visible and follows what the backend answers', async () => {
+function live(ctrl) {
+  ctrl.store.set({ ...ctrl.store.get(), status: { state: 'live' } })
+}
+
+function fakeHost() {
+  const calls = []
+
+  return { calls, request: (method, params) => (calls.push({ method, params }), Promise.resolve({ ok: true })) }
+}
+
+test('while a session runs the overlay switch shows or hides it now', async () => {
   let visible = false
   const ctx = fakeCtx({
-    '/lines': { seq: 1, reset: true, events: [] },
-    '/status': { state: 'live', message: '' },
     '/overlay': (path, opts) => {
       if (opts?.method === 'POST') {
         visible = opts.body.visible
       }
 
-      return Promise.resolve({ visible, pid: visible ? 7 : null })
+      return Promise.resolve({ visible, pid: visible ? 7 : null, armed: false })
     }
   })
-  const ctrl = createController(ctx)
+  const deps = fakeHost()
+  const ctrl = createController(ctx, undefined, deps)
+  live(ctrl)
 
   await ctrl.setOverlay(true)
-  assert.deepEqual(ctrl.overlay.get(), { visible: true, busy: false, error: '' })
+  assert.equal(ctrl.overlay.get().visible, true)
   assert.deepEqual(ctx.calls.at(-1), { path: '/overlay', opts: { method: 'POST', body: { visible: true } } })
+  assert.equal(deps.calls.length, 0)
 
   visible = false // the overlay closed by itself (session stopped, or its own menu)
   await ctrl.refreshOverlay()
   assert.equal(ctrl.overlay.get().visible, false)
 })
 
+test('while idle the overlay switch arms the overlay setting for the next session', async () => {
+  // Before: the switch and the status bar button were disabled while idle (A3 F8).
+  let armed = false
+  const deps = {
+    calls: [],
+    request: (method, params) => {
+      deps.calls.push({ method, params })
+      armed = params.values.overlay
+
+      return Promise.resolve({ ok: true })
+    }
+  }
+  const ctx = fakeCtx({ '/overlay': () => Promise.resolve({ visible: false, pid: null, armed }) })
+  const ctrl = createController(ctx, undefined, deps)
+
+  await ctrl.setOverlay(true)
+  assert.deepEqual(deps.calls, [
+    { method: 'plugins.manage', params: { action: 'settings', key: 'hermeneus', values: { overlay: true } } }
+  ])
+  assert.equal(ctrl.overlay.get().armed, true)
+  assert.equal(ctx.calls.filter(c => c.opts?.method === 'POST').length, 0)
+})
+
+test('a look change is saved and applied to the open overlay', async () => {
+  const deps = fakeHost()
+  const ctx = fakeCtx({
+    '/overlay/apply': () => Promise.resolve({ visible: true, armed: false, settings: { text_size: 34, max_lines: 2 } })
+  })
+  const ctrl = createController(ctx, undefined, deps)
+
+  await ctrl.setOverlayLook({ overlay_text_size: 34 })
+  assert.deepEqual(deps.calls[0].params.values, { overlay_text_size: 34 })
+  assert.deepEqual(ctx.calls.at(-1), { path: '/overlay/apply', opts: { method: 'POST', body: {} } })
+  assert.equal(ctrl.overlay.get().settings.text_size, 34)
+})
+
 test('an overlay refusal shows as an error and leaves the switch off', async () => {
   const ctx = fakeCtx({
     '/overlay': () => Promise.reject(new Error('no translation session is running'))
   })
-  const ctrl = createController(ctx)
+  const ctrl = createController(ctx, undefined, fakeHost())
+  live(ctrl)
 
   await ctrl.setOverlay(true)
   assert.equal(ctrl.overlay.get().visible, false)
   assert.match(ctrl.overlay.get().error, /no translation session/)
+})
+
+test('the theme is sent once per change, in the shape POST /overlay/theme takes', async () => {
+  const ctx = fakeCtx({ '/overlay/theme': () => Promise.resolve({ visible: false }) })
+  const ctrl = createController(ctx, undefined, fakeHost())
+  const payload = overlayThemePayload({
+    colors: { surface: 'rgb(255, 255, 255)', text: 'rgba(31, 35, 40, 0.94)' },
+    font: "'Segoe WPC', -apple-system",
+    mode: 'dark',
+    name: 'midnight',
+    radius: 2.4,
+    speakers: ['rgb(0, 83, 253)']
+  })
+
+  assert.deepEqual(payload.colors.speakers, ['rgb(0, 83, 253)'])
+  assert.equal(payload.mode, 'dark')
+  await ctrl.sendTheme(payload)
+  await ctrl.sendTheme(payload)
+  assert.equal(ctx.calls.filter(c => c.path === '/overlay/theme').length, 1)
+  await ctrl.sendTheme({ ...payload, mode: 'light' })
+  assert.equal(ctx.calls.filter(c => c.path === '/overlay/theme').length, 2)
+})
+
+test('the pane resolves the same tokens the backend table names', () => {
+  assert.deepEqual(Object.keys(OVERLAY_COLOR_TOKENS), ['surface', 'text', 'text_secondary', 'text_tertiary', 'stroke'])
+  assert.deepEqual([...OVERLAY_TEXT_SIZES], [20, 26, 34, 44])
 })
 
 test('the mode select shows the running mode, or the saved choice while idle', () => {

@@ -13,6 +13,7 @@ import {
   atom,
   Button,
   GlyphSpinner,
+  host,
   icons,
   PANES_AREA,
   Popover,
@@ -28,10 +29,11 @@ import {
   StatusDot,
   Tip,
   usePluginI18n,
+  useTheme,
   useQuery,
   useValue
 } from '@hermes/plugin-sdk'
-import { memo, useLayoutEffect, useRef, useState } from 'react'
+import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'hermeneus'
@@ -529,12 +531,31 @@ export function voiceLabel(voices, voiceId, fallback) {
   return chosen ? str(chosen.name) || chosen.voice_id : voiceId || fallback
 }
 
-export function createController(ctx, clock = () => Date.now()) {
+/** Overlay look settings the pane offers (plugin.yaml overlay_* keys, hermeneus_engine/overlay_settings.py). */
+export const OVERLAY_TEXT_SIZES = Object.freeze([20, 26, 34, 44])
+export const OVERLAY_OPACITIES = Object.freeze([0, 40, 80, 100])
+
+/** Theme tokens the overlays draw with (hermeneus_engine/overlay_tokens.py keeps the same table). */
+export const OVERLAY_COLOR_TOKENS = Object.freeze({
+  surface: '--ui-bg-elevated',
+  text: '--ui-text-primary',
+  text_secondary: '--ui-text-secondary',
+  text_tertiary: '--ui-text-tertiary',
+  stroke: '--ui-stroke-secondary'
+})
+
+/** The body POST /overlay/theme takes, from values resolved on the pane's own element. */
+export function overlayThemePayload({ colors, font, mode, name, radius, speakers }) {
+  return { mode: mode === 'dark' ? 'dark' : 'light', name: str(name), colors: { ...colors, speakers }, radius_px: radius, font: str(font) }
+}
+
+export function createController(ctx, clock = () => Date.now(), deps = { request: (...args) => host.request(...args) }) {
   const store = atom(createSubtitleState())
   const link = atom({ state: 'connecting', error: '' })
   const action = atom({ busy: false, error: '' })
   // The native subtitle overlay (hermeneus_engine/overlay), shown and hidden through POST /overlay.
-  const overlay = atom({ visible: false, busy: false, error: '' })
+  const overlay = atom({ visible: false, armed: false, settings: null, busy: false, error: '' })
+  let sentTheme = ''
   const stored = ctx.storage.get('prefs', {})
   const prefs = atom({ ...DEFAULT_PREFS, ...(stored && typeof stored === 'object' ? stored : {}) })
 
@@ -633,19 +654,36 @@ export function createController(ctx, clock = () => Date.now()) {
     }
   }
 
+  function takeOverlay(result) {
+    if (result && typeof result.visible === 'boolean') {
+      overlay.set({
+        ...overlay.get(),
+        visible: result.visible,
+        armed: result.armed === true,
+        settings: result.settings && typeof result.settings === 'object' ? result.settings : overlay.get().settings
+      })
+    }
+  }
+
   async function refreshOverlay() {
     try {
       const result = await ctx.rest('/overlay')
 
-      if (result && typeof result.visible === 'boolean' && !overlay.get().busy) {
-        overlay.set({ ...overlay.get(), visible: result.visible })
+      if (!overlay.get().busy) {
+        takeOverlay(result)
       }
     } catch {
       // The next tick asks again.
     }
   }
 
-  async function setOverlay(visible) {
+  // Plugin settings are written the way Desktop's own Settings form writes them
+  // (plugins.manage settings, website/docs/developer-guide/desktop-plugin-sdk.md:1026-1028).
+  function saveSettings(values) {
+    return deps.request('plugins.manage', { action: 'settings', key: ID, values })
+  }
+
+  async function busyOverlay(work) {
     if (overlay.get().busy) {
       return
     }
@@ -653,10 +691,48 @@ export function createController(ctx, clock = () => Date.now()) {
     overlay.set({ ...overlay.get(), busy: true, error: '' })
 
     try {
-      const result = await ctx.rest('/overlay', { method: 'POST', body: { visible } })
-      overlay.set({ visible: result?.visible === true, busy: false, error: '' })
+      await work()
+      overlay.set({ ...overlay.get(), busy: false, error: '' })
     } catch (error) {
       overlay.set({ ...overlay.get(), busy: false, error: errorText(error) })
+    }
+  }
+
+  /** While a session runs: show or hide the overlay now. While idle: arm it for the next session
+   *  (the `overlay` setting), so it opens with Start. */
+  function setOverlay(on) {
+    return busyOverlay(async () => {
+      if (RUNNING_STATES.has(store.get().status?.state)) {
+        takeOverlay(await ctx.rest('/overlay', { method: 'POST', body: { visible: on } }))
+      } else {
+        await saveSettings({ overlay: on })
+        takeOverlay(await ctx.rest('/overlay'))
+      }
+    })
+  }
+
+  /** One look setting (overlay_text_size, overlay_max_lines, ...): saved, then applied to an open overlay. */
+  function setOverlayLook(values) {
+    return busyOverlay(async () => {
+      await saveSettings(values)
+      takeOverlay(await ctx.rest('/overlay/apply', { method: 'POST', body: {} }))
+    })
+  }
+
+  /** The active Desktop theme's resolved tokens; sent only when they change. */
+  async function sendTheme(payload) {
+    const key = JSON.stringify(payload)
+
+    if (key === sentTheme) {
+      return
+    }
+
+    sentTheme = key
+
+    try {
+      await ctx.rest('/overlay/theme', { method: 'POST', body: payload })
+    } catch {
+      sentTheme = '' // try again with the next change or mount
     }
   }
 
@@ -707,7 +783,12 @@ export function createController(ctx, clock = () => Date.now()) {
   function connect() {
     ctx.socket('/events', onFrame)
     ctx.setInterval(tick, POLL_TICK_MS)
+    // A change in Settings > Plugins reaches an open overlay without hiding it.
+    ctx.onEvent?.(`plugin.${ID}.settings.changed`, () => {
+      void ctx.rest('/overlay/apply', { method: 'POST', body: {} }).then(takeOverlay, () => {})
+    })
     void resync()
+    void refreshOverlay()
   }
 
   return {
@@ -720,7 +801,9 @@ export function createController(ctx, clock = () => Date.now()) {
     refreshOverlay,
     resync,
     rest: ctx.rest,
+    sendTheme,
     setOverlay,
+    setOverlayLook,
     setPrefs,
     settings,
     start,
@@ -806,6 +889,17 @@ const EN = {
   check: { ok: 'ok', warn: 'warning', fail: 'failed' },
   statusBar: state => `Hermeneus: ${state}`,
   overlay: 'Subtitle overlay',
+  overlayArmed: 'Opens with the next session',
+  overlayLook: 'Overlay look',
+  overlayTextSize: 'Text size',
+  overlayLines: 'Lines',
+  overlayOriginal: 'Show the original',
+  overlaySpeaker: 'Speaker names',
+  overlayOpacity: 'Background',
+  percent: n => `${n}%`,
+  on: 'On',
+  off: 'Off',
+  overlayHint: 'Floats the current line above other apps on this Mac',
   showOverlay: 'Show subtitle overlay',
   hideOverlay: 'Hide subtitle overlay',
   overlayError: error => `Overlay: ${error}`
@@ -975,6 +1069,10 @@ const S = {
     color: 'var(--ui-text-tertiary)'
   },
   chipGroup: { display: 'inline-flex', alignItems: 'center', gap: sp(1) },
+  probe: { display: 'none' },
+  lookPanel: { display: 'flex', flexDirection: 'column', gap: sp(2), width: 'auto' },
+  lookRow: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: sp(3) },
+  lookLabel: { color: 'var(--ui-text-secondary)', fontSize: 'var(--conversation-caption-base-size)' },
   chipName: { color: 'var(--ui-text-secondary)' },
   // A fixed width while a session shows text: the status bar's right cluster is laid out from the
   // right edge, so a width that followed each translation would push Smart and the version
@@ -1268,20 +1366,23 @@ function Controls({ ctrl }) {
               })
             ]
           }),
+          // Look-and-feel proposal for Seher: while a session runs the button shows or hides the overlay;
+          // while idle it arms the overlay for the next session.
           jsx(Tip, {
-            label: t('overlay'),
+            label: running ? t('overlay') : `${t('overlay')}: ${t('overlayArmed')}`,
             children: jsx('span', {
               children: jsx(Button, {
                 'aria-label': t('overlay'),
-                'aria-pressed': running && overlay.visible,
-                disabled: !running || overlay.busy,
-                onClick: () => void ctrl.setOverlay(!overlay.visible),
+                'aria-pressed': running ? overlay.visible : overlay.armed,
+                disabled: overlay.busy,
+                onClick: () => void ctrl.setOverlay(!(running ? overlay.visible : overlay.armed)),
                 size: 'icon-xs',
-                variant: running && overlay.visible ? 'secondary' : 'ghost',
+                variant: (running ? overlay.visible : overlay.armed) ? 'secondary' : 'ghost',
                 children: jsx(icons.PanelBottom, {})
               })
             })
           }),
+          jsx(OverlayLook, { ctrl }),
           jsx('div', {
             style: S.startStop,
             children: running
@@ -1876,7 +1977,8 @@ function StatusChip({ ctrl }) {
   const label = stateLabel(t, session)
   const overlay = useValue(ctrl.overlay)
   const running = RUNNING_STATES.has(session)
-  const overlayLabel = overlay.visible ? t('hideOverlay') : t('showOverlay')
+  const on = running ? overlay.visible : overlay.armed
+  const overlayLabel = running ? (on ? t('hideOverlay') : t('showOverlay')) : `${t('overlay')}: ${t('overlayArmed')}`
 
   const chip = jsx(Tip, {
     label: last || t('statusBar', label),
@@ -1893,11 +1995,8 @@ function StatusChip({ ctrl }) {
     })
   })
 
-  if (!running) {
-    return chip
-  }
-
-  // Look-and-feel proposal for Seher: one icon button next to the chip shows or hides the overlay.
+  // Look-and-feel proposal for Seher: one icon button next to the chip shows or hides the overlay
+  // while a session runs, and arms it for the next session while idle.
   return jsxs('span', {
     style: S.chipGroup,
     children: [
@@ -1906,13 +2005,121 @@ function StatusChip({ ctrl }) {
         label: overlayLabel,
         children: jsx(Button, {
           'aria-label': overlayLabel,
-          'aria-pressed': overlay.visible,
+          'aria-pressed': on,
           disabled: overlay.busy,
-          onClick: () => void ctrl.setOverlay(!overlay.visible),
+          onClick: () => void ctrl.setOverlay(!on),
           size: 'icon-xs',
-          variant: overlay.visible ? 'secondary' : 'ghost',
+          variant: on ? 'secondary' : 'ghost',
           children: jsx(icons.PanelBottom, {})
         })
+      }),
+      jsx(ThemeProbe, { ctrl })
+    ]
+  })
+}
+
+/** Resolves the active theme's tokens on this plugin's own hidden element, the way the SDK guide
+ *  says to for drawing outside CSS (desktop-plugin-sdk.md:2119-2122), and sends them to the overlays.
+ *  It reads nothing of the app's markup: every span below is rendered here. */
+function ThemeProbe({ ctrl }) {
+  const { renderedMode, themeName } = useTheme()
+  const ref = useRef(null)
+
+  useEffect(() => {
+    const root = ref.current
+
+    if (!root || typeof getComputedStyle !== 'function') {
+      return
+    }
+
+    // The spans are rendered below in THEME_PROBES order, so the index names the token.
+    const read = (index, property) => getComputedStyle(root.children[index])[property]
+    const colorCount = Object.keys(OVERLAY_COLOR_TOKENS).length
+    const colors = Object.fromEntries(Object.keys(OVERLAY_COLOR_TOKENS).map((role, i) => [role, read(i, 'color')]))
+
+    void ctrl.sendTheme(
+      overlayThemePayload({
+        colors,
+        font: read(THEME_PROBES.length - 1, 'fontFamily'),
+        mode: renderedMode,
+        name: themeName,
+        radius: Number.parseFloat(read(THEME_PROBES.length - 2, 'borderTopLeftRadius')) || 0,
+        speakers: SPEAKER_TOKENS.map((_, i) => read(colorCount + i, 'color'))
+      })
+    )
+  })
+
+  return jsx('span', {
+    'aria-hidden': true,
+    ref,
+    style: S.probe,
+    children: THEME_PROBES.map((style, i) => jsx('span', { style }, i))
+  })
+}
+
+/** One hidden span per token: colours, then --radius-lg, then --dt-font-sans. */
+const THEME_PROBES = Object.freeze([
+  ...[...Object.values(OVERLAY_COLOR_TOKENS), ...SPEAKER_TOKENS].map(token => ({ color: `var(${token})` })),
+  { borderRadius: 'var(--radius-lg)' },
+  { fontFamily: 'var(--dt-font-sans)' }
+])
+
+/** Look-and-feel proposal for Seher: the overlay's look in a small popover next to its switch.
+ *  Each change is saved as the plugin setting and reaches an open overlay at once. */
+function OverlayLook({ ctrl }) {
+  const t = usePluginI18n(ID)
+  const overlay = useValue(ctrl.overlay)
+  const look = overlay.settings ?? {}
+  const pick = (key, values, label) =>
+    jsxs('div', {
+      style: S.lookRow,
+      children: [
+        jsx('span', { style: S.lookLabel, children: label }),
+        jsx(SegmentedControl, {
+          disabled: overlay.busy,
+          onChange: id => void ctrl.setOverlayLook({ [`overlay_${key}`]: Number(id) }),
+          options: values.map(v => ({ id: String(v), label: key === 'opacity' ? t('percent', v) : String(v) })),
+          value: String(look[key] ?? '')
+        })
+      ]
+    })
+  const toggle = (key, label) =>
+    jsxs('div', {
+      style: S.lookRow,
+      children: [
+        jsx('span', { style: S.lookLabel, children: label }),
+        jsx(SegmentedControl, {
+          disabled: overlay.busy,
+          onChange: id => void ctrl.setOverlayLook({ [`overlay_${key}`]: id === 'on' }),
+          options: [
+            { id: 'off', label: t('off') },
+            { id: 'on', label: t('on') }
+          ],
+          value: look[key] === true ? 'on' : 'off'
+        })
+      ]
+    })
+
+  return jsxs(Popover, {
+    children: [
+      jsx(PopoverTrigger, {
+        asChild: true,
+        children: jsx(Button, {
+          'aria-label': t('overlayLook'),
+          size: 'icon-xs',
+          variant: 'ghost',
+          children: jsx(icons.SlidersHorizontal, {})
+        })
+      }),
+      jsxs(PopoverContent, {
+        style: S.lookPanel,
+        children: [
+          pick('text_size', OVERLAY_TEXT_SIZES, t('overlayTextSize')),
+          pick('max_lines', [1, 2, 3], t('overlayLines')),
+          pick('opacity', OVERLAY_OPACITIES, t('overlayOpacity')),
+          toggle('show_original', t('overlayOriginal')),
+          toggle('show_speaker', t('overlaySpeaker'))
+        ]
       })
     ]
   })

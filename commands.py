@@ -24,7 +24,8 @@ from .hermeneus_engine.tts.voice_catalog import VoiceCatalog, VoiceListError
 from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
-from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_window
+from .hermeneus_engine.overlay.service import (OverlayService, OverlayUnavailable, ThemeError,  # noqa: F401
+                                               describe as describe_window)
 from .hermeneus_engine.overlay.control import LOCAL_PLATFORMS
 
 REMOTE_START_REFUSED = ("Hermeneus captures audio on this Mac, so start it from the Mac "
