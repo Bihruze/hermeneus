@@ -17,10 +17,12 @@ from .session import SessionOptions
 from .tts.voices import resolve_voice
 
 DEFAULT_CONTEXT_SEGMENTS = 3
-CAPTURE_BACKEND_CHOICES = ("auto", "process-tap", "virtual-device")
+CAPTURE_BACKEND_CHOICES = ("auto", "process-tap", "process-loopback", "virtual-device")
 # With capture_backend auto, the first backend in this order that offers a source wins.
-AUTO_ORDER = ("process-tap", "virtual-device")
+# process-tap exists only on macOS and process-loopback only on Windows.
+AUTO_ORDER = ("process-tap", "process-loopback", "virtual-device")
 PROCESS_TAP_SYSTEM_SOURCE = "system"
+SYSTEM_SOURCE_BACKENDS = ("process-tap", "process-loopback")
 MAX_CONTEXT_SEGMENTS = 10
 
 
@@ -197,7 +199,7 @@ def pick_source(wanted: Any, settings: Mapping[str, Any], sources: Sequence[Capt
         offered = [s for s in allowed if s.backend == candidate]
         if not offered:
             continue
-        if candidate == "process-tap":
+        if candidate in SYSTEM_SOURCE_BACKENDS:
             system = [s for s in offered if s.source_id == PROCESS_TAP_SYSTEM_SOURCE]
             if system:
                 return system[0]

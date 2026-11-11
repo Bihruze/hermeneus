@@ -22,6 +22,9 @@ reads JSON lines back:
     ``{"type": "overlay", "running", "url", "port", "error"}``.
 
 Event shapes are documented in ``docs/events.md``.
+
+On Windows the same requests travel over loopback TCP, and every request
+carries the session token from the endpoint file (``_windows/ipc.py``).
 """
 
 from __future__ import annotations
@@ -31,6 +34,7 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from pathlib import Path
 from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
@@ -42,6 +46,11 @@ MAX_REQUEST_BYTES = 4096
 REQUEST_TIMEOUT_S = 2.0
 CONNECT_TIMEOUT_S = 1.0
 STREAM_LIMIT = 1 << 20
+
+
+def _use_tcp() -> bool:
+    """Windows has no asyncio Unix sockets; it uses the token-guarded loopback transport."""
+    return sys.platform == "win32"
 
 
 class SessionUnavailable(ConnectionError):
@@ -71,9 +80,15 @@ class BusServer:
         self._on_overlay = on_overlay
         self._server: Optional[asyncio.AbstractServer] = None
         self._clients: set[asyncio.Task] = set()
+        self._token: Optional[str] = None
 
     async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path), limit=STREAM_LIMIT)
+        if _use_tcp():
+            from ._windows.ipc import start_server
+            self._server, self._token = await start_server(self._handle, self.path, STREAM_LIMIT)
+            return
+        self._server = await asyncio.start_unix_server(  # type: ignore[attr-defined]  # POSIX branch
+            self._handle, path=str(self.path), limit=STREAM_LIMIT)
         # The run directory is 0700, so nobody else can reach the socket in
         # the moment before this chmod.
         os.chmod(self.path, 0o600)
@@ -108,6 +123,10 @@ class BusServer:
                 request = None
             if not isinstance(request, dict):
                 writer.write(_encode({"type": "error", "message": "bad request"}))
+                await writer.drain()
+                return
+            if self._token is not None and not _token_matches(self._token, request.get("token")):
+                writer.write(_encode({"type": "error", "message": "unauthorized"}))
                 await writer.drain()
                 return
             await self._serve(request, writer)
@@ -187,6 +206,11 @@ class BusServer:
             sub.close()
 
 
+def _token_matches(expected: str, given) -> bool:
+    from ._windows.ipc import token_ok
+    return token_ok(expected, given)
+
+
 def _as_seq(value) -> int:
     try:
         return max(int(value), 0)
@@ -199,18 +223,25 @@ class SessionClient:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self._token: Optional[str] = None
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
+            if _use_tcp():
+                from ._windows.ipc import open_connection
+                reader, writer, self._token = await asyncio.wait_for(
+                    open_connection(self.path, STREAM_LIMIT), CONNECT_TIMEOUT_S)
+                return reader, writer
             return await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self.path), limit=STREAM_LIMIT), CONNECT_TIMEOUT_S)
+                asyncio.open_unix_connection(  # type: ignore[attr-defined]  # POSIX branch
+                    str(self.path), limit=STREAM_LIMIT), CONNECT_TIMEOUT_S)
         except (FileNotFoundError, ConnectionRefusedError, asyncio.TimeoutError, OSError) as exc:
             raise SessionUnavailable(str(exc) or type(exc).__name__) from None
 
     async def _request(self, request: dict) -> dict:
         reader, writer = await self._open()
         try:
-            writer.write(_encode(request))
+            writer.write(_encode(self._signed(request)))
             await writer.drain()
             raw = await asyncio.wait_for(reader.readline(), REQUEST_TIMEOUT_S)
         except (ConnectionError, asyncio.TimeoutError) as exc:
@@ -222,6 +253,9 @@ class SessionClient:
         if not raw:
             raise SessionUnavailable("the session closed the connection")
         return json.loads(raw)
+
+    def _signed(self, request: dict) -> dict:
+        return {**request, "token": self._token} if self._token is not None else request
 
     async def status(self) -> dict:
         return await self._request({"op": "status"})
@@ -252,7 +286,7 @@ class SessionClient:
         """Yield events until the session ends or the connection drops."""
         reader, writer = await self._open()
         try:
-            writer.write(_encode({"op": "subscribe", "after": after}))
+            writer.write(_encode(self._signed({"op": "subscribe", "after": after})))
             await writer.drain()
             while True:
                 raw = await reader.readline()
