@@ -496,3 +496,46 @@ test('an overlay refusal shows as an error and leaves the switch off', async () 
   assert.equal(ctrl.overlay.get().visible, false)
   assert.match(ctrl.overlay.get().error, /no translation session/)
 })
+
+test('the mode select shows the running mode, or the saved choice while idle', () => {
+  const { shownMode } = plugin
+  assert.equal(shownMode({ mode: 'voice', speak: true }, {}, true), 'voice')
+  assert.equal(shownMode({ speak: true }, {}, true), 'both')
+  assert.equal(shownMode({}, {}, true), 'subtitles')
+  assert.equal(shownMode(null, { speak: true, mode: 'voice' }, false), 'voice')
+  assert.equal(shownMode(null, { speak: true, mode: 'subtitles' }, false), 'both')
+  assert.equal(shownMode(null, { speak: false, mode: 'voice' }, false), 'subtitles')
+})
+
+test('one mode choice carries speech, output and voice; no separate speak switch', () => {
+  const { modeChoice } = plugin
+  const outputs = [{ device_id: 'Speakers', label: 'Speakers' }, { device_id: 'AirPods', label: 'AirPods' }]
+  assert.deepEqual(modeChoice('subtitles', { outputs }), { patch: { speak: false }, change: { mode: 'subtitles' } })
+  assert.deepEqual(modeChoice('voice', { outputId: 'AirPods', outputs, voiceId: 'v1' }), {
+    patch: { speak: true, mode: 'voice', outputDevice: 'AirPods' },
+    change: { mode: 'voice', output_device: 'AirPods', voice_id: 'v1' }
+  })
+  // No output chosen yet: the first safe output the backend listed.
+  assert.deepEqual(modeChoice('both', { outputId: 'Gone', outputs }).change, { mode: 'both', output_device: 'Speakers' })
+  // No safe output at all: the backend refuses with its own message.
+  assert.deepEqual(modeChoice('both', { outputs: [] }).change, { mode: 'both' })
+})
+
+test('the voice popover trigger names the chosen voice, the default voice, or the fallback', () => {
+  const { voiceLabel } = plugin
+  const voices = [{ voice_id: 'a', name: 'Ada' }, { voice_id: 'OZ0', name: 'Talia', is_default: true }]
+  assert.equal(voiceLabel(voices, 'a', 'Default voice'), 'Ada')
+  assert.equal(voiceLabel(voices, '', 'Default voice'), 'Talia')
+  assert.equal(voiceLabel(voices, 'zz', 'Default voice'), 'zz')
+  assert.equal(voiceLabel([], '', 'Default voice'), 'Default voice')
+})
+
+test('the controls row imports the SDK popover and no switch', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  const sdk = /import\s*\{([^}]*)\}\s*from\s*'@hermes\/plugin-sdk'/.exec(source)[1]
+  for (const name of ['Popover', 'PopoverContent', 'PopoverTrigger']) {
+    assert.match(sdk, new RegExp(`\\b${name}\\b`))
+  }
+  assert.doesNotMatch(sdk, /\bSwitch\b/)
+})

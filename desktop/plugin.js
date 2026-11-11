@@ -15,6 +15,9 @@ import {
   GlyphSpinner,
   icons,
   PANES_AREA,
+  Popover,
+  PopoverContent,
+  PopoverTrigger,
   SegmentedControl,
   Select,
   SelectContent,
@@ -23,7 +26,6 @@ import {
   SelectValue,
   STATUSBAR_AREAS,
   StatusDot,
-  Switch,
   Tip,
   usePluginI18n,
   useQuery,
@@ -487,6 +489,46 @@ export function sourceKey(source) {
   return source && typeof source === 'object' ? `${str(source.backend)}:${str(source.source_id)}` : ''
 }
 
+// ---------------------------------------------------------------------------
+// Pure control model: what the controls row shows and what a choice changes
+// ---------------------------------------------------------------------------
+
+export const MODES = Object.freeze(['subtitles', 'both', 'voice'])
+
+/** The mode the Mode select shows: what the session runs while running, the saved choice while idle. */
+export function shownMode(status, prefs, running) {
+  if (running) {
+    const mode = str(status?.mode)
+
+    return MODES.includes(mode) ? mode : status?.speak === true ? 'both' : 'subtitles'
+  }
+
+  return prefs.speak ? (prefs.mode === 'voice' ? 'voice' : 'both') : 'subtitles'
+}
+
+/** What picking `mode` saves (prefs patch) and, while running, asks the session for (POST /settings body).
+ *  A mode with voice needs an output device: the chosen one, else the first safe one the backend listed. */
+export function modeChoice(mode, { outputId = '', outputs = [], voiceId = '' } = {}) {
+  if (mode === 'subtitles') {
+    return { patch: { speak: false }, change: { mode: 'subtitles' } }
+  }
+
+  const listed = outputs.filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
+  const output = listed.some(o => o.device_id === outputId) ? outputId : listed[0]?.device_id ?? ''
+  const patch = { speak: true, mode, ...(output ? { outputDevice: output } : {}) }
+  const change = { mode, ...(output ? { output_device: output } : {}), ...(voiceId ? { voice_id: voiceId } : {}) }
+
+  return { patch, change }
+}
+
+/** Label of the voice popover trigger: the chosen voice's name, else the default voice's, else a fallback. */
+export function voiceLabel(voices, voiceId, fallback) {
+  const list = Array.isArray(voices) ? voices : []
+  const chosen = list.find(v => v && v.voice_id === voiceId) ?? (voiceId ? null : list.find(v => v && v.is_default))
+
+  return chosen ? str(chosen.name) || chosen.voice_id : voiceId || fallback
+}
+
 export function createController(ctx, clock = () => Date.now()) {
   const store = atom(createSubtitleState())
   const link = atom({ state: 'connecting', error: '' })
@@ -715,13 +757,14 @@ const EN = {
   target: 'Subtitle language',
   targetPlaceholder: 'Choose a language',
   noLanguages: 'Language list unavailable',
-  speak: 'Speak translation',
   notSpeakable: 'Spoken output is not available for this language',
   output: 'Output device',
   outputPlaceholder: 'Choose an output',
   // Proposal for Seher (W26): mode and voice pickers, reachable while running.
   mode: 'Mode',
-  modes: { subtitles: 'Subtitles', both: 'Subtitles and voice', voice: 'Voice only' },
+  modes: { subtitles: 'Subtitles only', both: 'Subtitles and voice', voice: 'Voice only' },
+  voiceSettings: 'Voice and output device',
+  needsVoiceMode: 'Choose a mode with voice',
   voice: 'Voice',
   voicePlaceholder: 'Default voice',
   voicesError: error => `Could not list voices: ${error}`,
@@ -763,7 +806,6 @@ const EN = {
   check: { ok: 'ok', warn: 'warning', fail: 'failed' },
   statusBar: state => `Hermeneus: ${state}`,
   overlay: 'Subtitle overlay',
-  overlayHint: 'Floats the current line above other apps on this Mac',
   showOverlay: 'Show subtitle overlay',
   hideOverlay: 'Hide subtitle overlay',
   overlayError: error => `Overlay: ${error}`
@@ -817,13 +859,8 @@ const S = {
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: sp(2) },
   field: { display: 'flex', alignItems: 'center', gap: sp(1), minWidth: 0 },
   select: { width: sp(44) },
-  switchLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: sp(1.5),
-    fontSize: 'var(--conversation-caption-base-size)',
-    color: 'var(--ui-text-secondary)'
-  },
+  popover: { display: 'flex', flexDirection: 'column', gap: sp(2) },
+  startStop: { marginLeft: 'auto' },
   topRow: { display: 'flex', alignItems: 'center', gap: sp(3), minWidth: 0 },
   topStatus: { flex: 1, minWidth: 0 },
   fontControls: { display: 'flex', alignItems: 'center', gap: sp(0.5) },
@@ -1110,11 +1147,7 @@ function Controls({ ctrl }) {
   }
 
   const onMode = value => {
-    const on = value !== 'subtitles'
-    const patch = on ? { speak: true, mode: value } : { speak: false }
-    const change = on
-      ? { mode: value, ...(output ? { output_device: output.device_id } : {}), ...(voiceValue ? { voice_id: voiceValue } : {}) }
-      : { mode: 'subtitles' }
+    const { patch, change } = modeChoice(value, { outputId: outputValue, outputs, voiceId: voiceValue })
     choose(patch, change)
   }
 
@@ -1173,82 +1206,103 @@ function Controls({ ctrl }) {
                 value: target
               })
             : jsx('span', { style: S.statusPart, children: running && target ? target : t('noLanguages') }),
-          jsxs('label', {
-            style: S.switchLabel,
-            title: speakable ? undefined : t('notSpeakable'),
+          jsx(Tip, {
+            label: speakable ? t('mode') : t('notSpeakable'),
+            children: jsx('span', {
+              children: jsx(Picker, {
+                disabled: !speakable && mode === 'subtitles',
+                label: t('mode'),
+                onChange: onMode,
+                options: MODES.filter(m => m === 'subtitles' || speakable).map(m => ({ value: m, label: t(`modes.${m}`) })),
+                placeholder: t('mode'),
+                value: mode
+              })
+            })
+          }),
+          // Voice and output device sit behind one popover; they matter only in a mode with voice.
+          jsxs(Popover, {
             children: [
-              jsx(Switch, {
-                'aria-label': t('speak'),
-                checked: speak && speakable,
-                disabled: !speakable || applying.includes('speak') || (running && !speak && output === null),
-                onCheckedChange: on => onMode(on ? (prefs.mode === 'voice' ? 'voice' : 'both') : 'subtitles'),
-                size: 'xs'
+              jsx(Tip, {
+                label: speak ? t('voiceSettings') : t('needsVoiceMode'),
+                children: jsx('span', {
+                  children: jsx(PopoverTrigger, {
+                    asChild: true,
+                    children: jsxs(Button, {
+                      'aria-label': t('voiceSettings'),
+                      disabled: !speak || !speakable,
+                      size: 'xs',
+                      variant: 'ghost',
+                      children: [jsx(icons.Volume2, {}), voiceLabel(voices, voiceValue, t('voicePlaceholder'))]
+                    })
+                  })
+                })
               }),
-              t('speak')
+              jsx(PopoverContent, {
+                align: 'start',
+                children: jsxs('div', {
+                  style: S.popover,
+                  children: [
+                    jsx(Picker, {
+                      disabled: outputs.length === 0 || applying.includes('output_device'),
+                      label: t('output'),
+                      onChange: value => choose({ outputDevice: value }, speak ? { output_device: value } : null),
+                      options: outputs
+                        .filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
+                        .map(o => ({ value: o.device_id, label: str(o.label) || o.device_id })),
+                      placeholder: t('outputPlaceholder'),
+                      value: output ? outputValue : ''
+                    }),
+                    jsx(Picker, {
+                      disabled: voices.length === 0 || applying.includes('voice_id'),
+                      label: t('voice'),
+                      onChange: value => choose({ voiceId: value }, speak ? { voice_id: value } : null),
+                      options: voices.map(v => ({ value: v.voice_id, label: str(v.name) || v.voice_id })),
+                      placeholder: t('voicePlaceholder'),
+                      value: voices.some(v => v.voice_id === voiceValue) ? voiceValue : ''
+                    }),
+                    voicesQuery.isError
+                      ? jsx('div', { role: 'alert', style: S.alert, children: t('voicesError', errorText(voicesQuery.error)) })
+                      : null
+                  ]
+                })
+              })
             ]
           }),
-          // Look-and-feel proposal for Seher: the overlay switch sits with the session controls.
-          jsxs('label', {
-            style: S.switchLabel,
-            title: t('overlayHint'),
-            children: [
-              jsx(Switch, {
+          jsx(Tip, {
+            label: t('overlay'),
+            children: jsx('span', {
+              children: jsx(Button, {
                 'aria-label': t('overlay'),
-                checked: running && overlay.visible,
+                'aria-pressed': running && overlay.visible,
                 disabled: !running || overlay.busy,
-                onCheckedChange: on => void ctrl.setOverlay(on),
-                size: 'xs'
-              }),
-              t('overlay')
-            ]
-          }),
-          jsx(Picker, {
-            disabled: !speakable,
-            label: t('mode'),
-            onChange: onMode,
-            options: ['subtitles', 'both', 'voice'].map(m => ({ value: m, label: t(`modes.${m}`) })),
-            placeholder: t('mode'),
-            value: mode
-          }),
-          jsx(Picker, {
-            disabled: !speak || !speakable || outputs.length === 0 || applying.includes('output_device'),
-            label: t('output'),
-            onChange: value => choose({ outputDevice: value }, speak ? { output_device: value } : null),
-            options: outputs
-              .filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
-              .map(o => ({ value: o.device_id, label: str(o.label) || o.device_id })),
-            placeholder: t('outputPlaceholder'),
-            value: output ? outputValue : ''
-          }),
-          jsx(Picker, {
-            disabled: !speak || !speakable || voices.length === 0 || applying.includes('voice_id'),
-            label: t('voice'),
-            onChange: value => choose({ voiceId: value }, speak ? { voice_id: value } : null),
-            options: voices.map(v => ({ value: v.voice_id, label: str(v.name) || v.voice_id })),
-            placeholder: t('voicePlaceholder'),
-            value: voices.some(v => v.voice_id === voiceValue) ? voiceValue : ''
-          }),
-          running
-            ? jsxs(Button, {
-                disabled: action.busy || status?.state === 'stopping',
-                onClick: () => void ctrl.stop(),
-                size: 'sm',
-                variant: 'secondary',
-                children: [jsx(icons.StopFilled, {}), t('stop')]
+                onClick: () => void ctrl.setOverlay(!overlay.visible),
+                size: 'icon-xs',
+                variant: running && overlay.visible ? 'secondary' : 'ghost',
+                children: jsx(icons.PanelBottom, {})
               })
-            : jsxs(Button, {
-                disabled: !canStart,
-                onClick: onStart,
-                size: 'sm',
-                children: [jsx(icons.Play, {}), t('start')]
-              })
+            })
+          }),
+          jsx('div', {
+            style: S.startStop,
+            children: running
+              ? jsxs(Button, {
+                  disabled: action.busy || status?.state === 'stopping',
+                  onClick: () => void ctrl.stop(),
+                  size: 'sm',
+                  variant: 'secondary',
+                  children: [jsx(icons.StopFilled, {}), t('stop')]
+                })
+              : jsxs(Button, {
+                  disabled: !canStart,
+                  onClick: onStart,
+                  size: 'sm',
+                  children: [jsx(icons.Play, {}), t('start')]
+                })
+          })
         ]
       }),
       devices.isError
         ? jsx('div', { role: 'alert', style: S.alert, children: t('devicesError', errorText(devices.error)) })
-        : null,
-      voicesQuery.isError
-        ? jsx('div', { role: 'alert', style: S.alert, children: t('voicesError', errorText(voicesQuery.error)) })
         : null,
       overlay.error ? jsx('div', { role: 'alert', style: S.alert, children: t('overlayError', overlay.error) }) : null
     ]
