@@ -814,8 +814,10 @@ def test_doctor_passes_on_the_quiet_tone_and_says_it_may_be_heard():
     assert r.ok and "may have heard it" in r.message and "--no-audio-check" in r.message
 
 
-def test_doctor_run_skips_the_audio_check_on_request():
-    from hermeneus_engine import doctor
+def test_doctor_run_skips_the_audio_check_on_request(monkeypatch):
+    from hermeneus_engine import components, doctor
+    # A fake HAL backend stands in for PyObjC, so the test does not depend on the machine's packages.
+    monkeypatch.setattr(components, "capture_backends", lambda *a, **k: [make_backend(FakeHAL())])
     called = []
     report = doctor.run(get_secret=lambda n: None, aux_config=None, mac_ver=lambda: ("27.0.1", "", ""),
                         which=lambda n: None, verify_tap_audio=lambda: called.append(1) or (True, "x"), audio_check=False)
