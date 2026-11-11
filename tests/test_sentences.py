@@ -59,3 +59,37 @@ def test_disabled_splitter_keeps_whole_segments():
     s = SentenceSplitter(stable_ms=-1)
     assert s.on_partial("One two three four. Five six seven", 10 ** 12) == []
     assert s.on_commit("One two three four. Five six seven eight.") == ["One two three four. Five six seven eight."]
+
+
+def test_pause_release_needs_a_timed_last_word_and_unchanged_text():
+    s = SentenceSplitter(pause_ms=1300)
+    assert s.on_partial("The council approved the plan.", 10 * MS) == []
+    assert s.pause_deadline_ns() is None  # the last word has no Scribe time yet
+    s.on_partial("The council approved the plan.", 30 * MS, last_word_end_ns=2_000 * MS)
+    assert s.pause_deadline_ns() == 3_300 * MS
+    assert s.on_tick(3_299 * MS) == []
+    assert s.on_tick(3_300 * MS) == ["The council approved the plan."]
+    assert s.remainder("The council approved the plan.") == ""
+    assert s.on_commit("The council approved the plan.") == []
+
+
+def test_pause_release_waits_again_when_scribe_continues_the_sentence():
+    s = SentenceSplitter(pause_ms=1300)
+    s.on_partial("The team won its quality.", 0, last_word_end_ns=1_000 * MS)
+    s.on_partial("The team won its qualifying", 500 * MS, last_word_end_ns=1_200 * MS)
+    assert s.pause_deadline_ns() is None
+    assert s.on_tick(5_000 * MS) == []
+
+
+def test_no_pause_release_after_an_abbreviation_or_a_short_sentence():
+    s = SentenceSplitter(pause_ms=1300)
+    s.on_partial("We spoke with Dr.", 0, last_word_end_ns=MS)
+    assert s.pause_deadline_ns() is None
+    s.on_partial("Yes.", 0, last_word_end_ns=MS)
+    assert s.pause_deadline_ns() is None
+
+
+def test_pause_release_off():
+    s = SentenceSplitter(pause_ms=-1)
+    s.on_partial("The council approved the plan.", 0, last_word_end_ns=MS)
+    assert s.pause_deadline_ns() is None

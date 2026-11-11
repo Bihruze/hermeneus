@@ -76,6 +76,20 @@ def wire_language(code: Optional[str]) -> Optional[str]:
     return lang.iso639_1 or lang.iso639_3
 
 
+# SubtitleLine.timings_ns key -> line event ``timings`` key.
+TIMING_KEYS = (("capture", "capture_ms"), ("speech_end", "speech_end_ms"), ("commit", "committed_ms"),
+               ("released", "released_ms"), ("translated", "translated_ms"),
+               ("tts_first_audio", "tts_first_audio_ms"))
+
+
+def line_timings(line: SubtitleLine, epoch_ns: Optional[int]) -> dict:
+    """Stage times of a line in ms since the session started (time.monotonic_ns based)."""
+    if epoch_ns is None:
+        return {}
+    t = line.timings_ns
+    return {out: round((t[key] - epoch_ns) / 1e6, 1) for key, out in TIMING_KEYS if isinstance(t.get(key), int)}
+
+
 def idle_status(message: str = "") -> dict[str, Any]:
     """Status body for a machine with no session."""
     return {"state": "idle", "message": message, "source": None, "target_language": "",
@@ -167,6 +181,8 @@ class SubtitleBus:
         self._status: dict[str, Any] = {"type": "status", "seq": self._seq, **idle_status()}
         self._subscribers: list[Subscription] = []
         self._closed = False
+        # time.monotonic_ns() of the session start; line event timings count from it.
+        self.epoch_ns: Optional[int] = None
 
     # -- publishing -------------------------------------------------------
 
@@ -189,7 +205,8 @@ class SubtitleBus:
             while len(self._lines) > self._max_lines:
                 _old_id, (old_seq, _old) = self._lines.popitem(last=False)
                 self._floor = max(self._floor, old_seq)
-            event = {"type": "line", "seq": seq, "line": stored.to_dict()}
+            event = {"type": "line", "seq": seq, "line": stored.to_dict(),
+                     "timings": line_timings(stored, self.epoch_ns)}
             self._fan_out(event)
             return event
 
@@ -261,7 +278,8 @@ class SubtitleBus:
             events: list[dict] = []
             for seq, line in self._lines.values():
                 if seq > since:
-                    events.append({"type": "line", "seq": seq, "line": line.to_dict()})
+                    events.append({"type": "line", "seq": seq, "line": line.to_dict(),
+                                   "timings": line_timings(line, self.epoch_ns)})
             if not reset:
                 events.extend(dict(r) for r in self._relabels if r["seq"] > since)
             if self._status["seq"] > since:

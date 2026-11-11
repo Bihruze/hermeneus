@@ -15,7 +15,7 @@ def test_same_line_id_updates_in_place_and_seq_grows():
     b = bus.publish_line(line("a", "hello", LineState.COMMITTED))
     assert b["seq"] == a["seq"] + 1
     assert [l.original for l in bus.lines()] == ["hello"]
-    assert b == {"type": "line", "seq": b["seq"], "line": bus.lines()[0].to_dict()}
+    assert b == {"type": "line", "seq": b["seq"], "line": bus.lines()[0].to_dict(), "timings": {}}
 
 
 def test_seq_is_shared_by_all_event_types_and_never_goes_back_across_buses():

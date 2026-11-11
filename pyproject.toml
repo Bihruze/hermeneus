@@ -34,3 +34,9 @@ dev = ["pytest>=8.3,<9", "pytest-asyncio>=0.24,<2", "fastapi>=0.104.0,<1", "http
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+# No .pytest_cache in the plugin directory: Hermes's dependency manager hashes
+# every file of a plugin that has a pyproject.toml (pm/workspace.py:43-63,
+# excluding only .git, .venv, venv, node_modules, __pycache__ and *.egg-info),
+# so a cache file written by a test run makes the next hermes command rebuild
+# its dependency environment.
+addopts = "-p no:cacheprovider"

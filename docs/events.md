@@ -17,7 +17,7 @@ higher. After a gap (socket dropped, process restarted) it asks
 
 ```json
 {"type": "hello", "version": 1, "seq": 41, "session": {"state": "live", "seq": 41, "...": "status fields"}}
-{"type": "line", "seq": 42, "line": {"line_id": "...", "state": "partial", "original": "...", "translation": "", "speaker_id": "s1:speaker_0", "source_language": "en", "target_language": "tr", "segment_index": 7, "error": ""}}
+{"type": "line", "seq": 42, "line": {"line_id": "...", "state": "partial", "original": "...", "translation": "", "speaker_id": "s1:speaker_0", "source_language": "en", "target_language": "tr", "segment_index": 7, "error": ""}, "timings": {"capture_ms": 10312.0, "speech_end_ms": 12940.5, "committed_ms": 13601.2, "released_ms": 13601.2, "translated_ms": 14390.8}}
 {"type": "relabel", "seq": 43, "from": "s1:speaker_1", "to": "s1:speaker_0"}
 {"type": "status", "seq": 44, "state": "live", "message": "", "source": {"backend": "virtual-device", "source_id": "BlackHole 2ch", "label": "BlackHole 2ch"}, "target_language": "tr", "detected_language": "en", "speak": false, "mode": "subtitles", "subtitles": true, "voice_id": null, "output_device": null, "applying": [], "metrics": {}, "languages": [{"code": "tr", "name": "Turkish", "speakable": true}]}
 {"type": "reset", "seq": 44}
@@ -35,6 +35,21 @@ higher. After a gap (socket dropped, process restarted) it asks
   (still changing), `committed` (final original, translation pending),
   `translated`, or `failed` (translation failed or was skipped to keep up; the
   original stays, `error` says why).
+- `line` events carry `timings`: the stages the line has reached so far, in
+  ms since the session started, on the `time.monotonic_ns()` clock that
+  capture timestamps use. `capture_ms` is the capture time of the line's
+  first word and `speech_end_ms` the end of its last word (Scribe word times
+  mapped per chunk with `metrics.StreamClock`; they arrive with Scribe's
+  diarized words, so usually after the translation). `committed_ms` and
+  `released_ms` are when the line was sent to translation, `translated_ms`
+  when its translation arrived, `tts_first_audio_ms` when its first spoken
+  audio arrived. A stage that has not happened, or could not be measured,
+  is absent. After a Scribe session rotation or reconnect, word times are no
+  longer mapped (the client does not expose where the new session's audio
+  starts), so `capture_ms` and `speech_end_ms` are absent from then on.
+  Lines are released at a sentence end as soon as more words follow it, or,
+  at a pause, once the audio after the sentence's last word reaches 1.3 s
+  with no new word (`sentences.DEFAULT_PAUSE_MS`).
 - `relabel`: every earlier line with speaker `from` now belongs to `to`.
   Speaker ids look like `s<N>:speaker_<k>`; `N` counts Scribe sessions, so ids
   from different `N` may or may not be the same person.
@@ -42,9 +57,15 @@ higher. After a gap (socket dropped, process restarted) it asks
   `stopping`, `failed`. `message` is plain language. `metrics` holds counters
   (`audio_chunks_in`, `audio_chunks_dropped`, `audio_dropped_ms`,
   `audio_queued_ms`, `lines_committed`, `lines_translated`, `lines_failed`,
-  `speak_errors`, `sentences_released_early`, `settings_changes`,
-  `silent_chunks_held` (digital silence not sent to speech to text),
-  `translation_backlog`, `uptime_s`). Failure messages and where they appear
+  `speak_errors`, `sentences_released_early`, `sentences_released_at_pause`,
+  `settings_changes`, `silent_chunks_held` (digital silence not sent to speech
+  to text), `translation_backlog`, `uptime_s`) and `latency_ms`:
+  `{"end_of_sentence_to_subtitle", "end_of_sentence_to_released",
+  "released_to_translated", "translated_to_first_tts_audio",
+  "tts_request_to_first_audio"}`, each `{"count", "p50", "p95"}` in ms over
+  the session's last 2000 lines (p50 and p95 only when count is above 0).
+  `tts_request_to_first_audio` is the speaker's own measure
+  (`UtteranceMetrics.first_audio_latency_ns`). Failure messages and where they appear
   are listed in `docs/failures.md`. When translations fail, `message` names the reason and the
   fix once, again when it changes, and at most every 30 s otherwise; it is
   cleared by the next translated line.
