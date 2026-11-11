@@ -11,6 +11,7 @@ texts and error types.
 
 from __future__ import annotations
 
+import re
 from typing import Optional
 
 KEY_NAME = "ELEVENLABS_API_KEY"
@@ -41,19 +42,29 @@ _STT_RATE = frozenset({"rate_limited", "resource_exhausted", "queue_overflow", "
 _STT_NETWORK = frozenset({"connect_failed", "connection_closed", "session_start_timeout", "open_failed"})
 
 
+_ATTEMPT = re.compile(r"\s*\((attempt \d+, (?:next in \d+ s|retrying now))\)\s*$")
+
+
 def stt_reconnecting(raw: str, error_type: str = "") -> str:
-    """status.message while the STT client reconnects."""
+    """status.message while the STT client reconnects.
+
+    The client ends its raw text with "(attempt N, next in S s)"; that part is
+    kept, so the user sees how far the retries are.
+    """
+    match = _ATTEMPT.search(raw or "")
+    progress = f" ({match.group(1)})" if match else ""
+    raw = _ATTEMPT.sub("", raw or "")
     if error_type in _STT_RATE:
-        return ("Speech to text: ElevenLabs is rate limiting this account; reconnecting. "
+        return (f"Speech to text: ElevenLabs is rate limiting this account; reconnecting{progress}. "
                 "Subtitles resume when it accepts audio again.")
     if error_type in _STT_NETWORK or error_type.startswith("http_5"):
-        return ("Speech to text: the connection to ElevenLabs was lost; reconnecting. "
+        return (f"Speech to text: the connection to ElevenLabs was lost; reconnecting{progress}. "
                 "Check the network connection if this does not clear.")
     if error_type == "insufficient_audio_activity":
         return "Speech to text: no sound for a while; it reconnects when audio plays again."
     if error_type == "session_time_limit_exceeded":
         return "Speech to text: opening a new ElevenLabs session (time limit reached)."
-    return f"Speech to text: {raw or 'reconnecting'}; reconnecting." if raw else "Speech to text: reconnecting."
+    return f"Speech to text: {raw}; reconnecting{progress}." if raw else f"Speech to text: reconnecting{progress}."
 
 
 def stt_failed(raw: str, error_type: str = "") -> str:

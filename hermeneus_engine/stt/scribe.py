@@ -133,9 +133,17 @@ class ScribeTuning:
     * ``queue_seconds=5``: audio kept while no session can take it. It covers
       the first backoff steps plus a handshake. A longer backlog would be
       replayed behind live audio and delay every later subtitle by its length.
-    * ``backoff_base=0.5``, ``backoff_cap=10``, ``max_attempts=8``: full jitter
-      exponential backoff. Eight attempts with these values wait at most about
-      45 s in total before the client reports FAILED.
+    * ``backoff_base=1``, ``backoff_cap=30``, ``reconnect_budget_s=180``,
+      ``max_attempts=0``: exponential backoff with equal jitter. The wait before
+      attempt n is drawn from [c/2, c] with c = min(cap, base * 2**(n-1)), so
+      waits grow 1, 2, 4, 8, 16, then 30 s. The client gives up when the time
+      spent waiting and connecting in one outage passes the budget (3 min), or
+      after ``max_attempts`` attempts when that is non-zero. An outage ends
+      when a session delivers a transcript or stays live for
+      ``stable_seconds`` (30 s). The previous policy (full jitter, cap 10 s,
+      8 attempts) gave up 11.5 s after ElevenLabs became unreachable (A1, E3).
+      Waiting for audio after ``insufficient_audio_activity`` is not part of
+      an outage and costs no budget.
     * ``rotation_seconds=600``: no official page states the session time limit
       behind ``session_time_limit_exceeded`` (UNVERIFIED). Rotation pre-opens
       the next session, so a short interval costs only one extra handshake.
@@ -173,9 +181,11 @@ class ScribeTuning:
 
     chunk_ms: int = 20
     queue_seconds: float = 5.0
-    backoff_base: float = 0.5
-    backoff_cap: float = 10.0
-    max_attempts: int = 8
+    backoff_base: float = 1.0
+    backoff_cap: float = 30.0
+    reconnect_budget_s: float = 180.0
+    max_attempts: int = 0
+    stable_seconds: float = 30.0
     rotation_seconds: float = 600.0
     rotation_retry_seconds: float = 30.0
     boundary_wait: float = 20.0
@@ -244,6 +254,14 @@ def build_url(config: SttConfig, tuning: Optional[ScribeTuning] = None) -> str:
     if tuning is not None and tuning.vad_silence_threshold_secs is not None:
         query.append(("vad_silence_threshold_secs", f"{tuning.vad_silence_threshold_secs:g}"))
     return f"{config.base_url}?{urlencode(query)}"
+
+
+@dataclass
+class _Outage:
+    """One stretch of failed connection attempts."""
+
+    attempts: int = 0
+    spent: float = 0.0  # seconds spent waiting and connecting
 
 
 class _Fatal(Exception):
@@ -336,6 +354,10 @@ class ScribeLiveClient:
         self._sleep = sleep
         self._rng = rng
         self.stats = ScribeStats()
+        # Set on every RECONNECTING status: attempt number and seconds until it starts.
+        self.reconnect_attempt = 0
+        self.reconnect_delay_s = 0.0
+        self._outage = _Outage()
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._events: asyncio.Queue = asyncio.Queue()
@@ -873,25 +895,27 @@ class ScribeLiveClient:
             await self._fail("Live transcription stopped on an internal error.", "internal")
 
     async def _supervise(self) -> None:
-        attempt = 0
+        self._outage = _Outage()
         while True:
             if self._close_requested.is_set():
                 await self._shutdown_without_session()
                 return
+            started = time.monotonic()
             try:
                 session = await self._open_session()
             except _Fatal as exc:
                 await self._fail(exc.message, exc.error_type)
                 return
             except _Retry as exc:
-                attempt += 1
-                if not await self._backoff(attempt, exc):
+                self._outage.spent += time.monotonic() - started
+                if not await self._backoff(exc):
                     return
                 continue
 
             self._set_active(session)
             self._status(SttState.LIVE)
             self._admit(session)
+            live_since = time.monotonic()
             while True:
                 outcome = await self._watch(session)
                 if outcome == "close":
@@ -906,8 +930,8 @@ class ScribeLiveClient:
                     continue
                 break
 
-            if session.got_transcript:
-                attempt = 0
+            if session.got_transcript or time.monotonic() - live_since >= self._tuning.stable_seconds:
+                self._outage = _Outage()
             self._set_active(None)
             self._finish(session)
             exc = self._session_outcome(session)
@@ -916,28 +940,49 @@ class ScribeLiveClient:
                 return
             if exc.error_type == "session_time_limit_exceeded":
                 self._learn_session_limit(session)
-            attempt += 1
             self.stats.reconnects += 1
-            if not await self._backoff(attempt, exc):
+            if not await self._backoff(exc):
                 return
 
-    async def _backoff(self, attempt: int, exc: _Retry) -> bool:
+    def _next_delay(self, attempt: int) -> float:
+        t = self._tuning
+        ceiling = min(t.backoff_cap, t.backoff_base * (2 ** (attempt - 1)))
+        return ceiling * (0.5 + 0.5 * self._rng())
+
+    async def _backoff(self, exc: _Retry) -> bool:
         """Wait before the next attempt. Returns False when the client stopped."""
-        if attempt > self._tuning.max_attempts:
-            await self._fail(f"Lost connection to ElevenLabs after {self._tuning.max_attempts} attempts. "
-                             f"Last error: {exc.message}.", exc.error_type)
-            return False
-        self._status(SttState.RECONNECTING, exc.message, exc.error_type)
-        log.info("scribe reconnect %d/%d: %s", attempt, self._tuning.max_attempts, exc.message)
         if exc.idle:
+            # The server closed an idle session. This is not a network failure:
+            # reconnect when audio is queued again, without using the budget.
+            self._outage = _Outage()
+            self._status(SttState.RECONNECTING, exc.message, exc.error_type)
+            log.info("scribe idle close: %s", exc.message)
             self._audio_arrived.clear()
             if not self._buf:
                 await _first(self._audio_arrived.wait(), self._close_requested.wait())
             return True
-        if not exc.immediate or attempt > 1:
-            ceiling = min(self._tuning.backoff_cap, self._tuning.backoff_base * (2 ** (attempt - 1)))
-            delay = ceiling * self._rng()
+        outage = self._outage
+        outage.attempts += 1
+        attempt = outage.attempts
+        t = self._tuning
+        remaining = t.reconnect_budget_s - outage.spent
+        if (t.max_attempts and attempt > t.max_attempts) or remaining <= 0:
+            await self._fail(f"Lost connection to ElevenLabs for {outage.spent:.0f} s "
+                             f"({attempt - 1} attempts). Last error: {exc.message}.", exc.error_type)
+            return False
+        if exc.immediate and attempt == 1:
+            delay = 0.0
+        else:
+            delay = min(self._next_delay(attempt), remaining)
+        detail = (f"attempt {attempt}, next in {max(1, round(delay))} s" if delay > 0
+                  else f"attempt {attempt}, retrying now")
+        self.reconnect_attempt, self.reconnect_delay_s = attempt, delay
+        self._status(SttState.RECONNECTING, f"{exc.message} ({detail})", exc.error_type)
+        log.info("scribe reconnect attempt %d in %.1f s (%.0f of %.0f s budget used): %s",
+                 attempt, delay, outage.spent, t.reconnect_budget_s, exc.message)
+        if delay > 0:
             await _first(self._sleep(delay), self._close_requested.wait())
+        outage.spent += delay
         return True
 
     def _learn_session_limit(self, session: _Session) -> None:

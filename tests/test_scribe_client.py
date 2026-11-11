@@ -580,6 +580,8 @@ async def test_session_time_limit_reconnects_immediately_and_shortens_rotation(f
                                                         and e.state == SttState.LIVE]) == 2)
     assert (SttState.RECONNECTING, "session_time_limit_exceeded") in statuses(events)
     assert sleeps.delays == []
+    assert [e.message for e in events if isinstance(e, SttStatus) and e.state == SttState.RECONNECTING] == [
+        "Scribe session time limit reached (attempt 1, retrying now)"]
     assert client._rotation_seconds == 30.0
     await client.close()
 
@@ -614,7 +616,7 @@ async def test_http_401_is_fatal(fake):
     assert events[-1].error_type == "http_401"
 
 
-async def test_http_503_retries_with_capped_jittered_backoff_then_fails(fake):
+async def test_http_503_respects_max_attempts_when_set(fake):
     fake.reject = [503] * 10
     sleeps = Sleeps()
     client = make_client(fake, sleep=sleeps,
@@ -623,8 +625,58 @@ async def test_http_503_retries_with_capped_jittered_backoff_then_fails(fake):
     events = await collect(client, status_is(SttState.FAILED))
     assert sleeps.delays == [0.5, 1.0, 2.0, 2.0]  # rng fixed at 1.0, so each delay is its ceiling
     assert fake.handshakes == 5
-    assert "after 4 attempts" in events[-1].message
+    assert "(4 attempts)" in events[-1].message and "Lost connection to ElevenLabs" in events[-1].message
     assert events[-1].error_type == "http_503"
+
+
+async def test_default_backoff_reaches_30_s_and_gives_up_after_the_3_minute_budget(fake):
+    fake.reject = [503] * 50
+    sleeps = Sleeps()
+    client = make_client(fake, sleep=sleeps, tuning=ScribeTuning())
+    await client.start()
+    events = await collect(client, status_is(SttState.FAILED))
+    # rng 1.0: each wait is its ceiling. The 10th wait is clipped to what is left of 180 s.
+    assert sleeps.delays[:9] == [1, 2, 4, 8, 16, 30, 30, 30, 30]
+    assert len(sleeps.delays) == 10 and 28.0 < sleeps.delays[9] <= 29.0
+    assert 179.9 <= sum(sleeps.delays) <= 180.0
+    reconnecting = [e.message for e in events if isinstance(e, SttStatus) and e.state == SttState.RECONNECTING]
+    assert reconnecting[3] == "ElevenLabs answered HTTP 503 (attempt 4, next in 8 s)"
+    assert reconnecting[0].endswith("(attempt 1, next in 1 s)")
+    assert events[-1].state == SttState.FAILED and events[-1].error_type == "http_503"
+    assert "(10 attempts)" in events[-1].message
+
+
+async def test_backoff_jitter_stays_in_the_upper_half(fake):
+    fake.reject = [503] * 4
+    sleeps = Sleeps()
+    client = ScribeLiveClient(SttConfig(base_url=fake.url), Keys("k"), sleep=sleeps, rng=lambda: 0.0,
+                              tuning=ScribeTuning(drain_quiet=0.1))
+    await client.start()
+    events = await collect(client, status_is(SttState.LIVE))
+    assert sleeps.delays == [0.5, 1.0, 2.0, 4.0]
+    assert [e.message for e in events if isinstance(e, SttStatus) and e.state == SttState.RECONNECTING][0] \
+        == "ElevenLabs answered HTTP 503 (attempt 1, next in 1 s)"
+    assert client.reconnect_attempt == 4 and client.reconnect_delay_s == 4.0
+    await client.close()
+
+
+async def test_a_session_with_transcript_resets_the_outage(fake):
+    async def flaky(conn):
+        await conn.started()
+        await conn.send("partial_transcript", text="hi")
+        await asyncio.sleep(0.05)
+        await conn.ws.close()
+
+    fake.scripts = [flaky, flaky, flaky]
+    sleeps = Sleeps()
+    client = make_client(fake, sleep=sleeps)
+    await client.start()
+    events = await collect(client, lambda ev, out: len([e for e in out if isinstance(e, SttStatus)
+                                                        and e.state == SttState.LIVE]) == 4)
+    messages = [e.message for e in events if isinstance(e, SttStatus) and e.state == SttState.RECONNECTING]
+    assert len(messages) == 3 and all(m.endswith("(attempt 1, next in 1 s)") for m in messages)
+    assert sleeps.delays == [1, 1, 1]
+    await client.close()
 
 
 async def test_http_503_then_success(fake):
