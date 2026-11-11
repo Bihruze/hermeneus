@@ -57,7 +57,8 @@ class PortAudioStream:
 
 
 class PortAudioReader:
-    def __init__(self) -> None:
+    def __init__(self, latency=LATENCY) -> None:
+        self._latency = latency
         try:
             import sounddevice
         except Exception as exc:  # PortAudio missing or failing to load
@@ -76,6 +77,6 @@ class PortAudioReader:
         if index is None:
             raise PortAudioUnavailable(f"PortAudio does not list the capture device {device_name!r}")
         stream = sd.InputStream(device=index, channels=1, samplerate=rate, dtype="float32",
-                                blocksize=0, latency=LATENCY)
+                                blocksize=0, latency=self._latency)
         stream.start()
         return PortAudioStream(stream, rate)
