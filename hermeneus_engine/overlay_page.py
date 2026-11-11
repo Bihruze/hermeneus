@@ -36,6 +36,7 @@ import re
 import secrets
 import socket
 import threading
+import time
 from dataclasses import asdict
 from pathlib import Path
 from typing import Any, AsyncIterator, Callable, Mapping, Optional
@@ -53,6 +54,7 @@ KEY_PORT = "overlay_page_port"
 
 PAGE_FILE = Path(__file__).with_name("overlay_page.html")
 SETTINGS_PLACEHOLDER = "{}/*HERMENEUS_SETTINGS*/"
+THEME_PLACEHOLDER = "/*HERMENEUS_THEME*/"
 
 MAX_CLIENTS = 16
 MAX_HEAD_BYTES = 8192
@@ -62,6 +64,7 @@ PROBE_TIMEOUT_S = 0.3
 START_TIMEOUT_S = 3.0
 STOP_TIMEOUT_S = 2.0
 SSE_RETRY_MS = 2000
+THEME_CHECK_S = 1.0
 
 EventSource = Callable[[Optional[int]], AsyncIterator[dict]]
 
@@ -135,25 +138,104 @@ def _csp_hash(source: str) -> str:
     return "'sha256-" + base64.b64encode(hashlib.sha256(source.encode("utf-8")).digest()).decode("ascii") + "'"
 
 
-def load_page(path: Path = PAGE_FILE) -> tuple[str, str]:
-    """The page template and its Content-Security-Policy (hashes of its inline script and style)."""
+def _css_value(value: Any) -> str:
+    text = str(value)
+    if any(ch in text for ch in "{};<>\\"):
+        raise OverlayPageError(f"overlay token value {text!r} is not a plain CSS value")
+    return text
+
+
+def _block(selector: str, props: Mapping[str, Any]) -> str:
+    body = "".join(f"  {name}: {_css_value(value)};\n" for name, value in props.items())
+    return f"{selector} {{\n{body}}}\n"
+
+
+def theme_css(tokens: Mapping[str, Any]) -> str:
+    """CSS custom properties from ``theme_tokens`` output.
+
+    Without a palette from Desktop, light is the default and dark follows
+    prefers-color-scheme. With one, Desktop's own light or dark is the default.
+    ``?theme=light|dark`` sets ``data-theme`` on the root and forces that mode.
+    """
+    common, light, dark = tokens["common"], tokens["light"], tokens["dark"]
+    if tokens.get("follow_system", True):
+        return (_block(":root", {**common, **light})
+                + "@media (prefers-color-scheme: dark) {\n"
+                + _block(':root:not([data-theme="light"])', dark)
+                + "}\n"
+                + _block(':root[data-theme="dark"]', dark))
+    return (_block(":root", {**common, **tokens["default"]})
+            + _block(':root[data-theme="light"]', light)
+            + _block(':root[data-theme="dark"]', dark))
+
+
+# Text sizes relative to the translation. The native strip uses the same two numbers
+# (overlay/panel_mac.py ORIGINAL_SCALE and LABEL_SCALE); they are layout, not theme tokens.
+ORIGINAL_SCALE = 0.58
+LABEL_SCALE = 0.62
+
+
+def _scheme_vars(pal: Any) -> dict:
+    out = {"--surface": pal.surface.css(), "--text-primary": pal.text.css(),
+           "--text-secondary": pal.text_secondary.css(), "--text-pending": pal.text_secondary.css(),
+           "--text-failed": pal.text_secondary.css(), "--font-sans": f"{pal.font}, system-ui, sans-serif",
+           "--radius": f"{pal.radius_px:g}px"}
+    out.update({f"--speaker-{i + 1}": c.css() for i, c in enumerate(pal.speakers)})
+    return out
+
+
+def theme_tokens(theme_file: Optional[Path] = None) -> dict:
+    """The page's CSS variables from the shared overlay token table (``overlay_tokens.py``).
+
+    The native overlay draws from the same table, so both show the same colours,
+    weights and radius. When the Desktop pane has sent the active theme
+    (``theme_file``, ``overlay/theme.json``), that palette is used, in Desktop's
+    own light or dark; otherwise the nous fallback for the system appearance.
+    """
+    from . import overlay_tokens as tokens
+
+    sent = None
+    if theme_file is not None:
+        try:
+            sent = tokens.palette_from_json(Path(theme_file).read_text(encoding="utf-8"))
+        except OSError:
+            sent = None
+    light = sent if sent is not None and not sent.dark else tokens.FALLBACK[False]
+    dark = sent if sent is not None and sent.dark else tokens.FALLBACK[True]
+    common = {"--label-weight": str(tokens.WEIGHT_LABEL), "--text-weight": str(tokens.WEIGHT_TEXT),
+              "--label-scale": f"{LABEL_SCALE}em", "--original-scale": f"{ORIGINAL_SCALE}em",
+              "--original-order": "-1"}
+    out = {"common": common, "light": _scheme_vars(light), "dark": _scheme_vars(dark),
+           "follow_system": sent is None}
+    out["default"] = _scheme_vars(sent) if sent is not None else out["light"]
+    return out
+
+
+def load_page(path: Path = PAGE_FILE) -> str:
+    """The page template. Its CSP is made per response (render_page), because the theme is written in."""
     html = path.read_text(encoding="utf-8")
-    scripts = re.findall(r"<script>(.*?)</script>", html, flags=re.S)
-    styles = re.findall(r"<style>(.*?)</style>", html, flags=re.S)
-    if SETTINGS_PLACEHOLDER not in html or not scripts or not styles:
+    if (SETTINGS_PLACEHOLDER not in html or THEME_PLACEHOLDER not in html
+            or len(re.findall(r"<script>(.*?)</script>", html, flags=re.S)) != 1
+            or len(re.findall(r"<style>(.*?)</style>", html, flags=re.S)) != 1):
         raise OverlayPageError(f"{path} is not the overlay page template")
-    csp = ("default-src 'none'; "
-           f"script-src {' '.join(_csp_hash(s) for s in scripts)}; "
-           f"style-src {' '.join(_csp_hash(s) for s in styles)}; "
-           "connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
-    return html, csp
+    return html
 
 
-def render_page(template: str, settings: Mapping[str, Any]) -> bytes:
+def render_page(template: str, settings: Mapping[str, Any], css: str = "") -> tuple[bytes, str]:
+    """The page with its settings and theme written in, and the Content-Security-Policy that allows
+    exactly its inline script and style (by hash)."""
     data = json.dumps(dict(settings), ensure_ascii=True, separators=(",", ":"))
     # The JSON sits in a <script type="application/json"> block; "<" never reaches the HTML parser.
     data = data.replace("<", "\\u003c").replace(">", "\\u003e").replace("&", "\\u0026")
-    return template.replace(SETTINGS_PLACEHOLDER, data, 1).encode("utf-8")
+    if "</" in css or "<" in css:
+        raise OverlayPageError("overlay theme CSS may not contain '<'")
+    html = template.replace(SETTINGS_PLACEHOLDER, data, 1).replace(THEME_PLACEHOLDER, css, 1)
+    script = re.search(r"<script>(.*?)</script>", html, flags=re.S).group(1)
+    style = re.search(r"<style>(.*?)</style>", html, flags=re.S).group(1)
+    csp = ("default-src 'none'; "
+           f"script-src {_csp_hash(script)}; style-src {_csp_hash(style)}; "
+           "connect-src 'self'; img-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'")
+    return html.encode("utf-8"), csp
 
 
 _REASONS = {200: "OK", 308: "Permanent Redirect", 400: "Bad Request", 403: "Forbidden", 404: "Not Found",
@@ -202,7 +284,7 @@ def _port_in_use(port: int) -> bool:
 
     The listening socket uses SO_REUSEADDR so that a restart is not blocked by
     connections still in TIME_WAIT. On macOS that option also lets a bind to
-    127.0.0.1 succeed beside another program's 0.0.0.0 listener, so a connect
+    127.0.0.1 succeed beside another program's wildcard (all interfaces) listener, so a connect
     probe finds that program first.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -236,13 +318,17 @@ class OverlayPageServer:
     """The HTTP server, on its own thread and event loop."""
 
     def __init__(self, *, port: int, events: EventSource, settings: Callable[[], Mapping[str, Any]],
-                 token: Optional[str] = None, page_file: Path = PAGE_FILE) -> None:
+                 token: Optional[str] = None, page_file: Path = PAGE_FILE,
+                 theme_file: Optional[Callable[[], Optional[Path]]] = None) -> None:
         self.requested_port = port
         self.port = port
+        # (host, port) the listening socket reports once bound; host is always 127.0.0.1.
+        self.bound_address: Optional[tuple] = None
         self.token = token or secrets.token_urlsafe(24)
         self._events = events
         self._settings = settings
-        self._template, self._csp = load_page(page_file)
+        self._template = load_page(page_file)
+        self._theme_file = theme_file or (lambda: None)
         self._thread: Optional[threading.Thread] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._stopping: Optional[asyncio.Event] = None
@@ -260,7 +346,8 @@ class OverlayPageServer:
     def start(self) -> None:
         """Bind, then serve on a new thread. Raises OverlayPageError (the bind happens here, on the caller)."""
         sock = bind_loopback(self.requested_port)
-        self.port = sock.getsockname()[1]
+        self.bound_address = sock.getsockname()
+        self.port = self.bound_address[1]
         ready = threading.Event()
         failure: list[BaseException] = []
 
@@ -376,9 +463,14 @@ class OverlayPageServer:
         except Exception as exc:  # unreadable config: the page still works with its own defaults
             logger.warning("hermeneus: overlay settings could not be read: %s", exc)
             settings = page_settings({})
-        body = render_page(self._template, settings)
+        try:
+            css = await asyncio.to_thread(lambda: theme_css(theme_tokens(self._theme_file())))
+        except OverlayPageError as exc:  # a stored theme with a value that is not plain CSS
+            logger.warning("hermeneus: overlay theme refused: %s", exc)
+            css = theme_css(theme_tokens(None))
+        body, csp = render_page(self._template, settings, css)
         writer.write(_head(200, [("Content-Type", "text/html; charset=utf-8"), ("Content-Length", str(len(body))),
-                                 ("Content-Security-Policy", self._csp)]))
+                                 ("Content-Security-Policy", csp)]))
         if not head_only:
             writer.write(body)
         await asyncio.wait_for(writer.drain(), WRITE_TIMEOUT_S)
@@ -396,17 +488,48 @@ class OverlayPageServer:
         await asyncio.wait_for(writer.drain(), WRITE_TIMEOUT_S)
         self._streams += 1
         stream = self._events(after)
+        seen = _mtime(self._theme_file())
+        checked = time.monotonic()
         try:
             async for event in stream:
                 slim = slim_event(event)
-                if slim is None:
-                    continue
-                writer.write(sse_chunk(slim))
+                if slim is not None:
+                    writer.write(sse_chunk(slim))
+                # The pane sends a new theme when Desktop's theme changes; pass it on.
+                if time.monotonic() - checked >= THEME_CHECK_S:
+                    checked = time.monotonic()
+                    path = self._theme_file()
+                    now = _mtime(path)
+                    if now != seen:
+                        seen = now
+                        theme = self._theme_event(path)
+                        if theme is not None:
+                            writer.write(sse_chunk(theme))
                 await asyncio.wait_for(writer.drain(), WRITE_TIMEOUT_S)
         finally:
             self._streams -= 1
             with contextlib.suppress(Exception):
                 await stream.aclose()
+
+
+    @staticmethod
+    def _theme_event(path: Optional[Path]) -> Optional[dict]:
+        try:
+            tokens = theme_tokens(path)
+            theme_css(tokens)  # every value is plain CSS, or nothing is sent
+        except OverlayPageError as exc:
+            logger.warning("hermeneus: overlay theme refused: %s", exc)
+            return None
+        return {"type": "theme", "tokens": tokens}
+
+
+def _mtime(path: Optional[Path]) -> Optional[int]:
+    if path is None:
+        return None
+    try:
+        return Path(path).stat().st_mtime_ns
+    except OSError:
+        return None
 
 
 def _resume_seq(last_event_id: Optional[str], after: Optional[str]) -> int:
@@ -419,6 +542,12 @@ def _resume_seq(last_event_id: Optional[str], after: Optional[str]) -> int:
         except ValueError:
             continue
     return 0
+
+
+def _overlay_theme_file(data_dir: Path) -> Path:
+    """Where the Desktop pane stores the active theme for both overlays."""
+    from .overlay.control import theme_file
+    return theme_file(data_dir)
 
 
 def controller_events(data_dir: Callable[[], Path]) -> EventSource:
@@ -442,6 +571,7 @@ class OverlayPage:
                  events: Optional[EventSource] = None) -> None:
         self._settings = settings
         self._events = events or controller_events(data_dir)
+        self._theme_file = lambda: _overlay_theme_file(data_dir())
         self._server: Optional[OverlayPageServer] = None
         self._error = ""
         self._mutex = threading.Lock()
@@ -485,7 +615,8 @@ class OverlayPage:
             return
         self._stop()
         try:
-            server = OverlayPageServer(port=wanted, events=self._events, settings=self._settings)
+            server = OverlayPageServer(port=wanted, events=self._events, settings=self._settings,
+                                       theme_file=self._theme_file)
             server.start()
         except (OverlayPageError, OSError) as exc:
             self._error = str(exc)

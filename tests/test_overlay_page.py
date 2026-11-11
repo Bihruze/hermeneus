@@ -107,24 +107,28 @@ def server():
 # -- server --------------------------------------------------------------------------
 
 def test_server_binds_loopback_only(server):
-    sock_name = None
-    # The listening address the kernel reports for the server's port.
-    with socket.create_connection(("127.0.0.1", server.port), timeout=2) as c:
-        sock_name = c.getpeername()
-    assert sock_name == ("127.0.0.1", server.port)
+    # The listening socket's own address, as the kernel reports it. No other address is touched.
+    assert server.bound_address == ("127.0.0.1", server.port)
     assert server.url == f"http://127.0.0.1:{server.port}/{server.token}/"
     assert overlay_page.HOST == "127.0.0.1"
-    # Reaching the same port through any non-loopback address of this Mac is refused.
-    # The address of the default route's interface. A UDP connect sends no packet.
+
+
+def test_bind_path_only_ever_names_loopback(monkeypatch):
+    bound = []
+    real_bind = socket.socket.bind
+
+    class Recording(socket.socket):
+        def bind(self, address):
+            bound.append(address)
+            return real_bind(self, address)
+
+    monkeypatch.setattr(overlay_page.socket, "socket", Recording)
+    sock = overlay_page.bind_loopback(0)
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
-            u.connect(("192.0.2.1", 9))
-            lan = u.getsockname()[0]
-    except OSError:
-        lan = None
-    if lan and not lan.startswith("127."):
-        with pytest.raises(OSError):
-            socket.create_connection((lan, server.port), timeout=1).close()
+        assert sock.getsockname()[0] == "127.0.0.1"
+    finally:
+        sock.close()
+    assert bound == [("127.0.0.1", 0)]
 
 
 def test_token_is_required(server):
@@ -180,10 +184,99 @@ def test_page_is_self_contained_and_carries_the_settings(server):
 
 
 def test_settings_cannot_break_out_of_the_json_block():
-    template, _ = overlay_page.load_page()
-    html = overlay_page.render_page(template, {"x": "</script><script>alert(1)</script>"}).decode()
+    template = overlay_page.load_page()
+    body, _ = overlay_page.render_page(template, {"x": "</script><script>alert(1)</script>"})
+    html = body.decode()
     assert "</script><script>alert(1)" not in html
     assert "\\u003c/script\\u003e" in html
+
+
+def test_theme_is_written_in_and_allowed_by_hash(server):
+    import base64, hashlib, re
+    _, hdrs, body = http(server.port, f"/{server.token}/")
+    html = body.decode()
+    style = re.search(r"<style>(.*?)</style>", html, re.S).group(1)
+    digest = base64.b64encode(hashlib.sha256(style.encode()).digest()).decode()
+    assert f"style-src 'sha256-{digest}'" in hdrs["content-security-policy"]
+    assert overlay_page.THEME_PLACEHOLDER not in html
+    assert "--surface:" in style and ':root[data-theme="dark"]' in style
+
+
+def test_page_uses_the_shared_token_table():
+    from hermeneus_engine import overlay_tokens as table
+    tokens = overlay_page.theme_tokens(None)
+    assert tokens["follow_system"] is True
+    for dark, mode in ((False, "light"), (True, "dark")):
+        pal = table.FALLBACK[dark]
+        assert tokens[mode]["--surface"] == pal.surface.css()
+        assert tokens[mode]["--text-primary"] == pal.text.css()
+        assert tokens[mode]["--text-pending"] == pal.text_secondary.css()
+        assert tokens[mode]["--speaker-1"] == pal.speakers[0].css()
+        assert tokens[mode]["--radius"] == f"{pal.radius_px:g}px"
+    assert tokens["common"]["--label-weight"] == str(table.WEIGHT_LABEL)
+    assert tokens["common"]["--text-weight"] == str(table.WEIGHT_TEXT)
+    css = overlay_page.theme_css(tokens)
+    assert "prefers-color-scheme: dark" in css
+
+
+def sent_palette(tmp_path, dark=True, surface="#203040"):
+    from hermeneus_engine import overlay_tokens as table
+    pal = table.palette_from_payload({"mode": "dark" if dark else "light", "name": "mono",
+                                      "colors": {"surface": surface, "text": "rgb(250, 250, 250)",
+                                                 "text_secondary": "rgba(250, 250, 250, 0.74)",
+                                                 "text_tertiary": "rgba(250, 250, 250, 0.54)",
+                                                 "stroke": "rgba(250, 250, 250, 0.1)",
+                                                 "speakers": ["#ff0000", "#00ff00"]},
+                                      "radius_px": 6, "font": "Menlo"})
+    path = tmp_path / "theme.json"
+    path.write_text(table.palette_to_json(pal), encoding="utf-8")
+    return path
+
+
+def test_a_theme_sent_by_desktop_wins(tmp_path):
+    from hermeneus_engine import overlay_tokens as table
+    tokens = overlay_page.theme_tokens(sent_palette(tmp_path))
+    assert tokens["follow_system"] is False
+    assert tokens["default"]["--surface"] == table.Rgba.hex("#203040").css()
+    assert tokens["dark"] == tokens["default"]
+    assert tokens["light"]["--surface"] == table.FALLBACK[False].surface.css()
+    assert tokens["default"]["--speaker-2"] == table.Rgba.hex("#00ff00").css()
+    assert tokens["default"]["--radius"] == "6px"
+    css = overlay_page.theme_css(tokens)
+    assert "prefers-color-scheme" not in css and ':root[data-theme="light"]' in css
+    (tmp_path / "theme.json").write_text("not json", encoding="utf-8")
+    assert overlay_page.theme_tokens(tmp_path / "theme.json")["follow_system"] is True
+
+
+def test_theme_changes_reach_open_pages(tmp_path):
+    path = tmp_path / "theme.json"
+
+    async def events(after):
+        for seq in range(1, 400):
+            yield {"type": "status", "seq": seq, "state": "live"}
+            await asyncio.sleep(0.02)
+
+    srv = overlay_page.OverlayPageServer(port=0, events=events, settings=dict, theme_file=lambda: path)
+    srv.start()
+    try:
+        import threading, time
+        threading.Timer(0.3, lambda: sent_palette(tmp_path, surface="#405060")).start()
+        found, _, _ = read_sse(srv.port, f"/{srv.token}/events",
+                               until=lambda ev: any(e["type"] == "theme" for e in ev))
+        from hermeneus_engine.overlay_tokens import Rgba
+        want = Rgba.hex("#405060").css()
+        theme = next(e for e in found if e["type"] == "theme")
+        assert theme["tokens"]["default"]["--surface"] == want
+        _, hdrs, body = http(srv.port, f"/{srv.token}/")
+        assert want.encode() in body
+    finally:
+        srv.stop()
+
+
+def test_theme_values_cannot_inject_css():
+    for bad in ("red; } body { display: none", "x</style>", "a{b}"):
+        with pytest.raises(overlay_page.OverlayPageError):
+            overlay_page.theme_css({**overlay_page.theme_tokens(None), "dark": {"--surface": bad}})
 
 
 def test_events_stream_is_sse_with_slim_events(server):
@@ -219,15 +312,50 @@ def test_resume_uses_last_event_id():
 
 
 def test_a_busy_port_is_an_error_not_another_port():
-    for address in ("127.0.0.1", "0.0.0.0"):
-        with socket.socket() as other:
-            other.bind((address, 0))
-            other.listen(1)
-            port = other.getsockname()[1]
-            srv = overlay_page.OverlayPageServer(port=port, events=fake_events, settings=dict)
-            with pytest.raises(overlay_page.OverlayPageError, match=f"port {port} on 127.0.0.1 is already in use"):
-                srv.start()
-            assert not srv.running
+    with socket.socket() as other:
+        other.bind(("127.0.0.1", 0))
+        other.listen(1)
+        port = other.getsockname()[1]
+        srv = overlay_page.OverlayPageServer(port=port, events=fake_events, settings=dict)
+        with pytest.raises(overlay_page.OverlayPageError, match=f"port {port} on 127.0.0.1 is already in use"):
+            srv.start()
+        assert not srv.running
+
+
+def test_a_listener_found_by_the_probe_stops_the_bind(monkeypatch):
+    # Another program's wildcard listener answers the 127.0.0.1 connect probe. The probe result
+    # is simulated here, so the test never opens a socket on any other address.
+    monkeypatch.setattr(overlay_page, "_port_in_use", lambda port: True)
+    binds = []
+    monkeypatch.setattr(overlay_page.socket.socket, "bind", lambda self, address: binds.append(address))
+    with pytest.raises(overlay_page.OverlayPageError, match="already in use"):
+        overlay_page.bind_loopback(47999)
+    assert binds == []
+
+
+def test_the_probe_connects_to_loopback_only(monkeypatch):
+    seen = []
+
+    class Probe:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, t):
+            pass
+
+        def connect_ex(self, address):
+            seen.append(address)
+            return 61
+
+    monkeypatch.setattr(overlay_page.socket, "socket", Probe)
+    assert overlay_page._port_in_use(47999) is False
+    assert seen == [("127.0.0.1", 47999)]
 
 
 def test_restart_on_the_same_port_after_connections(server):

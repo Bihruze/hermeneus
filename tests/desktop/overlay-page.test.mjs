@@ -110,3 +110,21 @@ test('URL query parameters override the shared settings and are clamped', () => 
   assert.equal(O.resolveSettings(base, '?theme=neon').theme, 'auto')
   assert.equal(O.resolveSettings(null, '?text_size=abc').text_size, O.DEFAULTS.text_size)
 })
+
+test('a theme event picks the forced mode, then Desktop mode, then the system appearance', () => {
+  const tokens = {
+    common: { '--label-weight': '600' },
+    light: { '--surface': 'L' },
+    dark: { '--surface': 'D' },
+    default: { '--surface': 'S' },
+    follow_system: true
+  }
+  const plain = v => JSON.parse(JSON.stringify(v))
+  assert.deepEqual(plain(O.themeVars(tokens, 'auto', true)), { '--label-weight': '600', '--surface': 'D' })
+  assert.deepEqual(plain(O.themeVars(tokens, 'auto', false)), { '--label-weight': '600', '--surface': 'L' })
+  assert.equal(O.themeVars({ ...tokens, follow_system: false }, 'auto', false)['--surface'], 'S')
+  assert.equal(O.themeVars({ ...tokens, follow_system: false }, 'light', true)['--surface'], 'L')
+  const odd = O.themeVars({ ...tokens, common: { 'color': 'red', '--x': 5, '--ok': 'y' } }, 'dark', false)
+  assert.deepEqual(plain(odd), { '--ok': 'y', '--surface': 'D' })
+  assert.equal(O.themeVars(null, 'auto', false), null)
+})

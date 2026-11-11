@@ -125,4 +125,8 @@ and `status` keep only `state`, `line` keeps `line_id`, `state`, `original`,
 `translation` and `speaker_id`; `relabel` and `reset` are unchanged. Line,
 relabel and status events carry their `seq` as the SSE `id`, so a reconnect
 resumes from `Last-Event-ID`. A first connection gets every stored line
-(`after` 0). The stream reads the session through `Controller.subscribe`.
+(`after` 0). The stream reads the session through `Controller.subscribe`. When the
+Desktop theme the pane stored for the overlays changes, the stream also sends
+`{"type": "theme", "tokens": {"common", "light", "dark", "default",
+"follow_system"}}`, CSS variable names to values, which the page applies
+without a reload. It has no `id`.
