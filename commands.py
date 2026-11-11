@@ -21,9 +21,11 @@ from .hermeneus_engine.options import Choices, UsageError, add_session_arguments
 from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
+from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_overlay
 
 SLASH_USAGE = ("usage: /translate start [--to LANG] [--source NAME] [--speak] "
-               "[--device OUTPUT] [--voice VOICE_ID] | /translate stop | /translate status")
+               "[--device OUTPUT] [--voice VOICE_ID] | /translate stop | /translate status | "
+               "/translate overlay show|hide|status")
 
 # Errors a start can raise that carry a message meant for the user.
 START_ERRORS = (UsageError, SessionBusy, FeedbackRiskError, components.ComponentUnavailable, RuntimeError,
@@ -45,6 +47,7 @@ class Plugin:
         self.controller = Controller(data_dir or glue.data_dir, owner=owner)
         self._build = build
         self._list_sources = list_sources or components.list_sources
+        self.overlay = OverlayService(lambda: self.controller.data_dir, self.settings, self.controller.status)
 
     # -- wiring ---------------------------------------------------------------
 
@@ -75,11 +78,13 @@ class Plugin:
                 raise UsageError(f"{exc} ({'; '.join(problems)})") from None
             raise
 
-    async def start(self, choices: Choices) -> dict:
+    async def start(self, choices: Choices, *, platform: Optional[str] = None) -> dict:
         options = await self.resolve_options(choices)
         if self._build is None:
             await asyncio.to_thread(glue.model_preflight)
-        return await self.controller.start(options, self.builder())
+        status = await self.controller.start(options, self.builder())
+        note = await self.overlay.auto(platform)
+        return {**status, "overlay_message": note} if note else status
 
     def unload(self) -> None:
         """on_unload: stop a session this process owns and remove its socket and lock."""
@@ -87,7 +92,7 @@ class Plugin:
 
     # -- slash command --------------------------------------------------------
 
-    async def slash(self, raw_args: str = "", **_context: Any) -> str:
+    async def slash(self, raw_args: str = "", **context: Any) -> str:
         try:
             argv = split_args(raw_args)
         except UsageError as exc:
@@ -95,10 +100,14 @@ class Plugin:
         sub, rest = (argv[0].lower(), argv[1:]) if argv else ("status", [])
         if sub == "start":
             try:
-                status = await self.start(Choices.from_namespace(parse_slash_start(rest)))
+                status = await self.start(Choices.from_namespace(parse_slash_start(rest)),
+                                          platform=context.get("platform"))
             except START_ERRORS as exc:
                 return f"Could not start translation: {exc}"
-            return describe_status(status)
+            note = status.get("overlay_message")
+            return describe_status(status) + (f" {note}" if note else "")
+        if sub == "overlay":
+            return await self.slash_overlay(rest, context.get("platform"))
         if rest:
             return f"/translate {sub} takes no arguments.\n{SLASH_USAGE}"
         if sub == "stop":
@@ -106,6 +115,19 @@ class Plugin:
         if sub == "status":
             return describe_status(await self.controller.status())
         return SLASH_USAGE
+
+    async def slash_overlay(self, rest: list, platform: Optional[str]) -> str:
+        action = rest[0].lower() if rest else "status"
+        if len(rest) > 1 or action not in ("show", "hide", "status"):
+            return SLASH_USAGE
+        try:
+            if action == "show":
+                return describe_overlay(await self.overlay.show(platform))
+            if action == "hide":
+                return describe_overlay(await self.overlay.hide())
+        except OverlayUnavailable as exc:
+            return f"The subtitle overlay did not open: {exc}."
+        return describe_overlay(self.overlay.status())
 
 
 def describe_status(status: dict) -> str:
@@ -144,6 +166,9 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     p_stop.add_argument("--json", action="store_true")
     p_status = sub.add_parser("status", help="show the session state")
     p_status.add_argument("--json", action="store_true")
+    p_overlay = sub.add_parser("overlay", help="show or hide the floating subtitle overlay on this Mac")
+    p_overlay.add_argument("overlay_action", nargs="?", choices=("show", "hide", "status"), default="status")
+    p_overlay.add_argument("--json", action="store_true")
 
 
 def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
@@ -159,9 +184,28 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
             return _print_status(asyncio.run(plugin.controller.stop()), args)
         if command == "status":
             return _print_status(asyncio.run(plugin.controller.status()), args)
-        print("usage: hermes hermeneus {doctor,devices,run,stop,status}", file=sys.stderr)
+        if command == "overlay":
+            return asyncio.run(cmd_overlay(plugin, args))
+        print("usage: hermes hermeneus {doctor,devices,run,stop,status,overlay}", file=sys.stderr)
         return 2
     return handle
+
+
+async def cmd_overlay(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys.stdout,
+                      err: TextIO = sys.stderr) -> int:
+    action = getattr(args, "overlay_action", "status")
+    try:
+        if action == "show":
+            result = await plugin.overlay.show("cli")
+        elif action == "hide":
+            result = await plugin.overlay.hide()
+        else:
+            result = plugin.overlay.status()
+    except OverlayUnavailable as exc:
+        print(f"hermeneus: the subtitle overlay did not open: {exc}", file=err)
+        return 1
+    print(json.dumps(result) if getattr(args, "json", False) else describe_overlay(result), file=out)
+    return 0
 
 
 def _print_status(status: dict, args: argparse.Namespace) -> int:
@@ -345,6 +389,9 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
             sub.close()
             print(f"hermeneus: could not start: {exc}", file=err)
             return 1
+        note = await plugin.overlay.auto("cli")
+        if note:
+            print(f"-- {note}", file=err, flush=True)
 
         async def pump() -> None:
             async for event in sub:
