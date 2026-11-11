@@ -9,12 +9,11 @@ from __future__ import annotations
 import argparse
 import asyncio
 import json
-import signal
 import sys
 from typing import Any, Callable, Optional, TextIO
 
 from . import glue
-from .hermeneus_engine import components, doctor
+from .hermeneus_engine import components, doctor, stop_signals
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
 from .hermeneus_engine.options import Choices, UsageError, add_session_arguments, parse_slash_start, resolve, split_args
@@ -269,9 +268,7 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
     def on_signal() -> None:
         stop.set()
 
-    if install_signals:
-        for sig in (signal.SIGINT, signal.SIGTERM):
-            loop.add_signal_handler(sig, on_signal)
+    uninstall_signals = stop_signals.install(loop, on_signal) if install_signals else None
     try:
         if lock_holder(data_dir):
             return await _attach(data_dir, printer, stop, args)
@@ -309,9 +306,8 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
         pump_task.cancel()
         return 1 if failed else 0
     finally:
-        if install_signals:
-            for sig in (signal.SIGINT, signal.SIGTERM):
-                loop.remove_signal_handler(sig)
+        if uninstall_signals is not None:
+            uninstall_signals()
 
 
 async def _attach(data_dir, printer: _Printer, stop: asyncio.Event, args: argparse.Namespace) -> int:
