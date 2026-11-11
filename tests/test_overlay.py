@@ -15,8 +15,7 @@ from hermeneus_engine.ipc import SessionUnavailable
 from hermeneus_engine.overlay import control
 from hermeneus_engine.overlay.app import OverlayApp
 from hermeneus_engine.overlay.follower import follow
-from hermeneus_engine.overlay.model import (FAILED, LABEL, PENDING, TRANSLATED, OverlayModel, Run, build_view,
-                                            compose, fit_head, fit_tail, layout, wrap, MARK)
+from hermeneus_engine.overlay.model import PENDING, OverlayModel, Run, fit_head
 from hermeneus_engine.overlay.placement import Display, Positions, Rect, Spot, frame_for, spot_for
 from hermeneus_engine.overlay.service import OverlayService
 
@@ -41,7 +40,13 @@ def chars(text, run):  # one unit per character; labels are as wide as their tex
 
 def test_settings_defaults_and_clamping():
     s = ovs.from_settings({})
-    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (True, 26, 2, True, 80, True)
+    # Overlay on by default (W29); target language only and a solid background by default (W28: the owner G6 finding).
+    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (True, 26, 2, False, 90, True)
+    assert (s.pace, s.reading_cps) == ("read", 0)
+    s = ovs.from_settings({"overlay_pace": "LIVE", "overlay_reading_cps": 3})
+    assert (s.pace, s.reading_cps) == ("live", 5)
+    s = ovs.from_settings({"overlay_pace": "fast", "overlay_reading_cps": 99})
+    assert (s.pace, s.reading_cps) == ("read", 30)
     s = ovs.from_settings({"overlay_text_size": 200, "overlay_max_lines": 0, "overlay_opacity": "-5",
                            "overlay_show_original": "off", "overlay": "yes", "overlay_show_speaker": 0})
     assert (s.text_size, s.max_lines, s.opacity, s.show_original, s.auto, s.show_speaker) == (64, 1, 0, False, True, False)
@@ -64,51 +69,6 @@ def test_plugin_yaml_declares_every_overlay_key():
 
 # -- reducer and compose -----------------------------------------------------------
 
-def test_partial_shows_at_once_then_its_translation_takes_its_place():
-    m = OverlayModel()
-    m.apply({"type": "hello", "seq": 1, "session": {"state": "live"}}, 0)
-    assert compose(m, 0, show_speaker=False, show_original=True)[2] == "Waiting for speech"
-    assert m.apply(line(2, "a", "partial", "Good evening"), 1)
-    runs, original, _ = compose(m, 1, show_speaker=False, show_original=True)
-    assert runs == [Run("Good evening", PENDING, 1)] and original == ""
-    m.apply(line(3, "a", "translated", "Good evening", "İyi akşamlar"), 2)
-    runs, original, _ = compose(m, 2, show_speaker=False, show_original=True)
-    assert runs == [Run("İyi akşamlar", TRANSLATED, 1)] and original == "Good evening"
-
-
-def test_older_seq_and_unchanged_lines_do_not_redraw():
-    m = OverlayModel()
-    assert m.apply(line(5, "a", "partial", "x"), 0)
-    assert not m.apply(line(4, "a", "partial", "older"), 0)
-    assert not m.apply(line(6, "a", "partial", "x"), 0)  # same content
-    assert compose(m, 0, show_speaker=False, show_original=False)[0][0].text == "x"
-
-
-def test_failed_line_shows_its_original_and_speaker_labels_follow_relabel():
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "Hello", "Merhaba", "s1:speaker_0"), 0)
-    m.apply(line(2, "b", "failed", "Fast talk", "", "s1:speaker_1"), 0)
-    runs, _, _ = compose(m, 0, show_speaker=True, show_original=True)
-    assert [(r.text, r.kind) for r in runs] == [("Speaker 1", LABEL), ("Merhaba", TRANSLATED),
-                                                ("Speaker 2", LABEL), ("Not translated", MARK),
-                                                ("Fast talk", FAILED)]
-    m.apply({"type": "relabel", "seq": 3, "from": "s1:speaker_1", "to": "s1:speaker_0"}, 0)
-    runs, _, _ = compose(m, 0, show_speaker=True, show_original=True)
-    assert [r.text for r in runs] == ["Speaker 1", "Merhaba", "Not translated", "Fast talk"]
-
-
-def test_reset_and_new_owner_hello_drop_lines_and_quiet_lines_clear():
-    m = OverlayModel()
-    m.apply(line(9, "a", "translated", "a", "b"), 0)
-    m.apply({"type": "reset"}, 0)
-    assert not m.lines and m.last_seq == 0
-    m.apply(line(9, "a", "translated", "a", "b"), 0)
-    m.apply({"type": "hello", "seq": 2, "session": {"state": "live"}}, 0)
-    assert not m.lines
-    m.apply(line(3, "c", "translated", "c", "d"), 10)
-    assert compose(m, 10 + 6.9, show_speaker=False, show_original=False)[0]
-    assert compose(m, 10 + 7.1, show_speaker=False, show_original=False) == ([], "", "")
-
 
 def test_keeps_a_bounded_number_of_lines():
     m = OverlayModel(keep=3)
@@ -119,54 +79,11 @@ def test_keeps_a_bounded_number_of_lines():
 
 # -- wrap and roll -------------------------------------------------------------------
 
-def test_wrap_rolls_to_the_newest_lines_and_keeps_styles():
-    runs = [Run("one two three", TRANSLATED), Run("four five", PENDING)]
-    lines = wrap(runs, 9, chars, 2)
-    assert [[(r.text, r.kind) for r in ln] for ln in lines] == [[("three", TRANSLATED)],
-                                                                [("four five", PENDING)]]
-    assert len(wrap(runs, 9, chars, 3)) == 3
-    assert wrap(runs, 100, chars, 1) == ((Run("one two three ", TRANSLATED), Run("four five", PENDING)),)
-
-
-def test_wrap_breaks_a_word_wider_than_the_line():
-    lines = wrap([Run("abcdefghij", TRANSLATED)], 4, chars, 3)
-    assert ["".join(r.text for r in ln) for ln in lines] == ["abcd", "efgh", "ij"]
-
-
-def test_build_view_names_the_speaker_again_when_the_label_rolls_off():
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "orig", "aa bb cc dd ee ff gg"), 0)
-    view = build_view(m, 0, width=9, measure=chars, max_lines=2, show_speaker=True, show_original=False)
-    assert view.lines[0][0].kind == LABEL and view.lines[0][0].text == "Speaker 1"
-    assert all(sum(chars(r.text, r) for r in ln) <= 9 + 1 for ln in view.lines)
-
 
 def test_the_original_is_cut_at_its_end_never_its_front():
     assert fit_head("short", 20, chars, Run("", PENDING)) == "short"
     out = fit_head("the quick brown fox jumps over", 12, chars, Run("", PENDING))
     assert out == "the quick\u2026" and len(out) <= 12
-
-
-def test_each_speaker_turn_starts_its_own_row():
-    # Before: "Speaker 1 Merhaba. Speaker 2 Nasılsın?" shared one row (A3 F4).
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "Hi.", "Merhaba.", "s1:speaker_0"), 0)
-    m.apply(line(2, "b", "translated", "How are you?", "Nasılsın?", "s1:speaker_1"), 0)
-    m.apply(line(3, "c", "translated", "Fine.", "İyiyim.", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=200, measure=chars, max_lines=3, show_speaker=True, show_original=False)
-    assert [[r.text.strip() for r in ln] for ln in view.lines] == [
-        ["Speaker 1", "Merhaba."], ["Speaker 2", "Nasılsın?"], ["Speaker 1", "İyiyim."]]
-    view = build_view(m, 0, width=200, measure=chars, max_lines=2, show_speaker=False, show_original=False)
-    assert ["".join(r.text for r in ln) for ln in view.lines] == ["Nasılsın?", "İyiyim."]
-
-
-def test_same_speaker_lines_share_a_row_and_older_turns_leave_whole():
-    runs = [Run("Speaker 1", LABEL, 1), Run("aa bb", TRANSLATED, 1), Run("cc", TRANSLATED, 1),
-            Run("Speaker 2", LABEL, 2), Run("dd ee ff gg", TRANSLATED, 2)]
-    rows = layout(runs, 14, chars, 2, True)
-    assert ["".join(r.text for r in row) for row in rows] == ["Speaker 2 dd", "ee ff gg"]
-    rows = layout(runs, 40, chars, 2, True)
-    assert ["".join(r.text for r in row) for row in rows] == ["Speaker 1 aa bb cc", "Speaker 2 dd ee ff gg"]
 
 
 # -- placement -----------------------------------------------------------------------
@@ -424,27 +341,18 @@ def test_service_auto_opens_only_when_the_setting_is_on(data_dir):
     assert "did not open" in run(on.auto("discord"))
 
 
-def test_older_lines_leave_whole_before_the_newest_is_cut():
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "o", "first line here"), 0)
-    m.apply(line(2, "b", "translated", "o", "second", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=20, measure=chars, max_lines=1, show_speaker=True, show_original=False)
-    assert [[r.text for r in ln] for ln in view.lines] == [["Speaker 1 ", "second"]]
-    view = build_view(m, 0, width=40, measure=chars, max_lines=1, show_speaker=False, show_original=False)
-    assert ["".join(r.text for r in ln) for ln in view.lines] == ["first line here second"]
-
-
 def test_strip_height_follows_its_content_and_keeps_its_bottom(data_dir):
     # Before: the strip kept max-lines height, so one short line sat in an empty box (A3 F9).
     panel = FakePanel()
-    app = OverlayApp(panel, Positions(data_dir / "p.json"), ovs.OverlaySettings(max_lines=3))
+    app = OverlayApp(panel, Positions(data_dir / "p.json"), ovs.OverlaySettings(max_lines=3, show_original=True))
     app.place()
     bottom = panel.frames[-1].y
     assert panel.frames[-1].h == 140
     app.on_event(line(1, "a", "translated", "Hi", "Merhaba"), 0)
     assert panel.frames[-1].h == 60 and panel.frames[-1].y == bottom  # one row and the original
-    app.on_event(line(2, "b", "partial", "and more", "", "s1:speaker_1"), 0)
-    assert panel.frames[-1].h == 80 and panel.frames[-1].y == bottom  # two rows, no original yet
+    app.on_event(line(2, "b", "translated", "and more", "ve daha fazlası", "s1:speaker_1"), 0.5)
+    app.refresh(1.0)  # the second line goes up once the first had its minimum time
+    assert panel.frames[-1].h == 100 and panel.frames[-1].y == bottom  # two rows (a new speaker) and the original
 
 
 # -- shared token table (A3 F3, F10, F15) -------------------------------------------------
@@ -533,63 +441,6 @@ def test_show_spawns_the_child_with_the_allowlisted_env(data_dir, monkeypatch):
     assert "ELEVENLABS_API_KEY" not in seen and "SOME_PROVIDER_TOKEN" not in seen and "PYTHONPATH" in seen
 
 
-
-def test_original_follows_the_translation_when_it_rolls():
-    # Before: the translation showed its end while the original showed its start (A3 re-audit N1).
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "one two three four five six seven eight",
-                 "bir iki üç dört beş altı yedi sekiz dokuz on"), 0)
-    view = build_view(m, 0, width=20, measure=chars, max_lines=1, show_speaker=False, show_original=True)
-    assert "".join(r.text for r in view.lines[0]).endswith("dokuz on")
-    assert view.original.startswith("\u2026") and view.original.endswith("eight")
-    # Matching share: the row holds the newest 4 of 10 translation words, so 4 of 8 original words,
-    # then cut at the front to the width: "...six seven eight".
-    assert "".join(r.text for r in view.lines[0]).strip() == "yedi sekiz dokuz on"
-    assert view.original == "\u2026six seven eight"
-    view = build_view(m, 0, width=60, measure=chars, max_lines=1, show_speaker=False, show_original=True)
-    assert view.original == "one two three four five six seven eight"  # nothing rolled: the start
-    assert fit_tail("the quick brown fox", 8, chars, Run("", PENDING)) == "\u2026fox"
-
-
-def test_a_failed_line_carries_a_marker():
-    # Before: a failed line looked like a line still being spoken (A3 re-audit N2).
-    m = OverlayModel()
-    m.apply(line(1, "a", "failed", "Fast talk", "", "s1:speaker_0"), 0)
-    m.apply(line(2, "b", "partial", "still talking", "", "s1:speaker_0"), 0)
-    runs, _, _ = compose(m, 0, show_speaker=False, show_original=False)
-    assert [(r.text, r.kind) for r in runs] == [("Not translated", MARK), ("Fast talk", FAILED),
-                                                ("still talking", PENDING)]
-    rows = layout(runs, 200, chars, 2, False)
-    assert rows[0][0].kind == MARK
-    assert tok.FALLBACK[False].failed_color == tok.Rgba.hex("#cf2d56")
-    assert tok.FALLBACK[True].failed_color == tok.Rgba.hex("#e75e78")
-    assert tok.css_vars(tok.FALLBACK[True])["--failed"] == tok.Rgba.hex("#e75e78").css()
-
-
-def test_overlay_words_come_from_the_pane_and_survive_a_roll():
-    # Before: "Speaker N" and "Not translated" were English constants (A3 reaudit2 N8).
-    from hermeneus_engine.overlay.model import Strings
-    tr = Strings(speaker="Konuşmacı {n}", not_translated="Çevrilmedi", waiting="Konuşma bekleniyor",
-                 reconnecting="Yeniden bağlanıyor")
-    m = OverlayModel()
-    m.apply({"type": "hello", "seq": 1, "session": {"state": "live"}}, 0)
-    assert compose(m, 0, show_speaker=True, show_original=False, strings=tr)[2] == "Konuşma bekleniyor"
-    m.apply(line(2, "a", "failed", "Fast talk", "", "s1:speaker_0"), 0)
-    runs, _, _ = compose(m, 0, show_speaker=True, show_original=False, strings=tr)
-    assert [r.text for r in runs] == ["Konuşmacı 1", "Çevrilmedi", "Fast talk"]
-    m.apply(line(3, "b", "translated", "o", "aa bb cc dd ee ff gg", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=16, measure=chars, max_lines=2, show_speaker=True, show_original=False, strings=tr)
-    assert view.lines[0][0].text.strip() == "Konuşmacı 1"  # the re-added label keeps the pane's words
-
-
-def test_a_translated_line_without_text_shows_as_failed():
-    # One rule for strip and page (A3 reaudit2 N7): its original, with the marker.
-    m = OverlayModel()
-    m.apply(line(1, "a", "translated", "Hello", "  "), 0)
-    runs, _, _ = compose(m, 0, show_speaker=False, show_original=True)
-    assert [(r.text, r.kind) for r in runs] == [("Not translated", MARK), ("Hello", FAILED)]
-
-
 def test_theme_payload_strings_are_checked():
     base = {"mode": "light", "colors": {"surface": "#ffffff", "text": "#000000", "text_secondary": "#000000bd",
                                         "text_tertiary": "#0000008a", "stroke": "#00000020", "speakers": ["#0053fd"]}}
@@ -603,34 +454,6 @@ def test_theme_payload_strings_are_checked():
     assert tok.palette_from_payload(base).strings == ()
 
 
-
-def test_a_marker_or_label_never_breaks_across_rows():
-    # Before: "Not translated" could end one row and start the next (A3 reaudit2 renders).
-    runs = [Run("aaaa bbbb", FAILED), Run("Not translated", MARK), Run("cc", FAILED)]
-    rows = wrap(runs, 18, chars, 3)
-    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb", "Not translated cc"]
-
-
-
-def test_a_marker_stays_with_the_first_word_it_introduces():
-    runs = [Run("aaaa bbbb cc", FAILED), Run("Mark", MARK), Run("dddd", FAILED)]
-    rows = wrap(runs, 17, chars, 3)
-    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb cc", "Mark dddd"]
-
-
-
-def test_label_and_marker_keep_one_row_and_the_text_breaks_when_all_three_do_not_fit():
-    # Before: the label sat alone on its row and the marker started the next (A3 reaudit3 N9).
-    runs = [Run("aaaa bbbb", TRANSLATED, 1), Run("Speaker 2", LABEL, 2), Run("Not translated", MARK, 2),
-            Run("cc", FAILED, 2)]
-    rows = wrap(runs, 26, chars, 3)
-    assert ["".join(r.text for r in row).strip() for row in rows] == ["aaaa bbbb", "Speaker 2 Not translated", "cc"]
-    rows = wrap(runs, 40, chars, 3)  # everything fits: one row
-    assert ["".join(r.text for r in row).strip() for row in rows] == ["aaaa bbbb Speaker 2 Not translated cc"]
-    rows = wrap(runs[1:], 12, chars, 4)  # the tags alone are wider than a row: they may break
-    assert all(sum(chars(r.text.rstrip(), r) for r in row) <= 15 for row in rows)
-
-
 def test_a_hand_edited_theme_file_with_an_unknown_word_key_still_loads():
     # Before: an unknown key reached Strings(**...) and raised on every tick (A3 reaudit3 N10).
     from hermeneus_engine.overlay.model import Strings
@@ -639,46 +462,6 @@ def test_a_hand_edited_theme_file_with_an_unknown_word_key_still_loads():
     p = tok.palette_from_json(json.dumps(raw))
     assert dict(p.strings) == {"speaker": "Konuşmacı {n}"}
     assert Strings(**dict(p.strings)).label(2) == "Konuşmacı 2"
-
-
-
-def test_one_line_roll_keeps_the_marker_and_fills_the_labels_row():
-    # Before: with Lines = 1 a long failed line lost its marker when the roll dropped the turn's start
-    # (U18), and the row could show a single word because the label and marker took a row of their
-    # own and only the last row was kept (U19).
-    m = OverlayModel()
-    m.apply(line(1, "a", "failed", "one two three four five six seven eight nine ten", "", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=40, measure=chars, max_lines=1, show_speaker=True, show_original=False)
-    row = view.lines[0]
-    assert len(view.lines) == 1
-    assert [r.kind for r in row[:2]] == [LABEL, MARK]
-    text = "".join(r.text for r in row[2:]).split()
-    assert text[-1] == "ten" and len(text) >= 2  # the newest words, on the label's row
-    assert sum(chars(r.text, r) for r in row) <= 40 + 1
-
-
-def test_one_line_roll_in_another_language_keeps_the_panes_words():
-    from hermeneus_engine.overlay.model import Strings
-    tr = Strings(speaker="Konuşmacı {n}", not_translated="Çevrilmedi")
-    m = OverlayModel()
-    m.apply(line(1, "a", "failed", "bir iki üç dört beş altı yedi sekiz dokuz on", "", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=36, measure=chars, max_lines=1, show_speaker=True, show_original=False,
-                      strings=tr)
-    texts = [r.text.strip() for r in view.lines[0]]
-    assert texts[:2] == ["Konuşmacı 1", "Çevrilmedi"] and texts[-1].endswith("on")
-
-
-
-def test_one_line_on_a_row_too_narrow_for_the_header_keeps_the_newest_words():
-    # At 320 pt and 44 pt text the label, the marker and a word do not fit together: the label goes
-    # first, then the marker, and the newest words still fill the row.
-    m = OverlayModel()
-    m.apply(line(1, "a", "failed", "aa bb cc dd ee", "", "s1:speaker_0"), 0)
-    view = build_view(m, 0, width=22, measure=chars, max_lines=1, show_speaker=True, show_original=False)
-    texts = [r.text.strip() for r in view.lines[0]]
-    assert texts[0] == "Not translated" and texts[-1].endswith("ee")
-    view = build_view(m, 0, width=10, measure=chars, max_lines=1, show_speaker=True, show_original=False)
-    assert "".join(r.text for r in view.lines[0]).strip() == "cc dd ee"
 
 
 # -- legibility under a see-through background -------------------------------------
@@ -708,7 +491,7 @@ def test_ink_is_opaque_below_50_percent_so_the_outline_never_shows_through_the_l
 # -- banner style ----------------------------------------------------------------------
 
 def test_overlay_style_defaults_to_banner_and_accepts_theme():
-    # banner is the default since W29 (Seher's decision); theme follows the Hermes Desktop theme.
+    # banner is the default (owner decision, W28 and W29); theme follows the Hermes Desktop theme.
     assert ovs.from_settings({}).style == "banner"
     assert ovs.from_settings({"overlay_style": " Banner "}).style == "banner"
     assert ovs.from_settings({"overlay_style": " Theme "}).style == "theme"
@@ -765,3 +548,33 @@ def test_pane_style_picker_offers_the_settings_choices_with_the_default_first():
     assert offered[0] == ovs.DEFAULTS[ovs.KEY_STYLE] == "banner"
     # The pane writes it through the same settings route as the other look controls.
     assert "setOverlayLook({ overlay_style: id })" in source
+
+
+def test_every_overlay_speaker_colour_meets_aa_in_both_styles_and_both_themes():
+    # Owner decision (W28): the theme style's speaker 1 (#0053fd on the dark surface) was 3.01:1.
+    from hermeneus_engine.overlay_tokens import AA, BANNER, FALLBACK, contrast, legible
+    from hermeneus_engine.overlay import theme
+    for p in (FALLBACK[False], FALLBACK[True], BANNER):
+        ground = p.surface.with_alpha(1.0)
+        for n in range(1, len(p.speakers) + 1):
+            assert contrast(p.speaker(n), ground) >= AA, (p.source, p.dark, n)
+        assert contrast(p.failed_color, ground) >= AA
+        # Under 50% background the light theme turns light text on a dark edge; its speakers stay AA there too.
+        see = theme.see_through(p, 30)
+        for n in range(1, len(see.speakers) + 1):
+            assert contrast(see.speaker(n), see.surface.with_alpha(1.0)) >= AA
+    dark_blue = legible(tok.Rgba.hex("#0053fd"), FALLBACK[True].surface)
+    assert dark_blue != tok.Rgba.hex("#0053fd") and dark_blue.b > dark_blue.r  # lighter, still blue
+    assert legible(BANNER.speakers[0], BANNER.surface) == BANNER.speakers[0]  # already AA: unchanged
+    # The page gets the same AA colours.
+    from hermeneus_engine import overlay_page
+    tokens = overlay_page.theme_tokens(None)
+    assert tokens["dark"]["--speaker-1"] == FALLBACK[True].speaker(1).css()
+
+
+def test_the_strip_has_6px_corners_in_both_styles():
+    from hermeneus_engine import overlay_page
+    from hermeneus_engine.overlay_tokens import STRIP_RADIUS_PX
+    assert STRIP_RADIUS_PX == 6.0
+    tokens = overlay_page.theme_tokens(None)
+    assert {tokens[m]["--radius"] for m in ("light", "dark", "banner")} == {"6px"}

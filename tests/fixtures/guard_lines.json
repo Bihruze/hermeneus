@@ -1,0 +1,247 @@
+{
+ "about": "Synthetic lines written for the reply guard tests: English speech and Turkish replies with names, brands, numbers, quotes, titles, kept English terms and fragments, plus the two leak shapes seen in real sessions (notes with a correction mark, and a copied English start). 'kept' is what the guard must keep; every other reply must pass unchanged.",
+ "lines": [
+  {
+   "line_id": "s01",
+   "source_language": "en",
+   "original": "The council met on Tuesday to discuss the new budget.",
+   "reply": "Meclis yeni bütçeyi görüşmek için salı günü toplandı."
+  },
+  {
+   "line_id": "s02",
+   "source_language": "en",
+   "original": "Prices rose by 4.5 percent in October, the highest rate since 2019.",
+   "reply": "Fiyatlar ekimde yüzde 4,5 arttı; bu 2019'dan bu yana en yüksek oran."
+  },
+  {
+   "line_id": "s03",
+   "source_language": "en",
+   "original": "Mira Tal told reporters in Ankara that the talks would continue.",
+   "reply": "Mira Tal, Ankara'da gazetecilere görüşmelerin süreceğini söyledi."
+  },
+  {
+   "line_id": "s04",
+   "source_language": "en",
+   "original": "The app was removed from the Apple and Google stores last week.",
+   "reply": "Uygulama geçen hafta Apple ve Google mağazalarından kaldırıldı."
+  },
+  {
+   "line_id": "s05",
+   "source_language": "en",
+   "original": "More than 170 million Americans use the platform every month.",
+   "reply": "Her ay 170 milyondan fazla Amerikalı platformu kullanıyor."
+  },
+  {
+   "line_id": "s06",
+   "source_language": "en",
+   "original": "OpenAI and Microsoft signed a new agreement on Monday.",
+   "reply": "OpenAI ve Microsoft pazartesi günü yeni bir anlaşma imzaladı."
+  },
+  {
+   "line_id": "s07",
+   "source_language": "en",
+   "original": "The iPhone 17 Pro Max goes on sale in September.",
+   "reply": "iPhone 17 Pro Max eylülde satışa çıkıyor."
+  },
+  {
+   "line_id": "s08",
+   "source_language": "en",
+   "original": "The NBA and the NFL both postponed their games.",
+   "reply": "NBA ve NFL maçlarını erteledi."
+  },
+  {
+   "line_id": "s09",
+   "source_language": "en",
+   "original": "Their slogan was 'keep calm and carry on'.",
+   "reply": "Sloganları 'keep calm and carry on' idi."
+  },
+  {
+   "line_id": "s10",
+   "source_language": "en",
+   "original": "He said: \"I can't do this any more.\"",
+   "reply": "\"I can't do this any more\" dedi."
+  },
+  {
+   "line_id": "s11",
+   "source_language": "en",
+   "original": "We watched The Lord of the Rings again last night.",
+   "reply": "Dün gece The Lord of the Rings'i yeniden izledik."
+  },
+  {
+   "line_id": "s12",
+   "source_language": "en",
+   "original": "She writes for the New York Times.",
+   "reply": "New York Times için yazıyor."
+  },
+  {
+   "line_id": "s13",
+   "source_language": "en",
+   "original": "It's what economists call a soft landing.",
+   "reply": "Ekonomistlerin soft landing dediği şey bu."
+  },
+  {
+   "line_id": "s14",
+   "source_language": "en",
+   "original": "The startup raised its Series B round from two funds.",
+   "reply": "Girişim Series B turunu iki fondan topladı."
+  },
+  {
+   "line_id": "s15",
+   "source_language": "en",
+   "original": "Uh, yeah.",
+   "reply": "Şey, evet."
+  },
+  {
+   "line_id": "s16",
+   "source_language": "en",
+   "original": "OK.",
+   "reply": "Tamam."
+  },
+  {
+   "line_id": "s17",
+   "source_language": "en",
+   "original": "Thank you so much for joining us.",
+   "reply": "Bize katıldığınız için çok teşekkürler."
+  },
+  {
+   "line_id": "s18",
+   "source_language": "en",
+   "original": "And then the hard part begins for the new minister.",
+   "reply": "Ve ardından yeni bakan için asıl zor kısım başlıyor."
+  },
+  {
+   "line_id": "s19",
+   "source_language": "en",
+   "original": "Of course, she had the support of six-",
+   "reply": "Tabii ki, altı... desteğine sahipti-"
+  },
+  {
+   "line_id": "s20",
+   "source_language": "en",
+   "original": "The vote was 52 to 48 in the Senate.",
+   "reply": "Senatodaki oylama 52'ye 48 oldu."
+  },
+  {
+   "line_id": "s21",
+   "source_language": "en",
+   "original": "Let's look at the numbers.",
+   "reply": "Şimdi rakamlara bakalım."
+  },
+  {
+   "line_id": "s22",
+   "source_language": "en",
+   "original": "Is that a fair question?",
+   "reply": "Bu adil bir soru mu?"
+  },
+  {
+   "line_id": "s23",
+   "source_language": "en",
+   "original": "The company said it would appeal the ruling in Brussels.",
+   "reply": "Şirket, Brüksel'deki karara itiraz edeceğini söyledi."
+  },
+  {
+   "line_id": "s24",
+   "source_language": "en",
+   "original": "Users on X and Instagram shared the video millions of times.",
+   "reply": "X ve Instagram kullanıcıları videoyu milyonlarca kez paylaştı."
+  },
+  {
+   "line_id": "s25",
+   "source_language": "en",
+   "original": "Shares of Nvidia fell 3% after the report.",
+   "reply": "Rapordan sonra Nvidia hisseleri yüzde 3 düştü."
+  },
+  {
+   "line_id": "s26",
+   "source_language": "en",
+   "original": "The storm hit the coast near Izmir at 6 a.m.",
+   "reply": "Fırtına sabah 6'da İzmir yakınlarında kıyıyı vurdu."
+  },
+  {
+   "line_id": "s27",
+   "source_language": "en",
+   "original": "That's not what the minister said.",
+   "reply": "Bakanın söylediği bu değil."
+  },
+  {
+   "line_id": "s28",
+   "source_language": "en",
+   "original": "And the reason is simple: they ran out of money.",
+   "reply": "Nedeni basit: paraları bitti."
+  },
+  {
+   "line_id": "s29",
+   "source_language": "en",
+   "original": "Both teams are playing in the Champions League final.",
+   "reply": "İki takım da Şampiyonlar Ligi finalinde oynuyor."
+  },
+  {
+   "line_id": "s30",
+   "source_language": "en",
+   "original": "We'll be right back after the break.",
+   "reply": "Aradan sonra hemen döneceğiz."
+  },
+  {
+   "line_id": "s31",
+   "source_language": "en",
+   "original": "The bill passed with broad support from both parties.",
+   "reply": "Tasarı iki partinin geniş desteğiyle geçti."
+  },
+  {
+   "line_id": "s32",
+   "source_language": "en",
+   "original": "Researchers at MIT published the study in Nature.",
+   "reply": "MIT'deki araştırmacılar çalışmayı Nature dergisinde yayımladı."
+  },
+  {
+   "line_id": "s33",
+   "source_language": "en",
+   "original": "It is, by the way, the third time this year.",
+   "reply": "Bu arada, bu yıl üçüncü kez oluyor."
+  },
+  {
+   "line_id": "s34",
+   "source_language": "en",
+   "original": "The so-called 'all of the above' strategy failed.",
+   "reply": "Sözde 'all of the above' stratejisi başarısız oldu."
+  },
+  {
+   "line_id": "s35",
+   "source_language": "en",
+   "original": "Biden said Make America Great Again was over.",
+   "reply": "Biden, Make America Great Again döneminin bittiğini söyledi."
+  },
+  {
+   "line_id": "s36",
+   "source_language": "en",
+   "original": "phone from the capital this morning.",
+   "reply": "bu sabah başkentten telefonla."
+  },
+  {
+   "line_id": "s37",
+   "source_language": "en",
+   "original": "in the occupied territories,",
+   "reply": "işgal altındaki topraklarda,"
+  },
+  {
+   "line_id": "s38",
+   "source_language": "eng",
+   "original": "The ceasefire took effect at midnight.",
+   "reply": "Ateşkes gece yarısı yürürlüğe girdi."
+  },
+  {
+   "line_id": "leak-notes",
+   "source_language": "en",
+   "original": "people say they mostly follow the news on short clips, which matters a lot for sales because over 5 million small shops depend on it.",
+   "reply": "people say they mostly follow the news on short clips, which matters a lot for sales because over 5 million small shops depend on it. Hmm, wait \u2014 only the Turkish text should be given. Correct output: insanlar haberleri çoğunlukla kısa kliplerden takip ettiklerini söylüyor; 5 milyondan fazla küçük dükkân buna bağlı olduğu için bu, satışlar açısından çok önemli.",
+   "kept": "insanlar haberleri çoğunlukla kısa kliplerden takip ettiklerini söylüyor; 5 milyondan fazla küçük dükkân buna bağlı olduğu için bu, satışlar açısından çok önemli."
+  },
+  {
+   "line_id": "leak-copy",
+   "source_language": "en",
+   "original": "meetings took place between them and Mira Tal, who said she would not govern with them, though both had solid reasons.",
+   "reply": "between them and Mira Tal ile aralarında toplantılar yapıldı; Tal onlarla birlikte yönetmeyeceğini söyledi, yine de iki tarafın da sağlam gerekçeleri vardı.",
+   "kept": "Mira Tal ile aralarında toplantılar yapıldı; Tal onlarla birlikte yönetmeyeceğini söyledi, yine de iki tarafın da sağlam gerekçeleri vardı."
+  }
+ ]
+}

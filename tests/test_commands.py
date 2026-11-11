@@ -424,3 +424,19 @@ def test_cli_prints_a_translated_line_once_when_later_updates_add_timings():
     p({**base, "seq": 2, "timings": {"translated_ms": 10.0, "speech_end_ms": 5.0}})
     p({**base, "seq": 3, "line": {**base["line"], "speaker_id": "s1:speaker_0"}})
     assert out.getvalue().splitlines() == ["merhaba"]
+
+
+def test_cli_prints_only_finished_target_language_lines():
+    # W28: a line that was not translated prints a marker, not the source words, unless originals are on.
+    out = io.StringIO()
+    p = commands._Printer(False, out, io.StringIO())
+    p({"type": "line", "seq": 1, "line": {"line_id": "a", "state": "partial", "original": "The virus had"}})
+    p({"type": "line", "seq": 2, "line": {"line_id": "b", "state": "committed", "original": "The virus had spread"}})
+    p({"type": "line", "seq": 3, "line": {"line_id": "c", "state": "failed", "original": "Fast talk", "error": "timeout"}})
+    p({"type": "line", "seq": 4, "line": {"line_id": "d", "state": "translated", "original": "", "translation": ""}})
+    p({"type": "line", "seq": 5, "line": {"line_id": "e", "state": "translated", "original": "Hi", "translation": " "}})
+    assert out.getvalue().splitlines() == ["(not translated: timeout)", "(not translated)"]
+    out = io.StringIO()
+    p = commands._Printer(False, out, io.StringIO(), show_original=True)
+    p({"type": "line", "seq": 1, "line": {"line_id": "c", "state": "failed", "original": "Fast talk", "error": "timeout"}})
+    assert out.getvalue().splitlines() == ["Fast talk  (not translated: timeout)"]

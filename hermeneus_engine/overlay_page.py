@@ -116,7 +116,8 @@ def slim_event(event: dict) -> Optional[dict]:
     if kind == "line":
         line = event.get("line") or {}
         return {"type": "line", "seq": seq,
-                "line": {k: line.get(k) for k in ("line_id", "state", "original", "translation", "speaker_id")}}
+                "line": {k: line.get(k) for k in ("line_id", "state", "original", "translation", "speaker_id",
+                                                  "target_language")}}
     if kind == "relabel":
         return {"type": "relabel", "seq": seq, "from": event.get("from"), "to": event.get("to")}
     if kind == "reset":
@@ -177,12 +178,17 @@ ORIGINAL_SCALE = 0.58
 LABEL_SCALE = 0.62
 
 
+def _strip_radius() -> float:
+    from .overlay_tokens import STRIP_RADIUS_PX
+    return STRIP_RADIUS_PX
+
+
 def _scheme_vars(pal: Any) -> dict:
     out = {"--surface": pal.surface.css(), "--text-primary": pal.text.css(),
            "--text-secondary": pal.text_secondary.css(), "--text-pending": pal.text_secondary.css(),
            "--text-failed": pal.text_secondary.css(), "--failed": pal.failed_color.css(), "--font-sans": f"{pal.font}, system-ui, sans-serif",
-           "--radius": f"{pal.radius_px:g}px"}
-    out.update({f"--speaker-{i + 1}": c.css() for i, c in enumerate(pal.speakers)})
+           "--radius": f"{_strip_radius():g}px"}
+    out.update({f"--speaker-{i + 1}": c.css() for i, c in enumerate(pal.legible_speakers())})
     return out
 
 

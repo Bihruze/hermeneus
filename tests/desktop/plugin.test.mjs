@@ -674,3 +674,21 @@ test('afterPaint can be cancelled and runs at once without animation frames', ()
   afterPaint(() => ran++, undefined, undefined)
   assert.equal(ran, 1)
 })
+
+test('the pane row shows the target language only unless originals are on (W28)', () => {
+  const t = (key, arg) => (arg === undefined ? key : `${key}(${arg})`)
+  const partial = line('a', 'partial', { original: 'The virus had spread' })
+  assert.equal(plugin.lineText(partial, false, t).primaryText, 'waitingTranslation')
+  assert.equal(plugin.lineText(partial, true, t).primaryText, 'The virus had spread')
+  const committed = line('b', 'committed', { original: 'to eight provinces' })
+  assert.equal(plugin.lineText(committed, false, t).primaryText, 'waitingTranslation')
+  assert.equal(plugin.lineText(committed, false, t).caption, null)
+  const failed = line('c', 'failed', { original: 'Fast talk', error: 'timeout' })
+  assert.deepEqual([plugin.lineText(failed, false, t).primaryText, plugin.lineText(failed, false, t).caption],
+    ['notTranslatedLine', 'failedLineHidden(timeout)'])
+  assert.equal(plugin.lineText(failed, true, t).primaryText, 'Fast talk')
+  // A translated line keeps its original as the secondary line, as before.
+  const done = plugin.lineText(line('d', 'translated'), false, t)
+  assert.equal(done.primaryText, 'translation d')
+  assert.ok(Array.isArray(done.caption))
+})

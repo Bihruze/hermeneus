@@ -6,7 +6,7 @@ import pytest
 from hermeneus_engine.contracts import LineState, SubtitleLine, TranslationError, Translator
 from hermeneus_engine.translate import languages
 from hermeneus_engine.translate.llm_translator import LlmTranslator
-from hermeneus_engine.translate.prompt import ContextLine, build_messages, clean_reply
+from hermeneus_engine.translate.prompt import ContextLine, Guarded, build_messages, clean_reply, guard_reply, reply_problem
 from hermeneus_engine.translate.scheduler import TranslationScheduler
 
 TR = languages.resolve_target_language("tr")
@@ -430,7 +430,9 @@ async def test_scheduler_with_llm_translator_end_to_end():
         segment = messages[1]["content"].rsplit(">", 2)[-2].split("<")[0]
         if segment == "boom":
             raise RuntimeError("provider down")
-        return "Translation: " + segment.upper()
+        # A labelled reply; clean_reply takes the label off. (A reply equal to the speech, such as
+        # "BYE" for "bye", would be rejected as copied speech.)
+        return "Translation: " + {"hello there": "merhaba", "bye": "hoşça kal"}[segment]
 
     out = []
     llm = FakeLlm(reply)
@@ -440,9 +442,261 @@ async def test_scheduler_with_llm_translator_end_to_end():
                                   source_language="en"))
     await sched.drain()
     assert [(l.state, l.original, l.translation) for l in out] == [
-        (LineState.TRANSLATED, "hello there", "HELLO THERE"),
+        (LineState.TRANSLATED, "hello there", "merhaba"),
         (LineState.FAILED, "boom", ""),
-        (LineState.TRANSLATED, "bye", "BYE"),
+        (LineState.TRANSLATED, "bye", "hoşça kal"),
     ]
     assert out[1].error == "Translation failed: RuntimeError: provider down"
     assert "hello there" in user_content(llm, 2)
+
+
+# --------------------------------------------------------------------------
+# Reply guard: only a translation goes on screen (A7-3, A7-11 to A7-13)
+# --------------------------------------------------------------------------
+
+import json  # noqa: E402
+from pathlib import Path  # noqa: E402
+
+LINES = json.loads((Path(__file__).parent / "fixtures" / "guard_lines.json").read_text(encoding="utf-8"))["lines"]
+
+
+def _line(line_id):
+    return next(item for item in LINES if item["line_id"] == line_id)
+
+
+TALK = _line("leak-notes")  # the speech, then "Hmm, wait ... Correct output: <Turkish>"
+NEWS = _line("leak-copy")  # "between them and Mira Tal ile aralarında ..."
+
+
+def test_every_line_passes_and_the_two_leaks_keep_only_their_translation():
+    # Synthetic lines with names, brands, numbers, quotes, titles and kept English terms: none is
+    # rejected or changed, except the two leak shapes, which keep only their translation. (The same
+    # check on 170 real lines runs outside the repository: no transcript text is kept here.)
+    wrong = []
+    for item in LINES:
+        g = guard_reply(item["reply"], original=item["original"], target=TR, source_language=item["source_language"])
+        if g.problem or g.text != item.get("kept", item["reply"]):
+            wrong.append((item["line_id"], g.problem, g.text[:60]))
+    assert wrong == []
+    assert len(LINES) == 40 and sum("kept" in item for item in LINES) == 2
+    assert TALK["kept"].startswith("insanlar haberleri çoğunlukla") and "Hmm" not in TALK["kept"]
+    assert NEWS["kept"].startswith("Mira Tal ile aralarında") and "between" not in NEWS["kept"]
+
+
+async def test_the_translator_returns_the_kept_part_with_one_model_call():
+    for item in (TALK, NEWS):
+        llm = FakeLlm(item["reply"])
+        out = await LlmTranslator(llm).translate(item["original"], source_language="en", target_language="tr", context=[])
+        assert out == item["kept"] and len(llm.calls) == 1
+
+
+async def test_the_scheduler_marks_a_rejected_reply_failed_with_no_translation():
+    original = "The virus had spread to eight provinces."
+    line = SubtitleLine(line_id="l1", state=LineState.COMMITTED, original=original, source_language="en")
+    out: list[SubtitleLine] = []
+    sched = TranslationScheduler(LlmTranslator(FakeLlm(original)), target_language="tr", on_line=out.append)
+    sched.submit(line)
+    await sched.drain()
+    assert [(l.state, l.translation) for l in out] == [(LineState.FAILED, "")]
+    assert "Translation rejected" in out[0].error
+    await sched.aclose()
+
+
+# The A7 round-2 probe (a7-subtitle-pace/probes/guard_probe.py), case for case:
+# (passes, target, source language, original, reply, what it checks).
+PROBE = [
+    (True, "tr", "en", "He said: 'I can't breathe.'", "\"I can't breathe\" dedi.", "TR keeps an English quote"),
+    (True, "tr", "en", "Their slogan was 'the show must go on'.", "Sloganları 'the show must go on' idi.", "slogan in quotes"),
+    (True, "tr", "en", "Biden said Make America Great Again is over.",
+     "Biden, Make America Great Again döneminin bittiğini söyledi.", "title case slogan"),
+    (True, "tr", "en", "Netflix's The Lord of the Rings rival...", "Netflix'in The Lord of the Rings rakibi...", "title"),
+    (True, "tr", "en", "The vote was 52 to 48 in the Senate on Tuesday.", "Senatoda salı günü oylama 52'ye 48 oldu.", "numbers"),
+    (True, "tr", "en", "He works at the New York Times.", "New York Times'ta çalışıyor.", "names"),
+    (True, "tr", "en", "It's called 'all of the above' strategy.", "Buna 'all of the above' stratejisi deniyor.", "term in quotes"),
+    (True, "en", "de", "Lass mich das korrigieren.", "Let me correct that.", "EN: let me correct"),
+    (True, "en", "de", "Lass mich es nochmal versuchen.", "Let me try again.", "EN: let me try again"),
+    (True, "en", "de", "Ich werde die Antwort morgen geben.", "I will give the answer tomorrow.", "EN: I will give"),
+    (True, "en", "fr", "La traduction officielle est fausse.", "The official translation is wrong.", "EN: about translation"),
+    (True, "en", "es", "Nota: el horario cambia.", "Note: the schedule changes.", "EN: Note: in speech"),
+    (True, "en", "de", "Ich muss nur die Übersetzung liefern.", "I must only provide the translation.", "EN: interpreter"),
+    (True, "de", "en", "We need to talk about the economy.", "Wir müssen über die Wirtschaft reden.", "DE normal"),
+    (True, "de", "en", "The band The Who played in Berlin.", "Die Band The Who spielte in Berlin.", "DE name"),
+    (True, "ja", "en", "TikTok was removed from the Apple and Google app stores.",
+     "TikTokはAppleとGoogleのアプリストアから削除された。", "JA with brands"),
+    (True, "ja", "en", "OpenAI and Microsoft signed a deal.", "OpenAIとMicrosoftが契約を結んだ。", "JA brands"),
+    (True, "ko", "en", "OpenAI and Microsoft signed a deal.", "OpenAI와 Microsoft가 계약했다.", "KO brands"),
+    (True, "ar", "en", "Apple's iPhone 17 Pro Max launches in September.", "يطلق iPhone 17 Pro Max من Apple في سبتمبر.",
+     "AR brands"),
+    (True, "zh", "en", "The NBA and NFL agreed.", "NBA和NFL达成协议。", "ZH short"),
+    (True, "ja", "en", "Coffee time.", "コーヒータイムー、ブレーク。", "JA prolonged sound mark"),
+    (True, "ru", "en", "Elon Musk's SpaceX and Tesla.", "SpaceX и Tesla Илона Маска.", "RU brands"),
+    (False, "tr", "en", "I mean, the thing is that we have to go.",
+     "Hmm, wait. Actually: I mean, the thing is that we have to go.", "copy + hmm"),
+    (False, "tr", "en", "The economy is doing well.", "Ekonomi iyi gidiyor. (Note: literal translation)", "note in parens"),
+    (False, "tr", "en", "x", "I need to output just the Turkish text. Ekonomi iyi.", "meta 'just'"),
+    (False, "tr", "en", "x", "Wait, I misread the segment. Ekonomi iyi gidiyor.", "meta misread"),
+    (False, "tr", "en", "x", "Not: Bu bir çeviridir. Ekonomi iyi gidiyor.", "Turkish meta note"),
+    (False, "tr", "en", "Between them and Mira Tal there were talks.", "Between them and Mira Tal görüşmeler vardı.",
+     "capital copy"),
+    (False, "tr", "en", "The virus had spread to eight provinces.", "The virus had spread to eight provinces.", "full echo"),
+    (False, "tr", "en", "Officials said the virus spread.", "Officials said the virus spread.", "echo, 1 stopword"),
+    (False, "tr", "en", "Prices rose sharply.", "Prices rose sharply.", "echo, no stopwords"),
+    (False, "de", "en", "We will see what happens next.", "We will see what happens next.", "DE echo"),
+    (False, "ja", "en", "We will see what happens next.", "We will see what happens next.", "JA echo (script)"),
+]
+
+
+@pytest.mark.parametrize("passes,target,source,original,reply,what", PROBE, ids=[c[5] for c in PROBE])
+def test_the_a7_probe_cases(passes, target, source, original, reply, what):
+    _assert_guard(passes, target, source, original, reply)
+
+
+def test_a_correction_mark_keeps_the_text_after_it_only_when_that_passes():
+    g = guard_reply("Ekonomi iyi. Doğru çıktı: Ekonomi iyi gidiyor.", original="The economy is doing well.", target=TR,
+                    source_language="en")
+    assert (g.text, g.problem, g.salvaged) == ("Ekonomi iyi gidiyor.", "", True)
+    g = guard_reply("Hmm. Correct output: The economy is doing well.", original="The economy is doing well.", target=TR,
+                    source_language="en")
+    assert g.problem  # the kept part is the speech itself
+
+
+def test_a_small_copy_inside_a_reply_stays_and_a_large_one_at_the_edge_fails():
+    # Small (at most 25% of the reply's own words) and inside: kept as it is.
+    original = "They said that it was over and the talks between the two sides had ended for this year."
+    reply = "Müzakerelerin bittiğini söylediler, it was over, ve iki taraf arasındaki görüşmeler bu yıl için sona ermişti."
+    assert guard_reply(reply, original=original, target=TR, source_language="en").problem == ""
+    # Large and at the edge: the reply is mostly the speech.
+    assert reply_problem("between them and the talks görüşmeler", original="between them and the talks",
+                         target=TR, source_language="en")
+
+
+def test_the_guard_is_cheap():
+    import time
+    start = time.perf_counter()
+    for item in LINES:
+        guard_reply(item["reply"], original=item["original"], target=TR, source_language=item["source_language"])
+    assert (time.perf_counter() - start) / len(LINES) < 0.002  # well under 2 ms a line (about 30 us measured)
+
+
+def test_the_system_prompt_forbids_notes_and_copied_speech():
+    system = build_messages("hi", target=TR, speaker_id=None, source_language=None, context=[],
+                            context_chars_per_line=300)[0]["content"]
+    assert "Never add a comment about the task" in system and "Never copy the source-language words" in system
+
+
+def _assert_guard(passes, target, source, original, reply):
+    """A line that must pass goes on screen unchanged. A leak is caught: rejected, or only its clean
+    part is kept (never the reply as it is)."""
+    g = guard_reply(reply, original=original, target=languages.resolve_target_language(target),
+                    source_language=source)
+    if passes:
+        assert (g.problem, g.text) == ("", reply)
+    else:
+        assert g.problem or g.text != reply, "passed unchanged"
+
+
+@pytest.mark.parametrize("reply", [
+    "Merhaba dünya. (Note: the speaker is sarcastic.)",
+    "Merhaba dünya. Let me translate that again: Selam dünya.",
+    "I should only translate the segment. Merhaba.",
+    "<segment>Merhaba</segment> dünya",
+])
+def test_notes_in_a_turkish_reply_never_reach_the_screen(reply):
+    g = guard_reply(reply, original="Hello world.", target=TR, source_language="en")
+    assert g.problem or ("Note" not in g.text and "translate" not in g.text and "segment" not in g.text)
+
+
+@pytest.mark.parametrize("original,reply,source", [
+    ("Last Week Tonight is back.", "Last Week Tonight geri döndü.", "en"),
+    ("I watched Game of Thrones and The Lord of the Rings.", "Game of Thrones ve The Lord of the Rings'i izledim.", "eng"),
+    ("uh", "ıı", "en"),
+    ("OK.", "Tamam.", None),
+    ("I should give it to him.", "Bunu ona vermeliyim.", "en"),
+    ("Hmm, wait.", "Hmm, bekle.", "en"),
+    ("It was a game changer.", "Bu bir game changer oldu.", "en"),  # two English words kept as a term
+])
+def test_ordinary_turkish_translations_pass(original, reply, source):
+    assert reply_problem(reply, original=original, target=TR, source_language=source) == ""
+
+
+def test_a_reply_in_the_wrong_script_is_rejected():
+    ru = languages.resolve_target_language("ru")
+    assert reply_problem("They said the talks will resume tomorrow", original="Они сказали", target=ru,
+                         source_language="ru-x")
+    assert reply_problem("Они сказали, что переговоры возобновятся завтра", original="They said", target=ru,
+                         source_language="en") == ""
+    assert reply_problem("Переговоры возобновятся завтра в Анкаре", original="x", target=TR, source_language="ru")
+
+
+# The A7 round-3 probe (a7-subtitle-pace/probes/guard_probe_r3.py), case for case.
+PROBE_R3 = [
+    (True, "tr", "en", "Okay.", "Tamam.", "short"),
+    (True, "tr", "en", "Wow.", "Vay.", "very short"),
+    (True, "tr", "en", "Joe Biden, Kamala Harris and Donald Trump.", "Joe Biden, Kamala Harris ve Donald Trump.", "mostly names"),
+    (True, "tr", "en", "Elon Musk, Jeff Bezos, Mark Zuckerberg.", "Elon Musk, Jeff Bezos, Mark Zuckerberg.", "names only, identical"),
+    (True, "tr", "en", "The podcast went viral online.", "Podcast online olarak viral oldu.", "TR loanwords podcast/online/viral"),
+    (True, "tr", "en", "It's a startup with a big marketing budget.", "Büyük bir marketing bütçesi olan bir startup.", "TR loanwords marketing/startup"),
+    (True, "tr", "en", "We had a soft landing, a real win-win.", "Yumuşak iniş yaptık, gerçek bir win-win.", "TR keeps win-win"),
+    (True, "tr", "en", "The CEO of OpenAI spoke at CES 2026.", "OpenAI CEO'su CES 2026'da konuştu.", "acronyms numbers"),
+    (True, "tr", "en", "He tweeted 'game over' at 3 a.m.", "Sabah 3'te 'game over' diye tweet attı.", "quoted English"),
+    (True, "tr", "en", "Breaking news.", "Son dakika.", "short"),
+    (True, "tr", "en", "Thank you so much, everybody!", "Hepinize çok teşekkürler!", "short"),
+    (True, "tr", "en", "Not today.", "Bugün değil.", "word 'Not' in source"),
+    (True, "tr", "en", "Note the date: 5 May.", "Tarihe dikkat: 5 Mayıs.", "label in reply"),
+    (True, "en", "de", "Das ist die korrekte Version der Ereignisse.", "That is the correct version of events.", "EN 'correct version'"),
+    (True, "en", "de", "Ich habe die Textnachricht falsch gelesen.", "I misread the text message.", "EN 'I misread the text'"),
+    (True, "en", "de", "Hier ist meine Übersetzung des Gedichts.", "Here is my translation of the poem.", "EN 'here is my translation'"),
+    (True, "en", "de", "Die endgültige Antwort: nein.", "The final answer: no.", "EN 'final answer:' (salvage?)"),
+    (True, "en", "tr", "Evet, evet.", "Yes, yes.", "EN short from tr"),
+    (True, "de", "en", "He said no, no, no.", "Er sagte nein, nein, nein.", "DE"),
+    (True, "de", "en", "The meeting was in Berlin, so it was easy.", "Das Treffen war in Berlin, also war es einfach.", "DE shared words"),
+    (True, "fr", "en", "He has a dog in Paris.", "Il a un chien à Paris.", "FR 'a'"),
+    (True, "es", "en", "No, no, no!", "¡No, no, no!", "ES no no no"),
+    (True, "es", "en", "It's a hit on Netflix and Spotify.", "Es un éxito en Netflix y Spotify.", "ES brands"),
+    (True, "it", "en", "I love pizza and pasta.", "Amo la pizza e la pasta.", "IT loanword pizza/pasta"),
+    (True, "ja", "en", "It's on YouTube.", "YouTubeで見られる。", "JA brand short"),
+    (True, "ja", "en", "The startup uses machine learning.", "そのスタートアップはmachine learningを使っている。", "JA lowercase English term"),
+    (True, "ar", "en", "Visit www.example.com today.", "تفضلوا بزيارة www.example.com اليوم.", "AR url"),
+    (True, "ru", "en", "He works at Google in Mountain View.", "Он работает в Google в Маунтин-Вью.", "RU"),
+    (True, "ko", "en", "BTS and BLACKPINK on tour.", "BTS와 BLACKPINK 투어 중.", "KO caps"),
+    (True, "hi", "en", "The match is on Star Sports.", "मैच Star Sports पर है।", "HI brand"),
+    (True, "zh", "en", "iPhone sales fell.", "iPhone销量下降。", "ZH"),
+    (True, "tr", "en", "Here's the thing, guys.", "Mesele şu, arkadaşlar.", "TR"),
+    (True, "tr", "en", "I should give him the money.", "Ona parayı vermeliyim.", "TR meta-like source"),
+    (False, "tr", "en", "Thank you.", "Thank you.", "short echo 2 words"),
+    (False, "tr", "en", "Thanks.", "Thanks.", "1-word echo"),
+    (False, "tr", "en", "Look at this.", "Look at this.", "3-word echo"),
+    (False, "tr", "en", "The economy is doing well but inflation is still very high.", "Ekonomi iyi gidiyor but inflation is still very high.", "half echo tail"),
+    (False, "tr", "en", "The economy is doing well but inflation is still very high.", "The economy is doing well ama enflasyon hâlâ çok yüksek.", "half echo head"),
+    (False, "tr", "en", "So we went to the store and bought some milk.", "So we went to the store ve biraz süt aldık.", "half echo head 2"),
+    (False, "tr", "en", "Senators Warren and Sanders said this is unacceptable.", "Senators Warren and Sanders said this is unacceptable.", "echo with names"),
+    (False, "de", "en", "We will see what happens next.", "We will see what happens next.", "DE echo"),
+    (False, "ja", "en", "We will see what happens next.", "We will see what happens next.", "JA echo"),
+    (False, "fr", "en", "This is a disaster for everyone.", "This is a disaster for everyone.", "FR echo"),
+    (False, "tr", "en", "x", "Ekonomi iyi. (Translator's note: idiom)", "translator's note"),
+    (False, "tr", "en", "x", "Ekonomi iyi gidiyor. Actually, a better translation would be: Ekonomi güçlü.", "better translation"),
+    (False, "tr", "en", "x", "Sorry, I can only translate. Ekonomi iyi.", "sorry"),
+    (False, "tr", "en", "x", "Türkçe çeviri: Ekonomi iyi gidiyor.", "Turkish label"),
+    (False, "tr", "en", "x", "Ekonomi iyi gidiyor. Not: Bu deyim.", "Turkish Not:"),
+]
+
+
+@pytest.mark.parametrize("passes,target,source,original,reply,what", PROBE_R3, ids=[c[5] for c in PROBE_R3])
+def test_the_a7_round_3_probe_cases(passes, target, source, original, reply, what):
+    _assert_guard(passes, target, source, original, reply)
+
+
+def test_an_english_target_keeps_speech_that_looks_like_a_note_or_a_mark():
+    en = languages.resolve_target_language("en")
+    for original, reply in [("Die endgültige Antwort: nein.", "The final answer: no."),
+                            ("Hier ist meine Übersetzung des Gedichts.", "Here is my translation of the poem.")]:
+        assert guard_reply(reply, original=original, target=en, source_language="de") == Guarded(reply)
+
+
+def test_a_note_sentence_is_dropped_and_the_translation_kept():
+    g = guard_reply("Sorry, I can only translate. Ekonomi iyi.", original="The economy is fine.", target=TR,
+                    source_language="en")
+    assert (g.text, g.problem, g.salvaged) == ("Ekonomi iyi.", "", True)
+    for reply in ("Thank you.", "Thanks."):  # short everyday echoes
+        assert reply_problem(reply, original=reply, target=TR, source_language="en")
+    assert reply_problem("Hmm.", original="Hmm.", target=TR, source_language="en") == ""  # a filler may stay

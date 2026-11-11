@@ -96,10 +96,18 @@ function loadPage(settings) {
   const container = new El('main')
   const settingsBlock = { textContent: JSON.stringify(settings) }
   let source = null
+  let tick = null
+  let now = 0
   const context = {
     URLSearchParams,
     setTimeout,
     clearTimeout,
+    // A fake clock: 5 s of 100 ms ticks follow each event, so the display queue has given the
+    // previous line its reading time and every step is on screen (the timing has its own tests).
+    performance: { now: () => now * 1000 },
+    setInterval: fn => {
+      tick = fn
+    },
     location: { search: '' },
     addEventListener() {},
     getComputedStyle: () => ({ lineHeight: `${LINE_HEIGHT}px` }),
@@ -114,15 +122,33 @@ function loadPage(settings) {
   }
   vm.createContext(context)
   vm.runInContext(script, context)
-  return {
-    send: event => source.onmessage({ data: JSON.stringify(event) }),
-    snapshot: () =>
-      container.children.map(el => {
-        const main = el.children.find(c => c.className === 'main')
-        const text = main.children.find(c => c.className === 'text').textContent
-        return { text, hidden: el.hidden, rows: el.hidden ? 0 : main.getBoundingClientRect().height / LINE_HEIGHT }
-      })
+  const frames = []
+  const snapshot = () => pageSnapshot(container)
+  const wait = seconds => {
+    for (let k = 0; k < Math.round(seconds * 10); k++) {
+      now += 0.1
+      tick()
+      frames.push(snapshot())
+    }
   }
+  return {
+    send: event => {
+      // The event arrives, then 5 s of the page's 100 ms timer run (under the 7 s hold).
+      source.onmessage({ data: JSON.stringify(event) })
+      wait(5)
+    },
+    wait,
+    frames,
+    snapshot
+  }
+}
+
+function pageSnapshot(container) {
+  return container.children.filter(el => el.className === 'line').map(el => {
+    const main = el.children.find(c => c.className === 'main')
+    const text = main.children.find(c => c.className === 'text').textContent
+    return { text, hidden: el.hidden, rows: el.hidden ? 0 : main.getBoundingClientRect().height / LINE_HEIGHT }
+  })
 }
 
 function line(seq, id, state, original, translation) {
@@ -161,38 +187,80 @@ for (const maxLines of [1, 2, 3]) {
 
   test(`Lines ${maxLines}: no line is hidden and shown again between consecutive updates`, () => {
     const snaps = run(maxLines)
-    for (let i = 2; i < snaps.length; i++) {
-      // From step 2 on the same two lines are candidates; each keeps its visibility.
+    for (let i = 3; i < snaps.length; i++) {
+      // From step 3 on the same two lines are candidates (a partial line is not shown: target language
+      // only); each keeps its visibility.
       assert.deepEqual(snaps[i].map(s => s.hidden), snaps[i - 1].map(s => s.hidden), `step ${i + 1}`)
     }
   })
 }
 
-test('Lines 2: the long first line rolls to 2 rows, then leaves whole when the second line comes', () => {
-  const snaps = run(2)
-  assert.equal(snaps[0].length, 1)
-  assert.equal(snaps[0][0].rows, 2)
-  assert.ok(A.endsWith(snaps[0][0].text) && snaps[0][0].text !== A)
-  for (const snap of snaps.slice(1)) {
-    assert.equal(snap[0].hidden, true)
-    assert.equal(snap[1].hidden, false)
-    assert.equal(snap[1].rows, 1)
+// The words a run of frames put on screen, in order: each visible unit once, its ellipsis taken off.
+function wordsShown(frames) {
+  const seen = []
+  for (const frame of frames) {
+    for (const item of frame) {
+      if (item.hidden || item.text === '') continue
+      const text = item.text.replace(/^\u2026/, '')
+      if (seen[seen.length - 1] !== text && !seen.includes(text)) seen.push(text)
+    }
   }
+  return seen
+}
+
+for (const maxLines of [1, 2, 3]) {
+  test(`Lines ${maxLines}: a line taller than the rows goes up in units, so every word is shown and no start is cut`, () => {
+    const page = loadPage({ max_lines: maxLines, text_size: 40, show_original: false, show_speaker: false })
+    page.send({ type: 'status', seq: 1, state: 'live' })
+    page.send(line(2, 'a', 'translated', 'x', A))
+    page.wait(6)
+    const units = wordsShown(page.frames)
+    assert.ok(units.length > 1, JSON.stringify(units))
+    assert.equal(units.join(' '), A) // every word, in order, none twice
+    for (const frame of page.frames) {
+      assert.ok(frame.reduce((n, s) => n + s.rows, 0) <= maxLines, JSON.stringify(frame))
+      for (const item of frame) {
+        // A unit on screen is whole: with its ellipsis off it is one of the units, never a cut tail.
+        if (!item.hidden && item.text !== '') assert.ok(units.includes(item.text.replace(/^\u2026/, '')), item.text)
+      }
+    }
+  })
+}
+
+test('Lines 2: units after the first start with an ellipsis on top; the first unit does not', () => {
+  const page = loadPage({ max_lines: 2, text_size: 40, show_original: false, show_speaker: false })
+  page.send({ type: 'status', seq: 1, state: 'live' })
+  page.send(line(2, 'a', 'translated', 'x', A))
+  const tops = page.frames.map(f => f.find(s => !s.hidden)).filter(Boolean).map(s => s.text)
+  assert.ok(tops[0].startsWith('Komite'))
+  assert.ok(tops.slice(1).some(t => t.startsWith('\u2026')))
+  for (const t of tops) if (t.startsWith('Komite')) assert.ok(!t.startsWith('\u2026'))
 })
 
-test('Lines 3: a newest line that needs every row hides the older ones and stays cut on its next update', () => {
+test('Lines 3: a newest line that needs every row hides the older ones; its next update still shows every word', () => {
   const page = loadPage({ max_lines: 3, show_original: false, show_speaker: false })
   page.send({ type: 'status', seq: 1, state: 'live' })
   page.send(line(2, 'a', 'translated', 'x', 'short line one'))
   page.send(line(3, 'b', 'translated', 'y', 'short line two'))
+  page.frames.length = 0
   page.send(line(4, 'c', 'translated', 'z', A))
-  let snap = page.snapshot()
-  assert.deepEqual(snap.map(s => s.hidden), [true, true, false])
-  assert.equal(snap[2].rows, 3)
+  assert.equal(wordsShown(page.frames).filter(t => !t.startsWith('short')).join(' '), A)
   page.send(line(5, 'c', 'translated', 'z', A + ' bugun'))
-  snap = page.snapshot()
-  assert.deepEqual(snap.map(s => s.hidden), [true, true, false])
-  assert.equal(snap.reduce((n, s) => n + s.rows, 0), 3)
+  const snap = page.snapshot()
+  assert.ok(snap.reduce((n, s) => n + s.rows, 0) <= 3)
+  assert.ok(snap.filter(s => !s.hidden).map(s => s.text).join(' ').endsWith('bugun'))
+})
+
+test('a sentence the session split across two lines starts its top unit with an ellipsis', () => {
+  const page = loadPage({ max_lines: 2, show_original: false, show_speaker: false })
+  page.send({ type: 'status', seq: 1, state: 'live' })
+  page.send(line(2, 'a', 'translated', 'x', 'Bakan bu sabah'))
+  page.send(line(3, 'b', 'translated', 'y', 'telefonla Ankara\'dan uzun uzun konuştu.'))
+  page.send(line(4, 'c', 'translated', 'z', 'Yeni bir cümle.'))
+  const tops = page.frames.map(f => f.find(s => !s.hidden)).filter(Boolean).map(s => s.text)
+  assert.ok(tops.includes('Bakan bu sabah'))
+  assert.ok(tops.includes('\u2026telefonla Ankara\'dan uzun uzun konuştu.'))
+  assert.ok(tops.includes('Yeni bir cümle.')) // a real sentence start never takes one
 })
 
 test('Lines 3: short lines that fit together all stay shown across updates', () => {
@@ -204,7 +272,7 @@ test('Lines 3: short lines that fit together all stay shown across updates', () 
   const before = page.snapshot()
   page.send(line(5, 'c', 'translated', 'three', 'uc'))
   const after = page.snapshot()
-  assert.deepEqual(before.map(s => s.hidden), [false, false, false])
+  assert.deepEqual(before.map(s => s.hidden), [false, false]) // the partial line is not shown
   assert.deepEqual(after.map(s => s.hidden), [false, false, false])
   assert.equal(after.reduce((n, s) => n + s.rows, 0), 3)
 })

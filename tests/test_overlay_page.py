@@ -179,7 +179,7 @@ def test_page_is_self_contained_and_carries_the_settings(server):
     _, hdrs, body = http(server.port, f"/{server.token}/")
     html = body.decode("utf-8")
     assert "http://" not in html.replace("http://127.0.0.1", "") and "https://" not in html
-    assert '"max_lines":3' in html and '"show_original":true' in html
+    assert '"max_lines":3' in html and '"show_original":false' in html and '"pace":"read"' in html
     assert overlay_page.SETTINGS_PLACEHOLDER not in html
 
 
@@ -211,8 +211,8 @@ def test_page_uses_the_shared_token_table():
         assert tokens[mode]["--surface"] == pal.surface.css()
         assert tokens[mode]["--text-primary"] == pal.text.css()
         assert tokens[mode]["--text-pending"] == pal.text_secondary.css()
-        assert tokens[mode]["--speaker-1"] == pal.speakers[0].css()
-        assert tokens[mode]["--radius"] == f"{pal.radius_px:g}px"
+        assert tokens[mode]["--speaker-1"] == pal.speaker(1).css()  # raised to AA (W28)
+        assert tokens[mode]["--radius"] == "6px"  # the strip's corners in every style (W28)
     assert tokens["common"]["--label-weight"] == str(table.WEIGHT_LABEL)
     assert tokens["common"]["--text-weight"] == str(table.WEIGHT_TEXT)
     css = overlay_page.theme_css(tokens)
@@ -286,7 +286,8 @@ def test_events_stream_is_sse_with_slim_events(server):
     assert [e["type"] for e in events] == ["hello", "line", "status"]
     assert events[0] == {"type": "hello", "seq": 5, "session": {"state": "live"}}
     assert events[1]["line"] == {"line_id": "a", "state": "translated", "original": "hello",
-                                 "translation": "merhaba", "speaker_id": "s1:speaker_0"}
+                                 "translation": "merhaba", "speaker_id": "s1:speaker_0",
+                                 "target_language": None}  # the page's queue reads its reading speed (W28)
     assert events[2] == {"type": "status", "seq": 7, "state": "live"}
     # hello is not part of the sequence, so it never becomes the Last-Event-ID.
     assert ids == [6, 7]
@@ -642,5 +643,5 @@ def test_banner_style_reaches_the_page_as_its_own_scheme():
     assert ':root[data-theme="banner"]' in css
     assert css.index(':root[data-theme="banner"]') > css.index("prefers-color-scheme")  # wins over the system dark
     assert overlay_page.page_settings({"overlay_style": "banner"})["style"] == "banner"
-    assert overlay_page.page_settings({})["style"] == "banner"
+    assert overlay_page.page_settings({})["style"] == "banner"  # the default since W28
     assert overlay_page.page_settings({"overlay_style": "theme"})["style"] == "theme"

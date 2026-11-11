@@ -17,7 +17,14 @@ function load() {
   vm.runInContext(scripts[0], context)
   const api = context.HermeneusOverlay
   // Arrays made in the vm context have that context's prototypes; copy views into this one.
-  return { ...api, visibleLines: (state, settings, words) => JSON.parse(JSON.stringify(api.visibleLines(state, settings, words))) }
+  // visibleLines draws what the display queue put up; these tests look at content, so every final line
+  // is settled on screen first. The queue's timing has its own tests below (advance).
+  const plain = v => JSON.parse(JSON.stringify(v))
+  return {
+    ...api,
+    visibleLines: (state, settings, words) => plain(api.visibleLines(api.settle(state), settings, words)),
+    shownNow: (state, settings, words) => plain(api.visibleLines(state, settings, words))
+  }
 }
 
 const O = load()
@@ -37,20 +44,84 @@ test('the page has one inline script and loads nothing remote', () => {
   assert.doesNotMatch(html, /<link|@import|src=/)
 })
 
-test('a partial shows at once and is replaced in place by its translation', () => {
+test('target language only: a partial never shows its original, only the dots, until its translation', () => {
+  const plain = O.resolveSettings({}, '')
   let s = run([{ type: 'hello', seq: 1, session: { state: 'live' } }, line(2, 'a', 'partial', 'hello wor')])
-  let view = O.visibleLines(s, ALL)
-  assert.deepEqual(view.map(v => [v.id, v.text, v.pending, v.original]), [['a', 'hello wor', true, '']])
-
-  s = run([line(3, 'a', 'committed', 'hello world'), line(4, 'a', 'translated', 'hello world', 'merhaba dünya')], s)
-  view = O.visibleLines(s, ALL)
-  assert.deepEqual(view.map(v => [v.id, v.text, v.pending, v.original]), [['a', 'merhaba dünya', false, 'hello world']])
+  assert.deepEqual(O.visibleLines(s, plain), [])
+  assert.equal(O.pendingIndicator(s), true)
+  s = run([line(3, 'a', 'committed', 'hello world')], s)
+  assert.deepEqual(O.visibleLines(s, ALL), []) // even with show_original: a pending line shows only the dots
+  assert.equal(O.pendingIndicator(s), true)
+  s = run([line(4, 'a', 'translated', 'hello world', 'merhaba dünya')], s)
+  assert.deepEqual(O.visibleLines(s, plain).map(v => [v.id, v.text, v.original]), [['a', 'merhaba dünya', '']])
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.text, v.original]), [['merhaba dünya', 'hello world']])
+  assert.equal(O.pendingIndicator(s), false)
 })
 
-test('original is hidden when show_original is off; failed lines show the original', () => {
-  const settings = O.resolveSettings({ show_original: false, max_lines: 3 }, '')
+test('a failed line shows its marker, and its original only when originals are on', () => {
+  const settings = O.resolveSettings({ max_lines: 3 }, '')
   const s = run([line(1, 'a', 'translated', 'hi', 'selam'), line(2, 'b', 'failed', 'bye')])
-  assert.deepEqual(O.visibleLines(s, settings).map(v => [v.text, v.original, v.pending]), [['selam', '', false], ['bye', '', false]])
+  assert.deepEqual(O.visibleLines(s, settings).map(v => [v.text, v.marker, v.original]),
+    [['selam', '', ''], ['', 'Not translated', '']])
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.text, v.marker]), [['selam', ''], ['bye', 'Not translated']])
+})
+
+test('the queue puts a line up when its turn comes: reading speed, minimum time, order, hold', () => {
+  const settings = O.resolveSettings({ max_lines: 3 }, '')
+  const tr = (seq, id, text, target = 'tr') =>
+    ({ type: 'line', seq, line: { line_id: id, state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: target } })
+  const first = 'Bu cümle tam otuz dört karakterdir.' // 35 characters: 35 / 17 s in Turkish
+  let s = O.applyEvent(O.createState(), tr(1, 'a', first), 0)
+  s = O.applyEvent(s, tr(2, 'b', 'Evet.'), 0)
+  s = O.applyEvent(s, tr(3, 'c', 'Hayır.'), 0)
+  s = O.advance(s, 0, settings)
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['a'])
+  s = O.advance(s, 35 / 17 - 0.01, settings)
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['a'])
+  s = O.advance(s, 35 / 17, settings)
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['a', 'b'])
+  s = O.advance(s, 35 / 17 + 0.99, settings) // "Evet." keeps the 1 s minimum
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['a', 'b'])
+  s = O.advance(s, 35 / 17 + 1.0, settings)
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['a', 'b', 'c'])
+  s = O.advance(s, 35 / 17 + 1.0 + 7.1, settings) // quiet for the hold: the page clears
+  assert.deepEqual(O.shownNow(s, settings), [])
+  s = O.applyEvent(s, tr(4, 'd', 'Yeni.'), 20)
+  s = O.advance(s, 20, settings)
+  assert.deepEqual(O.shownNow(s, settings).map(v => v.id), ['d']) // the old lines do not come back
+  assert.equal(O.readingCps('en-US', 0), 20)
+  assert.equal(O.readingCps('tr', 99), 30)
+  // A line still being translated holds the ones after it, at most 6 s.
+  let q = O.applyEvent(O.createState(), { type: 'line', seq: 1, line: { line_id: 'p', state: 'committed', original: 'one', translation: '', speaker_id: null } }, 0)
+  q = O.applyEvent(q, tr(2, 'n', 'İkinci.'), 0.5)
+  assert.deepEqual(O.shownNow(O.advance(q, 1, settings), settings), [])
+  assert.deepEqual(O.shownNow(O.advance(q, 6.1, settings), settings).map(v => v.id), ['n'])
+})
+
+test('follow live speeds up while text waits, never below the minimum or half the reading time', () => {
+  const read = O.resolveSettings({ max_lines: 3 }, '')
+  const live = O.resolveSettings({ max_lines: 3, pace: 'live' }, '')
+  const text = 'Cümle burada bitiyor ve sonra devam ediyor ve bitiyor.' // 54 characters
+  const fill = () => {
+    let s = O.createState()
+    for (let i = 0; i < 10; i++) {
+      s = O.applyEvent(s, { type: 'line', seq: i + 1, line: { line_id: 'l' + i, state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: 'tr' } }, 0)
+    }
+    return s
+  }
+  const last = settings => {
+    let s = fill()
+    let t = 0
+    while (t < 60) { s = O.advance(s, t, settings); t = Math.round((t + 0.01) * 100) / 100 }
+    return s.shown
+  }
+  const r = last(read)
+  const l = last(live)
+  assert.ok(l.l9 < r.l9 * 0.75)
+  for (let i = 1; i < 10; i++) {
+    assert.ok(r['l' + i] - r['l' + (i - 1)] >= 54 / 17 - 0.011)
+    assert.ok(l['l' + i] - l['l' + (i - 1)] >= Math.max(1, 54 / 17 / 2) - 0.011)
+  }
 })
 
 test('at most max_lines lines, newest last, empty lines skipped', () => {
@@ -70,11 +141,15 @@ test('speakers are numbered by first appearance and relabels keep the number', (
     line(2, 'b', 'translated', 'y', 'Y', 's1:speaker_0'),
     line(3, 'c', 'translated', 'z', 'Z', 's1:speaker_1')
   ])
-  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.speaker, v.slot]), [['Speaker 1', 1], ['Speaker 2', 2], ['Speaker 1', 1]])
+  // Compact: the number, on the first line of a turn; the full words are its title.
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.speaker, v.slot, v.speakerTitle]),
+    [['1', 1, 'Speaker 1'], ['2', 2, 'Speaker 2'], ['1', 1, 'Speaker 1']])
   s = run([{ type: 'relabel', seq: 4, from: 's1:speaker_0', to: 's2:speaker_5' }], s)
-  assert.equal(O.visibleLines(s, ALL)[1].speaker, 'Speaker 2')
+  assert.equal(O.visibleLines(s, ALL)[1].speaker, '2')
   s = run([line(5, 'd', 'translated', 'w', 'W', 's2:speaker_5')], s)
-  assert.equal(O.visibleLines(s, ALL)[2].speaker, 'Speaker 2')
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => v.speaker), ['2', '1', '2'])
+  s = run([line(6, 'e', 'translated', 'v', 'V', 's2:speaker_5')], s)
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.speaker, v.slot]), [['1', 1], ['2', 2], ['', 2]]) // same turn: no label again
   const off = O.resolveSettings({ show_speaker: false, max_lines: 3 }, '')
   assert.ok(O.visibleLines(s, off).every(v => v.speaker === ''))
 })
@@ -94,18 +169,18 @@ test('nothing is shown once the session is idle or failed; a new run starts fres
   s = run([{ type: 'status', seq: 3, state: 'idle' }], s)
   assert.deepEqual(O.visibleLines(s, ALL), [])
   s = run([{ type: 'status', seq: 4, state: 'starting' }, line(5, 'b', 'translated', 'y', 'Y', 's2:speaker_0')], s)
-  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.id, v.speaker]), [['b', 'Speaker 1']])
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.id, v.speaker]), [['b', '1']])
 })
 
 test('URL query parameters override the shared settings and are clamped', () => {
   const base = { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true }
   assert.deepEqual(
     { ...O.resolveSettings(base, '') },
-    { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto' }
+    { text_size: 30, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto', pace: 'read', reading_cps: 0 }
   )
   assert.deepEqual(
-    { ...O.resolveSettings(base, '?text_size=500&max_lines=0&show_original=0&opacity=-5&show_speaker=off&theme=dark') },
-    { text_size: 64, max_lines: 1, show_original: false, opacity: 0, show_speaker: false, theme: 'dark' }
+    { ...O.resolveSettings(base, '?text_size=500&max_lines=0&show_original=0&opacity=-5&show_speaker=off&theme=dark&pace=LIVE&reading_cps=2') },
+    { text_size: 64, max_lines: 1, show_original: false, opacity: 0, show_speaker: false, theme: 'dark', pace: 'live', reading_cps: 5 }
   )
   assert.equal(O.resolveSettings(base, '?theme=neon').theme, 'auto')
   assert.equal(O.resolveSettings(null, '?text_size=abc').text_size, O.DEFAULTS.text_size)
@@ -153,7 +228,7 @@ test('the page draws the pane\'s localised words', () => {
   const words = O.applyWords({ speaker: 'Speaker {n}', not_translated: 'Not translated' },
     { speaker: 'Konuşmacı {n}', not_translated: 'Çevrilmedi' })
   const s = run([line(1, 'a', 'failed', 'Fast talk', '', 's1:speaker_0')])
-  assert.deepEqual(O.visibleLines(s, ALL, JSON.parse(JSON.stringify(words))).map(v => [v.speaker, v.marker]), [['Konuşmacı 1', 'Çevrilmedi']])
+  assert.deepEqual(O.visibleLines(s, ALL, JSON.parse(JSON.stringify(words))).map(v => [v.speakerTitle, v.marker]), [['Konuşmacı 1', 'Çevrilmedi']])
   // A template without {n} is not taken.
   assert.equal(O.applyWords({ speaker: 'Speaker {n}', not_translated: 'x' }, { speaker: 'Konuşmacı' }).speaker, 'Speaker {n}')
 })
@@ -206,3 +281,46 @@ test('text without spaces rolls by characters; a line is never emptied', () => {
 function plainFit(v) {
   return JSON.parse(JSON.stringify(v))
 }
+
+test('a long line is split into units the way the native strip splits it (pace.split_phrases)', () => {
+  // Expected values come from hermeneus_engine/overlay/pace.py split_phrases on the same input.
+  const cases = [
+    ['Komite bulgularını gelecek bahar her üye devleti, bölgesel bankaları ve bağımsız denetçileri dinledikten sonra yayımlayacak.', 48,
+      ['Komite bulgularını gelecek bahar her üye', 'devleti, bölgesel bankaları', 've bağımsız denetçileri dinledikten sonra', 'yayımlayacak.']],
+    ['Belediye meclisi yeni bütçeyi onayladığı için yarın sabah bir basın toplantısı yapılacak ve ayrıntılar açıklanacak', 42,
+      ['Belediye meclisi yeni bütçeyi onayladığı', 'için yarın sabah bir basın toplantısı', 'yapılacak ve ayrıntılar açıklanacak']],
+    ['Kısa.', 42, ['Kısa.']]
+  ]
+  for (const [text, limit, want] of cases) assert.deepEqual(JSON.parse(JSON.stringify(O.splitPhrases(text, limit))), want)
+  assert.equal(O.unitCharsFor(80, 2), 84) // a wide page: a two-line subtitle
+  assert.equal(O.unitCharsFor(30, 2), 51)
+  assert.equal(O.unitCharsFor(10, 1), 16)
+  assert.equal(O.unitCharsFor(30, 6), 84) // more rows never make a unit longer than 84
+})
+
+test('the page paces a long line unit by unit, each its own reading time, and shows every word', () => {
+  const settings = Object.assign(O.resolveSettings({ max_lines: 2 }, ''), { unit_chars: 42 })
+  const text = 'Belediye meclisi yeni bütçeyi onayladığı için yarın sabah bir basın toplantısı yapılacak ve ayrıntılar açıklanacak'
+  let s = O.applyEvent(O.createState(), { type: 'line', seq: 1, line: { line_id: 'a', state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: 'tr' } }, 0)
+  const seen = []
+  for (let t = 0; t < 10; t = Math.round((t + 0.05) * 100) / 100) {
+    s = O.advance(s, t, settings)
+    for (const v of O.shownNow(s, settings)) if (!seen.includes(v.text)) seen.push(v.text)
+  }
+  assert.deepEqual(seen, ['Belediye meclisi yeni bütçeyi onayladığı', 'için yarın sabah bir basın toplantısı', 'yapılacak ve ayrıntılar açıklanacak'])
+  assert.deepEqual(Object.keys(s.shown), ['a', 'a#1', 'a#2'])
+  assert.ok(Math.abs(s.shown['a#1'] - 40 / 17) < 0.06) // the first unit's 40 characters at 17 cps
+  assert.ok(Math.abs(s.shown['a#2'] - s.shown['a#1'] - 37 / 17) < 0.06)
+  const views = O.shownNow(s, settings)
+  assert.deepEqual(views.map(v => [v.id, v.continues]), [['a#1', true], ['a#2', true]])
+})
+
+test('a top unit that starts mid-sentence is marked to take an ellipsis; a sentence start is not', () => {
+  assert.equal(O.continuesSentence('Bakan bu sabah', "telefonla Ankara'dan"), true)
+  assert.equal(O.continuesSentence('bildirdi.', 'onunla hükümet kurma'), true)
+  assert.equal(O.continuesSentence('ama', 'Mira Tal'), false)
+  assert.equal(O.continuesSentence('bitti.', '30 yaş altı'), false)
+  assert.equal(O.continuesSentence('yaklaşık', '30 yaş altı'), true)
+  assert.equal(O.continuesSentence('他说', '我们'), true)
+  assert.equal(O.continuesSentence('他说。', '我们'), false)
+})
