@@ -32,6 +32,10 @@ REMOTE_START_REFUSED = ("Hermeneus captures audio on this Mac, so start it from 
                         "(terminal or Hermes Desktop).")
 
 
+class RemoteStartRefused(PermissionError):
+    """Audio capture was requested from somewhere other than this Mac and allow_remote_start is off."""
+
+
 def remote_refusal(platform: Optional[str], settings: dict) -> Optional[str]:
     """The refusal for a capture request from a chat platform, or None when it may go ahead.
 
@@ -121,6 +125,8 @@ class Plugin:
             raise
 
     async def start(self, choices: Choices, *, platform: Optional[str] = None) -> dict:
+        if refusal := remote_refusal(platform, self.settings()):
+            raise RemoteStartRefused(refusal)
         options = await self.resolve_options(choices)
         if self._build is None:
             await asyncio.to_thread(glue.model_preflight)
@@ -128,7 +134,7 @@ class Plugin:
         note = await self.overlay.auto(platform)
         return {**status, "overlay_message": note} if note else status
 
-    async def set(self, changes: dict) -> dict:
+    async def set(self, changes: dict, *, platform: Optional[str] = None) -> dict:
         """Change the running session. Answers at once; raises UsageError or SettingsRefused.
 
         A source name is matched against the sources this Mac offers now, so
@@ -138,6 +144,8 @@ class Plugin:
             raise UsageError("nothing to change. Pass at least one of --to, --mode, --speak, --voice, "
                              "--device, --source.")
         changes = dict(changes)
+        if changes.get("source") is not None and (refusal := remote_refusal(platform, self.settings())):
+            raise RemoteStartRefused(refusal)
         if changes.get("source") is not None:
             sources, problems = await asyncio.to_thread(self._list_sources)
             try:
