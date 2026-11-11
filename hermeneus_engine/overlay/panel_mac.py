@@ -364,6 +364,7 @@ class MacPanel:
         self.on_resized, self.on_reset_size = on_resized, on_reset_size
         self._held: Optional[str] = None  # the handle the mouse holds, if any: no refit moves the strip meanwhile
         self._drag_frame: Optional[Rect] = None  # the strip as last dragged, read on release
+        self._blocked: Optional[Rect] = None  # the last frame asked for while held
         self.strings = Strings()
         self._wheel = 0.0  # scroll distance not yet a whole row
         self.view = View()
@@ -497,6 +498,7 @@ class MacPanel:
 
     def set_frame(self, frame: Rect) -> None:
         if self._held is not None:  # the user holds a handle: the drag decides the frame until release
+            self._blocked = frame
             return
         target = NSMakeRect(frame.x, frame.y, frame.w, frame.h)
         current = self.strip.frame()
@@ -600,6 +602,11 @@ class MacPanel:
         # The history makes the strip taller for a while; its height is not the user's to drag then.
         for handle in (self.top_handle, self.corner):
             self._show_child(handle, visible and not self.view.history)
+        if self._held in ("top", "corner") and (self.view.history or not visible):
+            # A hidden handle may get no mouse up: release the hold and take the frame the history asked for.
+            blocked, self._held, self._drag_frame, self._blocked = self._blocked, None, None, None
+            if blocked is not None:
+                self.set_frame(blocked)
 
     def _scrolled(self, event) -> None:
         """Wheel or trackpad: whole rows back (up) or forward (down), as a text view scrolls."""
@@ -803,9 +810,11 @@ class MacPanel:
     # -- interaction --------------------------------------------------------------------
 
     def _drag_began(self, role: str) -> None:
-        self._held, self._drag_frame = role, None
+        self._held, self._drag_frame, self._blocked = role, None, None
 
     def _dragged(self, role: str, start, dx: float, dy: float) -> None:
+        if role in ("top", "corner") and self.view.history:
+            return  # the history hid this handle mid-drag; the hold is released (``_sync_tabs``)
         self._held = role
         if role == "move":
             self.strip.setFrameOrigin_((start.origin.x + dx, start.origin.y + dy))
@@ -825,11 +834,13 @@ class MacPanel:
 
     def _drag_ended(self, role: str = "move") -> None:
         """The mouse let go: snap from the frame the user last dragged to, whatever arrived meanwhile."""
+        if self._held is None:  # the hold was released (history opened, strip hidden): this drag is void
+            return
         rect = self._drag_frame
         if rect is None:
             f = self.strip.frame()
             rect = Rect(f.origin.x, f.origin.y, f.size.width, f.size.height)
-        self._held, self._drag_frame = None, None
+        self._held, self._drag_frame, self._blocked = None, None, None
         if role == "move":
             self.on_moved(rect)
         else:

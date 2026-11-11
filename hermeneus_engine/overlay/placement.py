@@ -10,8 +10,11 @@ It also holds the rows hand-back to the Desktop pane (``Positions.wanted``, see
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import json
 import os
+import tempfile
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
@@ -192,8 +195,9 @@ class Positions:
             self.wanted = None
         self.save()
 
-    def save(self) -> None:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
+    def save(self) -> bool:
+        """Write the whole file (the overlay process owns it). False when it could not be written: the overlay
+        keeps drawing with what it has in memory."""
         displays = {}
         for k, s in self.spots.items():
             entry = {"cx": round(s.cx, 4), "bottom": round(s.bottom, 4), "width": round(s.width, 4)}
@@ -204,9 +208,51 @@ class Positions:
         lines = {k: v for k, v in (("seen", self.seen), ("wanted", self.wanted)) if v is not None}
         if lines:
             body["lines"] = lines
-        tmp = self.path.with_suffix(".tmp")
-        tmp.write_text(json.dumps(body, indent=1, sort_keys=True), encoding="utf-8")
-        os.replace(tmp, self.path)
+        try:
+            with locked(self.path):
+                _write(self.path, body)
+        except OSError:
+            return False
+        return True
+
+
+def lock_file(path: Path) -> Path:
+    return Path(path).with_name(Path(path).name + ".lock")
+
+
+@contextlib.contextmanager
+def locked(path: Path):
+    """An exclusive ``flock`` on ``positions.json.lock`` next to ``path``, held by every writer of the positions
+    file (the overlay process and the process serving ``GET /overlay``) around its read-modify-write."""
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd = os.open(lock_file(path), os.O_RDWR | os.O_CREAT, 0o600)
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX)
+        yield
+    finally:
+        os.close(fd)  # closing releases the lock
+
+
+def _write(path: Path, body: dict) -> None:
+    """Atomic replace through a temp file of this writer's own (``.positions-*.tmp`` in the same folder)."""
+    fd, tmp = tempfile.mkstemp(prefix=f".{path.stem}-", suffix=".tmp", dir=path.parent)
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as f:
+            f.write(json.dumps(body, indent=1, sort_keys=True))
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _read(path: Path) -> dict:
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
 
 
 def _rows_or_none(value) -> Optional[int]:
@@ -222,14 +268,35 @@ def wanted_rows(path: Path, setting: Optional[int] = None) -> Optional[int]:
     """The rows the user dragged the overlay to and the setting does not hold yet, or None. Read by the plugin's
     process (``OverlayService.status``) with the current ``overlay_max_lines`` as ``setting``.
 
-    A drag is handed back only while the setting is still the value the overlay last saw (``lines.seen``): once
-    the user picked rows in the pane or in Settings, that pick wins and a stale drag is never offered again. When
-    the setting already holds the dragged rows, the hand-back is done here too (``wanted`` cleared, ``seen`` set),
-    so it ends even while the overlay is closed."""
-    p = Positions(path)
-    if p.wanted is None or setting is None:
-        return p.wanted if setting is None else None
-    if p.wanted == setting:
-        p.set_lines(seen=setting, clear_wanted=True)
+    A drag is handed back only while the setting is still the value the overlay last saw (``lines.seen``). When
+    the setting already holds the dragged rows, the hand-back is done. When the setting differs from both, the
+    user picked rows in the pane or in Settings after the drag: that pick wins, as the overlay itself would
+    apply it (``OverlayApp._config_arrived``): the drag is dropped and every display follows the setting. Either
+    way it is settled here, under the lock, on a freshly read file, changing only ``lines`` and the displays'
+    ``rows``, so it ends even while the overlay is closed and a pick back to the old value never revives it."""
+    path = Path(path)
+    if setting is None:
+        return Positions(path).wanted
+    if _lines(_read(path))[1] is None:  # nothing pending: no lock, no write (the pane polls every second)
         return None
-    return p.wanted if p.seen == setting else None
+    with contextlib.suppress(OSError), locked(path):
+        data = _read(path)
+        seen, wanted = _lines(data)
+        if wanted is None:
+            return None
+        if wanted != setting and seen == setting:
+            return wanted
+        if wanted != setting:
+            for entry in (data.get("displays") or {}).values():
+                if isinstance(entry, dict):
+                    entry.pop("rows", None)
+        data["lines"] = {"seen": clamp_rows(setting)}
+        _write(path, data)
+    return None
+
+
+def _lines(data: dict) -> tuple[Optional[int], Optional[int]]:
+    lines = data.get("lines")
+    if not isinstance(lines, dict):
+        return None, None
+    return _rows_or_none(lines.get("seen")), _rows_or_none(lines.get("wanted"))

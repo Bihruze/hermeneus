@@ -288,6 +288,97 @@ def test_a_stale_drag_never_overwrites_a_later_pick_while_the_overlay_is_closed(
     assert app.settings.max_lines == 2
 
 
+def test_a_pick_back_to_the_old_value_never_revives_an_unseen_drag(data_dir):
+    """A8-10 (re-audit probe R1): a drag to 4 the pane never saw, then the user sets 3, then 2 again."""
+    control.overlay_dir(data_dir)
+    path = control.positions_file(data_dir)
+    path.write_text(json.dumps({"last": D1.key, "displays": {D1.key: {"cx": 0.5, "bottom": 0.1, "width": 0.5,
+                                                                      "rows": 4}},
+                                "lines": {"seen": 2, "wanted": 4}}))
+    settings = {"overlay_max_lines": 3}
+    svc = service(data_dir, settings)
+    assert svc.status().get("resized") is None
+    settings["overlay_max_lines"] = 2
+    assert svc.status().get("resized") is None
+    body = json.loads(path.read_text())
+    assert body["lines"] == {"seen": 3} and "rows" not in body["displays"][D1.key]
+    _, app = make_in(data_dir, max_lines=2)  # the overlay opens with the latest pick
+    assert app.settings.max_lines == 2
+
+
+def test_the_plugin_side_changes_only_lines_and_rows_of_a_fresh_file(data_dir, monkeypatch):
+    """A8-9 (re-audit probe R3): an overlay move saved after the plugin process first read the file is kept."""
+    import contextlib
+    from hermeneus_engine.overlay import placement
+    _, app = make_in(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(4)), True)
+    real, done = placement.locked, []
+
+    @contextlib.contextmanager
+    def overlay_saves_first(path):
+        if not done:  # the overlay saves a new place just before the plugin process takes the lock
+            done.append(1)
+            app.moved(frame_for(Spot(0.2, 0.4, 0.5), D1, app.frame.h))
+        with real(path):
+            yield
+
+    monkeypatch.setattr(placement, "locked", overlay_saves_first)
+    assert service(data_dir, {"overlay_max_lines": 4}).status().get("resized") is None  # the pane saved 4
+    assert done
+    moved = app.positions.spot(D1.key)
+    body = json.loads(control.positions_file(data_dir).read_text())
+    spot = body["displays"][D1.key]
+    assert (spot["cx"], spot["bottom"], spot["rows"]) == (round(moved.cx, 4), round(moved.bottom, 4), 4)
+    assert moved.bottom == pytest.approx(0.4) and body["lines"] == {"seen": 4}
+
+
+def test_two_writers_never_collide_on_the_temp_file(data_dir):
+    """A8-8 (re-audit probe R4): the overlay and the plugin process save at the same time."""
+    import threading
+    path = control.positions_file(data_dir)
+    a, b = Positions(path), Positions(path)
+    a.remember(D1.key, Spot(0.3, 0.2, 0.5, 4))
+    errors, failed = [], []
+
+    def overlay(n=1500):
+        for _ in range(n):
+            try:
+                a.set_lines(seen=2, wanted=4)
+                failed.extend([] if a.save() else [1])
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+
+    def plugin(n=1500):
+        for _ in range(n):
+            try:
+                wanted_rows(path, 4)
+                b.set_lines(seen=3)
+            except Exception as exc:  # noqa: BLE001
+                errors.append(repr(exc))
+
+    threads = [threading.Thread(target=overlay), threading.Thread(target=plugin)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert errors == [] and failed == []
+    assert isinstance(json.loads(path.read_text()), dict)
+    assert not list(path.parent.glob("*.tmp"))  # no temp file left behind
+
+
+def test_a_failed_save_never_stops_new_settings_from_applying(data_dir, monkeypatch):
+    from hermeneus_engine.overlay import placement
+    panel, app = make(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(4)), True)
+
+    def broken(*_a, **_k):
+        raise OSError("disk full")
+
+    monkeypatch.setattr(placement, "_write", broken)
+    app.apply_settings(ovs.OverlaySettings(max_lines=3, text_size=34))
+    assert app.settings.max_lines == 3 and app.settings.text_size == 34
+
+
 def test_a_pick_made_before_the_open_overlay_read_it_wins(data_dir):
     """A8-2 (auditor probe P1b): wanted 4 is pending and the user picks 3 before the overlay's next tick."""
     _, app = make_in(data_dir)
@@ -362,6 +453,35 @@ def test_text_arriving_mid_drag_does_not_move_the_held_strip():
         assert app.settings.max_lines == 5
         assert Positions(path / "positions.json").spot(app.display.key).rows == 5
         assert panel.strip.frame().size.height == target  # held after release too
+    finally:
+        panel.close()
+        remove_tmpdir(path)
+
+
+def test_history_opening_mid_drag_releases_the_hold():
+    """A8-12: the height handles hide while history opens; set_frame must not stay blocked, and the drag is void."""
+    pytest.importorskip("AppKit")
+    from hermeneus_engine.overlay import panel_mac
+    path = short_tmpdir()
+    panel_mac.start_application()
+    app = None
+    resized = []
+    panel = panel_mac.MacPanel(motion=False, on_resized=lambda f, r: resized.append(f))
+    panel.set_visible = lambda v: None
+    try:
+        app = OverlayApp(panel, Positions(path / "positions.json"), ovs.OverlaySettings())
+        app.place()
+        t = feed(app, 12)
+        start = panel.strip.frame()
+        panel._drag_began("top")
+        panel._dragged("top", start, 0, 30)
+        app.scroll(1, t)  # history opens while the top handle is held
+        assert panel._held is None
+        assert panel.strip.frame().size.height == panel.strip_height(app.settings, HISTORY_ROWS, False)
+        panel._drag_ended("top")  # a late mouse up from the hidden handle
+        assert resized == []
+        app.set_width(0.7)
+        assert abs(panel.strip.frame().size.width - app.frame.w) < 0.5  # set_frame works again
     finally:
         panel.close()
         remove_tmpdir(path)
