@@ -25,6 +25,9 @@ class FakeHAL:
         self.callback = None
         self.tap_processes: dict[int, tuple[list[int], bool]] = {}
         self._next = 1000
+        self.default_out = 50
+        self.devices = [50, 51]
+        self.device_names = {50: "Speakers", 51: "BlackHole 2ch", 52: "AirPods"}
         self._lock = threading.Lock()
 
     # helpers for tests
@@ -63,6 +66,15 @@ class FakeHAL:
             if info.pid == pid:
                 return obj
         return 0
+
+    def default_output_device(self):
+        return self.default_out
+
+    def device_ids(self):
+        return tuple(self.devices)
+
+    def device_name(self, device_id):
+        return self.device_names.get(device_id, "")
 
     def app_info(self, pid):
         return self.apps.get(pid)

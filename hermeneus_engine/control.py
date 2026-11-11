@@ -60,7 +60,7 @@ class Controller:
                                   "message": f"a session is starting in process {holder.get('pid')}"})
         return _status_event(idle_status())
 
-    async def start(self, options: SessionOptions, build: ComponentBuilder) -> dict:
+    async def start(self, options: SessionOptions, build: ComponentBuilder, *, overlay_page=None) -> dict:
         """Start a session owned by this process. Raises SessionBusy, UsageError-like errors or the start error."""
         if self.local_bus is not None:
             raise SessionBusy({"pid": None, "owner": self.host_owner})
@@ -70,7 +70,18 @@ class Controller:
         if self._host is None or not self._host.running:
             self._host = SessionHost(self.data_dir, owner=self.host_owner)
         host = self._host
-        return await asyncio.to_thread(host.start, options, build)
+        return await asyncio.to_thread(lambda: host.start(options, build, overlay_page=overlay_page))
+
+    async def overlay(self, on: Optional[bool] = None, port: Optional[int] = None) -> Optional[dict]:
+        """Switch the session's overlay page (None only asks). None when no session answers."""
+        host = self._host
+        runtime = host.runtime if host is not None and host.running else None
+        if runtime is not None and runtime.overlay_page is not None:
+            return await asyncio.to_thread(runtime.overlay_page.switch, on, port)
+        try:
+            return await self._client().overlay(on, port)
+        except SessionUnavailable:
+            return None
 
     async def stop(self) -> dict:
         host = self._host

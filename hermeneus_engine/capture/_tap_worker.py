@@ -161,15 +161,16 @@ def main() -> int:
     for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
         signal.signal(sig, _raise_exit)
 
-    import importlib.util
-
     from ._coreaudio import CoreAudioHAL
-    from ._tap_engine import READER_IOPROC, READER_PORTAUDIO
+    from ._tap_engine import READER_IOPROC
 
-    # PortAudio blocking reads keep Python off the realtime thread; the IOProc reader is the
-    # fallback for an interpreter without sounddevice.
-    reader = READER_PORTAUDIO if importlib.util.find_spec("sounddevice") else READER_IOPROC
-    return serve(sys.stdin.buffer, proto, CoreAudioHAL, own_pid=os.getpid(), engine_options={"reader": reader})
+    # The IOProc reader is the default. In this otherwise idle worker it measured 0 gaps in
+    # 600 s, capture to sink p95 11.8 ms, a 50 ms hole per rebuild and true capture
+    # timestamps. The PortAudio reader (request "reader": "portaudio") measured 9 overflows,
+    # p95 15.4 ms, a 190 ms hole per rebuild, and timestamps estimated from a reported input
+    # latency that was 45 ms longer than the measured one.
+    return serve(sys.stdin.buffer, proto, CoreAudioHAL, own_pid=os.getpid(),
+                 engine_options={"reader": READER_IOPROC})
 
 
 if __name__ == "__main__":

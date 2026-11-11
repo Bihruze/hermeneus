@@ -594,10 +594,17 @@ def test_worker_env_carries_no_secrets():
     parent = {"PATH": "/usr/bin", "HOME": "/Users/x", "TMPDIR": "/tmp/x", "LANG": "en_US.UTF-8",
               "ELEVENLABS_API_KEY": "sk-1", "OPENROUTER_API_KEY": "sk-2", "GITHUB_TOKEN": "t", "HERMES_SECRET": "s",
               "ANTHROPIC_AUTH_TOKEN": "a", "AWS_SECRET_ACCESS_KEY": "k", "PYTHONPATH": "/elsewhere"}
-    env = process_tap.worker_env(parent)
+    env = process_tap.worker_env(parent, path=[])
     assert not [k for k in env if k.endswith(("_KEY", "_TOKEN", "_SECRET")) or "SECRET" in k or "TOKEN" in k]
     assert set(env) <= set(process_tap.WORKER_ENV_ALLOWLIST) | {"PYTHONPATH", "PYTHONUNBUFFERED"}
     assert env["PYTHONPATH"] == str(process_tap._PACKAGE_ROOT) and env["PATH"] == "/usr/bin"
+
+
+def test_worker_path_carries_the_parent_sys_path(tmp_path):
+    deps = tmp_path / "plugin-env" / "site-packages"
+    deps.mkdir(parents=True)
+    env = process_tap.worker_env({}, path=["", str(deps), str(tmp_path / "missing")])
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(process_tap._PACKAGE_ROOT), str(deps)]
 
 
 def test_spawn_worker_passes_the_minimal_env(monkeypatch):
@@ -655,11 +662,17 @@ class FakePAStream:
         self.blocks = queue_mod.Queue()
         self.closed = False
 
-    def read(self, frames=512):
-        item = self.blocks.get()
-        if item is None:
-            raise RuntimeError("stream closed")
-        return item
+    def read(self, frames=512, stop=None):
+        while True:
+            try:
+                item = self.blocks.get(timeout=0.01)
+            except queue_mod.Empty:
+                if stop is not None and stop.is_set():
+                    return np.zeros(0, dtype=np.float32), False
+                continue
+            if item is None:
+                raise RuntimeError("stream closed")
+            return item
 
     def close(self):
         self.closed = True
@@ -719,3 +732,54 @@ def test_portaudio_reader_is_reopened_on_rebuild():
     assert wait_for(lambda: cap.stats.buffers == 1)
     cap.close()
     assert hal.clean
+
+
+# ---------------------------------------------------------------- device changes and app restarts
+
+def test_default_output_change_rebuilds_and_reports():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None,
+                     on_status=lambda c, m, d: statuses.append((c, m)), refresh_interval=1000)
+    cap.open()
+    cap.tick(0.0)  # records the device state
+    assert cap.stats.rebuilds == 0
+    hal.default_out = 51
+    cap.tick(1.0)
+    assert statuses == [(eng.STATUS_DEVICES_CHANGED, "The output device changed to BlackHole 2ch; capture was rebuilt.")]
+    assert cap.stats.device_rebuilds == 1
+    cap.tick(2.0)
+    assert cap.stats.device_rebuilds == 1  # no change, no rebuild
+    hal.devices.append(52)  # headphones connected
+    cap.tick(3.0)
+    assert statuses[-1] == (eng.STATUS_DEVICES_CHANGED, "The list of audio devices changed; capture was rebuilt.")
+    cap.close()
+    assert hal.clean and [c[0] for c in hal.calls].count("create_tap") == 3
+
+
+def test_app_restart_reattaches_with_a_status():
+    hal = chrome_hal()
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="app", bundle_id="com.hnc.Discord", exclude_pids=(OWN_PID,)),
+                     lambda pcm, ts: None, on_status=lambda c, m, d: statuses.append(c), refresh_interval=1000)
+    cap.open()
+    del hal.processes[14]  # Discord quits
+    assert cap.refresh() is False  # nothing to tap: the tap keeps its last processes
+    hal.add_process(40, 140, "com.hnc.Discord", app=AppInfo("Discord", True))  # and starts again
+    hal.add_process(41, 141, "com.hnc.Discord.helper")
+    assert cap.refresh() is True
+    assert statuses == [eng.STATUS_REATTACHED] and cap.stats.reattaches == 1
+    assert hal.tap_processes[cap.tap_id] == ([40, 41], False)
+    cap.close()
+
+
+def test_backend_shows_device_and_reattach_notes_without_failing():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    b = make_backend(hal)
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    for code in ("devices-changed", "reattached"):
+        b._handle_status(b._run, json.dumps({"code": code, "message": f"note {code}", "details": {}}).encode())
+        assert b.status_message == f"note {code}" and b.failure == ""
+    b.stop()

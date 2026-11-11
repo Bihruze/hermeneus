@@ -83,4 +83,17 @@ The owner listens on `<HERMES_HOME>/plugin-data/hermeneus/run/sock` (mode
 `{"op": "status"}`, `{"op": "lines", "after": <seq or null>}` (answers
 `{"type": "lines", "seq", "reset", "events"}`), `{"op": "subscribe", "after":
 <seq or null>}` (a stream as above), `{"op": "stop"}` (answers `{"type":
-"ok"}`).
+"ok"}`), `{"op": "overlay", "on": <true, false or null>, "port": <int or null>}`
+(switches the overlay page, null only asks; answers `{"type": "overlay",
+"running", "url", "port", "error"}`).
+
+## Overlay page
+
+With the overlay page on, the session owner serves `http://127.0.0.1:<port>/<token>/`
+and `GET /<token>/events`, a Server-Sent Events stream. Each SSE `data:` line
+is one event from the list above, cut down to what the page draws: `hello`
+and `status` keep only `state`, `line` keeps `line_id`, `state`, `original`,
+`translation` and `speaker_id`; `relabel` and `reset` are unchanged. Line,
+relabel and status events carry their `seq` as the SSE `id`, so a reconnect
+resumes from `Last-Event-ID`. A first connection gets every stored line
+(`after` 0). The stream reads the session through `Controller.subscribe`.

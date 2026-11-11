@@ -14,14 +14,14 @@ import sys
 from typing import Any, Callable, Optional, TextIO
 
 from . import glue
-from .hermeneus_engine import components, doctor
+from .hermeneus_engine import components, doctor, overlay_page
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
 from .hermeneus_engine.options import Choices, UsageError, add_session_arguments, parse_slash_start, resolve, split_args
 from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
-from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_overlay
+from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_window
 
 SLASH_USAGE = ("usage: /translate start [--to LANG] [--source NAME] [--speak] "
                "[--device OUTPUT] [--voice VOICE_ID] | /translate stop | /translate status | "
@@ -40,13 +40,15 @@ class Plugin:
                  settings: Optional[Callable[[], dict]] = None,
                  data_dir: Optional[Callable[[], Any]] = None,
                  build: Optional[Callable] = None,
-                 list_sources: Optional[Callable] = None) -> None:
+                 list_sources: Optional[Callable] = None,
+                 save_setting: Optional[Callable[[str, Any], None]] = None) -> None:
         self.ctx = ctx
         self._services_factory = services_factory
         self._settings = settings
         self.controller = Controller(data_dir or glue.data_dir, owner=owner)
         self._build = build
         self._list_sources = list_sources or components.list_sources
+        self._save_setting = save_setting
         self.overlay = OverlayService(lambda: self.controller.data_dir, self.settings, self.controller.status)
 
     # -- wiring ---------------------------------------------------------------
@@ -61,6 +63,19 @@ class Plugin:
         if self._settings is not None:
             return self._settings()
         return glue.settings(self.ctx)
+
+    def save_setting(self, key: str, value: Any) -> None:
+        """Write one plugin setting through Hermes (``ctx.set_config``)."""
+        if self._save_setting is not None:
+            self._save_setting(key, value)
+        elif self.ctx is not None:
+            self.ctx.set_config(key, value)
+        else:
+            raise UsageError("settings can only be changed from a Hermes command")
+
+    def overlay_page(self) -> overlay_page.OverlayPage:
+        """The overlay page switch for a session this process owns."""
+        return overlay_page.OverlayPage(lambda: self.controller.data_dir, self.settings)
 
     def builder(self) -> Callable:
         """The component builder for a session; secrets and the LLM are bound when the session starts."""
@@ -82,7 +97,7 @@ class Plugin:
         options = await self.resolve_options(choices)
         if self._build is None:
             await asyncio.to_thread(glue.model_preflight)
-        status = await self.controller.start(options, self.builder())
+        status = await self.controller.start(options, self.builder(), overlay_page=self.overlay_page())
         note = await self.overlay.auto(platform)
         return {**status, "overlay_message": note} if note else status
 
@@ -122,12 +137,12 @@ class Plugin:
             return SLASH_USAGE
         try:
             if action == "show":
-                return describe_overlay(await self.overlay.show(platform))
+                return describe_window(await self.overlay.show(platform))
             if action == "hide":
-                return describe_overlay(await self.overlay.hide())
+                return describe_window(await self.overlay.hide())
         except OverlayUnavailable as exc:
             return f"The subtitle overlay did not open: {exc}."
-        return describe_overlay(self.overlay.status())
+        return describe_window(self.overlay.status())
 
 
 def describe_status(status: dict) -> str:
@@ -169,6 +184,13 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     p_overlay = sub.add_parser("overlay", help="show or hide the floating subtitle overlay on this Mac")
     p_overlay.add_argument("overlay_action", nargs="?", choices=("show", "hide", "status"), default="status")
     p_overlay.add_argument("--json", action="store_true")
+    p_page = sub.add_parser("overlay-page", help="serve live subtitles on a 127.0.0.1 page for OBS and second "
+                                                 "screens; with no argument, show its address")
+    p_page.add_argument("switch", nargs="?", choices=("on", "off"),
+                        help="on serves the page during every session (it is off by default); off stops it")
+    p_page.add_argument("--port", type=int, default=None,
+                        help=f"127.0.0.1 port for the page (default {overlay_page.DEFAULT_PORT})")
+    p_page.add_argument("--json", action="store_true")
 
 
 def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
@@ -186,7 +208,9 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
             return _print_status(asyncio.run(plugin.controller.status()), args)
         if command == "overlay":
             return asyncio.run(cmd_overlay(plugin, args))
-        print("usage: hermes hermeneus {doctor,devices,run,stop,status,overlay}", file=sys.stderr)
+        if command == "overlay-page":
+            return cmd_overlay_page(plugin, args)
+        print("usage: hermes hermeneus {doctor,devices,run,stop,status,overlay,overlay-page}", file=sys.stderr)
         return 2
     return handle
 
@@ -204,7 +228,7 @@ async def cmd_overlay(plugin: Plugin, args: argparse.Namespace, *, out: TextIO =
     except OverlayUnavailable as exc:
         print(f"hermeneus: the subtitle overlay did not open: {exc}", file=err)
         return 1
-    print(json.dumps(result) if getattr(args, "json", False) else describe_overlay(result), file=out)
+    print(json.dumps(result) if getattr(args, "json", False) else describe_window(result), file=out)
     return 0
 
 
@@ -240,8 +264,77 @@ def cmd_doctor(args: argparse.Namespace, *, out: TextIO = sys.stdout, plugin: Op
     report = doctor.run(get_secret=glue.get_secret, aux_config=glue.aux_config())
     llm = plugin.ctx.llm if plugin is not None and plugin.ctx is not None else None
     report.checks.extend(model_checks(bool(getattr(args, "test_model", False)), llm))
+    if plugin is not None:
+        report.checks.append(overlay_check(plugin.settings(), asyncio.run(plugin.controller.overlay())))
     print(json.dumps(report.to_dict(), indent=2) if args.json else report.render(), file=out)
     return report.exit_code
+
+
+def overlay_check(settings: dict, info: Optional[dict]) -> doctor.Check:
+    """The doctor line for the overlay page: off, waiting for a session, its address, or why it failed."""
+    name = "overlay page"
+    if info and info.get("running"):
+        return doctor.Check(name, True, f"serving on {info['url']} (127.0.0.1 only; the token changes "
+                                        "every session)", required=False)
+    if info and info.get("error"):
+        return doctor.Check(name, False, info["error"], "hermes hermeneus overlay-page on --port <port>",
+                            required=False)
+    if not overlay_page.enabled_in(settings):
+        return doctor.Check(name, True, "off (turn it on with: hermes hermeneus overlay-page on)", required=False)
+    try:
+        port = overlay_page.port_from_settings(settings)
+    except overlay_page.OverlayPageError as exc:
+        return doctor.Check(name, False, str(exc), "hermes hermeneus overlay-page on --port <port>",
+                            required=False)
+    return doctor.Check(name, True, f"on; it starts with the next session on 127.0.0.1:{port}", required=False)
+
+
+def describe_overlay(settings: dict, info: Optional[dict]) -> str:
+    if info and info.get("running"):
+        return (f"Overlay page: {info['url']}\n"
+                "Add it to OBS as a Browser source, or open it on this Mac. It serves 127.0.0.1 only and "
+                "the address changes every session.")
+    if info and info.get("error"):
+        return f"Overlay page: {info['error']}"
+    if not overlay_page.enabled_in(settings):
+        return "Overlay page: off. Turn it on with: hermes hermeneus overlay-page on"
+    try:
+        port = overlay_page.port_from_settings(settings)
+    except overlay_page.OverlayPageError as exc:
+        return f"Overlay page: {exc}"
+    return (f"Overlay page: on. It starts with the next session on 127.0.0.1:{port}; "
+            "run hermes hermeneus overlay-page then to see its address.")
+
+
+def cmd_overlay_page(plugin: "Plugin", args: argparse.Namespace, *, out: TextIO = sys.stdout,
+                     err: TextIO = sys.stderr) -> int:
+    """``hermes hermeneus overlay-page [on|off] [--port N]``: save the setting and apply it to a running session."""
+    switch = getattr(args, "switch", None)
+    port = getattr(args, "port", None)
+    try:
+        if port is not None:
+            port = overlay_page.check_port(port)
+            if switch is None:
+                raise UsageError("--port goes with on, for example: hermes hermeneus overlay-page on --port 47822")
+        if switch is not None:
+            if port is not None:
+                plugin.save_setting(overlay_page.KEY_PORT, port)
+            plugin.save_setting(overlay_page.KEY_ENABLED, switch == "on")
+    except (UsageError, overlay_page.OverlayPageError, PermissionError) as exc:
+        print(f"hermeneus: {exc}", file=err)
+        return 2
+    settings = plugin.settings()
+    if switch is not None:
+        settings = {**settings, overlay_page.KEY_ENABLED: switch == "on",
+                    **({overlay_page.KEY_PORT: port} if port is not None else {})}
+    on = None if switch is None else switch == "on"
+    info = asyncio.run(plugin.controller.overlay(on, port))
+    if getattr(args, "json", False):
+        print(json.dumps({"enabled": overlay_page.enabled_in(settings), "session": info is not None,
+                          **(info or {"running": False, "url": None, "port": None, "error": ""})}), file=out)
+    else:
+        print(describe_overlay(settings, info), file=out)
+    return 1 if info and info.get("error") else 0
 
 
 def devices_payload(backend: Optional[str] = None, source_id: Optional[str] = None) -> dict:
@@ -378,7 +471,7 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
         except UsageError as exc:
             print(f"hermeneus: {exc}", file=err)
             return 2
-        runtime = SessionRuntime(data_dir, options, plugin.builder(), owner="cli")
+        runtime = SessionRuntime(data_dir, options, plugin.builder(), owner="cli", overlay_page=plugin.overlay_page())
         sub = runtime.bus.subscribe()
         try:
             await runtime.start()
@@ -389,6 +482,9 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
             sub.close()
             print(f"hermeneus: could not start: {exc}", file=err)
             return 1
+        page = runtime.overlay_page.info()
+        if page["running"] or page["error"]:
+            print(f"-- {describe_overlay(plugin.settings(), page)}", file=err, flush=True)
         note = await plugin.overlay.auto("cli")
         if note:
             print(f"-- {note}", file=err, flush=True)

@@ -57,55 +57,95 @@ def test_wav_in_other_format_is_refused(tmp_path):
         H.read_engine_wav(p)
 
 
-async def test_full_pipeline_measures_injected_delays(corpus):
-    wav, man = corpus
+@pytest.fixture(scope="module")
+def dense_corpus(tmp_path_factory):
+    """About 10 bursts in 8 s, enough segments for a median. Gaps exceed commit plus diarized delay."""
+    path = tmp_path_factory.mktemp("dense") / "dense.wav"
+    man = H.gen_corpus(path, seed=23, duration_s=8.0, burst_ms=(200, 300), gap_ms=(440, 520),
+                       freq_hz=(300, 900), grid_ms=CHUNK_MS)
+    return path, man
+
+
+# Wall-clock bound. Timers, chunk deliveries and event loop wakeups can be late under load but
+# never early, so every segment must reach at least the nominal delay less LOWER_SLACK_MS (the
+# first nonzero sample of a burst sits up to 0.125 ms after the grid line). Lateness is scheduler
+# noise: the median over all segments must stay within TOL_MS above nominal. With 4 cores busy,
+# 20 runs in a row stayed inside this bound (W11 report, finding F22).
+LOWER_SLACK_MS = 0.5
+
+
+def _assert_wall_clock(name, got, nominal):
+    assert got, name
+    assert min(got) >= nominal - LOWER_SLACK_MS, (name, nominal, got)
+    med = sorted(got)[len(got) // 2]
+    assert med - nominal < TOL_MS, (name, nominal, med, got)
+
+
+async def test_full_pipeline_measures_injected_delays(dense_corpus):
+    wav, man = dense_corpus
     commit_ms, partial_ms, diar_ms = 300, 40, 30
     tr_ms, first_ms, play_ms = 150, 80, 50
     stt = fakes.stt_factory(partial_ms=partial_ms, commit_ms={c.CommitStrategy.VAD: commit_ms}, diarized_ms=diar_ms)
     translator = fakes.FakeTranslator(tr_ms)
+    speaker = fakes.FakeSpeaker(first_ms, play_ms)
     cfg = H.RunConfig(label="t", wav=wav, manifest=wav.with_suffix(".json"), stt=stt,
-                      translator=lambda s: translator,
-                      speaker=lambda s: fakes.FakeSpeaker(first_ms, play_ms),
+                      translator=lambda s: translator, speaker=lambda s: speaker,
                       chunk_ms=CHUNK_MS, drain_s=3.0, sample_interval_s=0.5)
     r = await H.run_pipeline(cfg)
     n = len(man["segments"])
-    assert n >= 3
+    assert n >= 8
     assert r["stt_events"]["committed"] == n
     assert r["latency"]["segments"] == n and r["latency"]["unattributed"] == 0
     assert all(seg["attribution"] == "diarized" for seg in r["segments"])
+    segs = sorted(r["segments"], key=lambda sg: sg["key"])
+    st = [sg["stages_ns"] for sg in segs]
 
-    # The fake sees a burst start when its first chunk arrives, one chunk after the burst
-    # starts, and a burst end when the next silent chunk arrives, one chunk after it ends.
-    # The translator delay resumes on the event loop thread. Under load that thread was seen
-    # waking 57 ms late once in eight suite runs, so the harness is checked against the delay
-    # the awaiting coroutine actually saw (within 1 ms), and the median against the nominal one.
-    seen = [(c_["resumed_ns"] - c_["call_ns"]) / 1e6 for c_ in translator.calls]
-    measured = _per_segment(r, m.Stage.COMMIT, m.Stage.TRANSLATED)
-    assert len(measured) == n == len(seen)
-    assert max(abs(a - b) for a, b in zip(measured, seen)) < 1.0, (measured, seen)
-    assert abs(sorted(measured)[n // 2] - tr_ms) < TOL_MS, measured
-    expect = {
-        (m.Stage.CAPTURE, m.Stage.PARTIAL): CHUNK_MS + partial_ms,
-        (m.Stage.SPEECH_END, m.Stage.COMMIT): CHUNK_MS + commit_ms,
-        (m.Stage.TRANSLATED, m.Stage.TTS_FIRST_AUDIO): first_ms,
-        (m.Stage.TTS_FIRST_AUDIO, m.Stage.PLAYBACK_START): play_ms,
-    }
-    for (a, b), want in expect.items():
-        got = _per_segment(r, a, b)
-        assert len(got) == n, (a, b)
-        assert max(abs(g - want) for g in got) < TOL_MS, (a, b, got)
-    bursts = [(s["end_s"] - s["start_s"]) * 1000 for s in man["segments"]]
-    cap_commit = _per_segment(r, m.Stage.CAPTURE, m.Stage.COMMIT)
-    for got, dur in zip(cap_commit, bursts):
-        assert abs(got - (dur + CHUNK_MS + commit_ms)) < TOL_MS
-    e2e = _per_segment(r, m.Stage.CAPTURE, m.Stage.PLAYBACK_START)
-    for got, dur, tr_seen in zip(e2e, bursts, seen):
-        assert abs(got - (dur + CHUNK_MS + commit_ms + tr_seen + first_ms + play_ms)) < TOL_MS
+    # Part 1, arithmetic. The harness against what the fakes observed. None of these depend on
+    # scheduling, so they hold under any load.
+    fake = stt.instances[0]
+    partials = [ev for ev in fake.emitted if isinstance(ev, c.PartialTranscript)]
+    commits = [ev for ev in fake.emitted if isinstance(ev, c.CommittedTranscript)]
+    assert [s_[m.Stage.PARTIAL] for s_ in st] == [ev.received_ns for ev in partials]
+    assert [s_[m.Stage.COMMIT] for s_ in st] == [ev.received_ns for ev in commits]
+    ae = r["attribution_error"]  # capture and speech_end against the manifest, virtual clock
+    assert ae["start_ms"]["count"] == n and ae["abs_start_ms_max"] < 1.0 and ae["abs_end_ms_max"] < 1.0
+    calls = {cl["text"]: cl for cl in translator.calls}
+    spans = []
+    for sg in segs:
+        cl = calls[sg["text"]]
+        s_ = sg["stages_ns"]
+        # The harness span encloses the translator call and differs from it only by the
+        # synchronous code around the await.
+        assert s_[m.Stage.TRANSLATE_START] <= cl["call_ns"] and cl["resumed_ns"] <= s_[m.Stage.TRANSLATED]
+        spans.append(((s_[m.Stage.TRANSLATED] - s_[m.Stage.TRANSLATE_START]) - (cl["resumed_ns"] - cl["call_ns"])) / 1e6)
+    assert sorted(spans)[n // 2] < 1.0, spans
+    assert len(speaker.calls) == n
+    for s_, sp in zip(st, speaker.calls):
+        assert s_[m.Stage.TRANSLATED] <= sp["start_ns"]
+        assert s_[m.Stage.TTS_FIRST_AUDIO] == sp["first_ns"] and s_[m.Stage.PLAYBACK_START] == sp["play_ns"]
     assert r["end_stage"] == m.Stage.PLAYBACK_START
     assert r["latency"]["intervals"]["end_to_end"]["count"] == n
 
-    ae = r["attribution_error"]
-    assert ae["start_ms"]["count"] == n and ae["abs_start_ms_max"] < 1.0 and ae["abs_end_ms_max"] < 1.0
+    # Part 2, wall clock. The measured intervals against the injected nominal delays. The fake
+    # sees a burst start when its first chunk arrives, one chunk after the burst starts, and a
+    # burst end when the next silent chunk arrives, one chunk after it ends.
+    bursts = [(sg["end_s"] - sg["start_s"]) * 1000 for sg in man["segments"]]
+    nominal = {
+        (m.Stage.CAPTURE, m.Stage.PARTIAL): CHUNK_MS + partial_ms,
+        (m.Stage.SPEECH_END, m.Stage.COMMIT): CHUNK_MS + commit_ms,
+        (m.Stage.COMMIT, m.Stage.TRANSLATED): tr_ms,
+        (m.Stage.TRANSLATED, m.Stage.TTS_FIRST_AUDIO): first_ms,
+        (m.Stage.TTS_FIRST_AUDIO, m.Stage.PLAYBACK_START): play_ms,
+    }
+    for (a, b), want in nominal.items():
+        got = [(s_[b] - s_[a]) / 1e6 for s_ in st]
+        _assert_wall_clock(f"{a}->{b}", got, want)
+    _assert_wall_clock("capture->commit excess",
+                       [(s_[m.Stage.COMMIT] - s_[m.Stage.CAPTURE]) / 1e6 - d for s_, d in zip(st, bursts)],
+                       CHUNK_MS + commit_ms)
+    _assert_wall_clock("end to end excess",
+                       [(s_[m.Stage.PLAYBACK_START] - s_[m.Stage.CAPTURE]) / 1e6 - d for s_, d in zip(st, bursts)],
+                       CHUNK_MS + commit_ms + tr_ms + first_ms + play_ms)
     pacing = r["source"]
     assert pacing["chunks"] == round(man["duration_s"] * 1000 / CHUNK_MS)
     assert pacing["lateness_ms"]["p50"] < 1.0

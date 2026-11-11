@@ -57,6 +57,16 @@ config_schema:
     default: 3
     label: "Context lines"
     description: "Earlier lines sent with each translation request (0 to 10)."
+  overlay_page:
+    type: bool
+    default: false
+    label: "Overlay page"
+    description: "Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address."
+  overlay_page_port:
+    type: int
+    default: 47821
+    label: "Overlay page port"
+    description: "127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked."
   overlay:
     type: bool
     default: false
