@@ -641,5 +641,36 @@ test('the theme reader runs on theme changes only', async () => {
   const { readFileSync } = await import('node:fs')
   const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
   const probe = source.slice(source.indexOf('function ThemeProbe('), source.indexOf('const THEME_PROBES'))
-  assert.match(probe, /\}, \[renderedMode, theme, themeName\]\)/)
+  assert.match(probe, /\}, \[renderedMode, theme, themeName, stringsKey\]\)/)
+})
+
+test('the theme is read after Desktop has written it, not in the same effect pass', () => {
+  // Before: the reader ran in the child effect, before ThemeProvider's effect wrote the new variables,
+  // and nothing read again (A3 reaudit2 N6). Simulate that order: reader effect, then the provider's write.
+  const { afterPaint, readThemeTokens, overlayStrings } = plugin
+  let surface = 'rgb(255, 255, 255)' // the old theme
+  const frames = []
+  const sent = []
+  const read = (index, property) => (index === 0 && property === 'color' ? surface : property === 'fontFamily' ? '-apple-system' : property === 'borderTopLeftRadius' ? '2.4px' : 'rgb(1, 2, 3)')
+  const t = (key, arg) => (key === 'speaker' ? `Konuşmacı ${arg}` : key)
+
+  afterPaint(() => sent.push(readThemeTokens(read, { renderedMode: 'dark', themeName: 'midnight' }, overlayStrings(t))), fn => frames.push(fn))
+  surface = 'rgb(22, 27, 34)' // ThemeProvider's own effect writes the new variables
+  assert.equal(sent.length, 0)
+  frames.shift()()
+  assert.equal(sent[0].colors.surface, 'rgb(22, 27, 34)')
+  assert.equal(sent[0].mode, 'dark')
+  assert.equal(sent[0].radius_px, 2.4)
+  assert.equal(sent[0].strings.speaker, 'Konuşmacı {n}')
+})
+
+test('afterPaint can be cancelled and runs at once without animation frames', () => {
+  const { afterPaint } = plugin
+  let ran = 0
+  let cancelled = null
+  const stop = afterPaint(() => ran++, () => 7, id => { cancelled = id })
+  stop()
+  assert.equal(cancelled, 7)
+  afterPaint(() => ran++, undefined, undefined)
+  assert.equal(ran, 1)
 })
