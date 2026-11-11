@@ -58,9 +58,16 @@ html, body {
 }
 .original {
   order: var(--original-order);
+  max-width: 100%;
   font-size: var(--original-scale);
   color: var(--text-secondary);
+  /* One row, as on the native strip: its start with an ellipsis, or its end when the
+     translation rolled (fitTail below). */
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
+.main { display: block; }
 .speaker {
   font-size: var(--label-scale);
   font-weight: var(--label-weight);
@@ -263,6 +270,48 @@ html, body {
     })
   }
 
+  /** Tokens a line can lose from its front when it rolls: words, or characters for text
+   *  written without spaces. */
+  function tokensOf(value) {
+    var trimmed = String(value).trim()
+    if (trimmed === '') return { parts: [], joiner: ' ' }
+    return /\s/.test(trimmed) ? { parts: trimmed.split(/\s+/), joiner: ' ' } : { parts: Array.from(trimmed), joiner: '' }
+  }
+
+  /** The row limit, the native strip's rule (overlay/model.py layout and _fit_turn): Lines is a
+   *  number of rendered rows. Older lines leave whole while the rows overflow; when the newest
+   *  line alone needs more rows, tokens leave from its front so its newest words stay visible.
+   *  rowsOf(i, cut) is the row count of view i without its first `cut` tokens.
+   *  Returns { first: index of the oldest line kept, cut: tokens dropped from the newest }. */
+  function fitRows(tokenCounts, maxLines, rowsOf) {
+    var count = tokenCounts.length
+    if (count === 0) return { first: 0, cut: 0 }
+    var rows = []
+    var total = 0
+    for (var i = 0; i < count; i++) {
+      rows.push(rowsOf(i, 0))
+      total += rows[i]
+    }
+    var first = 0
+    while (count - first > 1 && total > maxLines) {
+      total -= rows[first]
+      first++
+    }
+    var newest = count - 1
+    var cut = 0
+    if (rows[newest] > maxLines) {
+      var lo = 1
+      var hi = Math.max(tokenCounts[newest] - 1, 1)
+      while (lo < hi) { // the smallest cut that fits; rows only shrink as the cut grows
+        var mid = (lo + hi) >> 1
+        if (rowsOf(newest, mid) <= maxLines) hi = mid
+        else lo = mid + 1
+      }
+      cut = Math.min(lo, Math.max(tokenCounts[newest] - 1, 0))
+    }
+    return { first: first, cut: cut }
+  }
+
   var VAR_NAME = /^--[a-z0-9-]+$/
 
   /** The CSS variables to set for a theme event ({tokens: theme_tokens()} from the server):
@@ -293,7 +342,9 @@ html, body {
     createState: createState,
     applyEvent: applyEvent,
     applyWords: applyWords,
-    visibleLines: visibleLines
+    visibleLines: visibleLines,
+    tokensOf: tokensOf,
+    fitRows: fitRows
   }
 
   if (typeof document === 'undefined') return
@@ -327,6 +378,7 @@ html, body {
     var original = document.createElement('span')
     original.className = 'original'
     var main = document.createElement('span')
+    main.className = 'main'
     var speaker = document.createElement('span')
     speaker.className = 'speaker'
     var marker = document.createElement('span')
@@ -338,7 +390,7 @@ html, body {
     main.appendChild(body)
     rootEl.appendChild(original)
     rootEl.appendChild(main)
-    return { root: rootEl, original: original, speaker: speaker, marker: marker, text: body }
+    return { root: rootEl, original: original, speaker: speaker, marker: marker, text: body, main: main }
   }
 
   // Each line keeps its element while it changes, so a partial is replaced in place by its
@@ -368,6 +420,51 @@ html, body {
         delete nodes[id]
       }
     })
+    fit(views)
+  }
+
+  function rowsIn(el) {
+    var lineHeight = parseFloat(root.getComputedStyle(el).lineHeight)
+    if (!(lineHeight > 0)) return 1
+    return Math.max(1, Math.round(el.getBoundingClientRect().height / lineHeight))
+  }
+
+  // An ellipsis and as much of the end of `value` as fits on the element's one row.
+  function fitTail(el, value) {
+    var tokens = tokensOf(value)
+    el.textContent = value
+    if (el.scrollWidth <= el.clientWidth || tokens.parts.length < 2) return
+    var lo = 1
+    var hi = tokens.parts.length - 1
+    while (lo < hi) {
+      var mid = (lo + hi) >> 1
+      el.textContent = '\u2026' + tokens.parts.slice(mid).join(tokens.joiner)
+      if (el.scrollWidth <= el.clientWidth) hi = mid
+      else lo = mid + 1
+    }
+    el.textContent = '\u2026' + tokens.parts.slice(lo).join(tokens.joiner)
+  }
+
+  // Lines is a row limit (fitRows). Measuring happens before the browser paints, so a line
+  // that does not fit is never drawn whole first.
+  function fit(views) {
+    if (views.length === 0) return
+    var list = views.map(function (view) { return { node: nodes[view.id], tokens: tokensOf(view.text), view: view } })
+    var result = fitRows(list.map(function (item) { return item.tokens.parts.length }), settings.max_lines,
+      function (i, cut) {
+        var item = list[i]
+        if (cut > 0) item.node.text.textContent = item.tokens.parts.slice(cut).join(item.tokens.joiner)
+        var rows = rowsIn(item.node.main)
+        if (cut > 0) item.node.text.textContent = item.view.text
+        return rows
+      })
+    for (var i = 0; i < list.length; i++) list[i].node.root.hidden = i < result.first
+    var newest = list[list.length - 1]
+    if (result.cut > 0) {
+      newest.node.text.textContent = newest.tokens.parts.slice(result.cut).join(newest.tokens.joiner)
+      // The translation rolled: show the end of the original, as the native strip does.
+      if (newest.view.original !== '') fitTail(newest.node.original, newest.view.original)
+    }
   }
 
   var theme = null
@@ -402,6 +499,9 @@ html, body {
       render()
     }
   }
+
+  // The width decides the wrapping, so the row limit is applied again when it changes.
+  root.addEventListener('resize', function () { render() })
 
   var lostTimer = null
   var source = new EventSource('events')

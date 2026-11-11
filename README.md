@@ -195,6 +195,8 @@ With the page on, the process that runs the session serves live subtitles at `ht
 
 The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity` and `overlay_show_speaker`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1) and `theme` (`light`, `dark` or `auto`). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
 
+`max_lines` counts rows on screen, as on the native overlay. Older lines leave first; a sentence longer than the limit rolls, so its newest words stay visible and its first words leave. The original stays on one row: its end when the translation rolled, otherwise its start.
+
 The page draws with the same token table as the native overlay (`hermeneus_engine/overlay_tokens.py`). Once the Desktop pane has sent the active Desktop theme, the page uses it in Desktop's own light or dark mode, and an open page changes within about two seconds when the theme changes. Before that it uses the default Nous theme and follows the system appearance. `theme=light` or `theme=dark` forces a mode.
 
 The token is new for every session and every `overlay-page on`, so OBS needs the new address each time. A port that another program uses is an error with the fix in the message; Hermeneus does not pick another port.

@@ -576,3 +576,34 @@ def test_page_tokens_carry_the_panes_words(tmp_path):
     words = op.theme_tokens(path)["strings"]
     assert words["not_translated"] == "Çevrilmedi" and words["speaker"] == "Speaker {n}"
     op.theme_css(op.theme_tokens(path))  # the words never reach the CSS
+
+
+def test_served_page_limits_rows_not_lines(tmp_path):
+    """The page as served limits rendered rows (fitRows), with max_lines from the settings."""
+    import re
+    import shutil
+    import subprocess
+    srv = overlay_page.OverlayPageServer(port=0, events=fake_events, settings=lambda: {"overlay_max_lines": 1})
+    srv.start()
+    try:
+        _, _, body = http(srv.port, f"/{srv.token}/")
+    finally:
+        srv.stop()
+    html = body.decode()
+    assert '"max_lines":1' in html
+    assert "fit(views)" in html and "white-space: nowrap" in html
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    script = re.search(r"<script>(.*?)</script>", html, re.S).group(1)
+    probe = tmp_path / "probe.js"
+    probe.write_text(script + """
+const O = globalThis.HermeneusOverlay
+const t = O.tokensOf('one two three four five six seven eight nine ten')
+const rowsOf = (i, cut) => Math.max(1, Math.ceil(t.parts.slice(cut).join(' ').length / 12))
+const fit = O.fitRows([t.parts.length], 1, rowsOf)
+console.log(JSON.stringify({rows: rowsOf(0, fit.cut), shown: t.parts.slice(fit.cut).join(' ')}))
+""", encoding="utf-8")
+    out = subprocess.run([node, str(probe)], capture_output=True, text=True, timeout=20, check=True).stdout
+    result = json.loads(out)
+    assert result == {"rows": 1, "shown": "nine ten"}  # "eight nine ten" is 14 characters, two rows of 12

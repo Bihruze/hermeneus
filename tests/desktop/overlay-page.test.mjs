@@ -147,3 +147,52 @@ test('the page draws the pane\'s localised words', () => {
   // A template without {n} is not taken.
   assert.equal(O.applyWords({ speaker: 'Speaker {n}', not_translated: 'x' }, { speaker: 'Konuşmacı' }).speaker, 'Speaker {n}')
 })
+
+// A fake measure: a row holds `width` characters of a line's text.
+function measure(texts, width) {
+  const toks = texts.map(t => O.tokensOf(t))
+  return {
+    counts: toks.map(t => t.parts.length),
+    rowsOf: (i, cut) => Math.max(1, Math.ceil(toks[i].parts.slice(cut).join(toks[i].joiner).length / width)),
+    shown: (i, cut) => toks[i].parts.slice(cut).join(toks[i].joiner)
+  }
+}
+
+test('Lines limits rendered rows: one long sentence at Lines 1 keeps its newest words on one row', () => {
+  const long = 'the committee will meet again on thursday to vote on the final version of the budget'
+  const m = measure([long], 30)
+  const fit = O.fitRows(m.counts, 1, m.rowsOf)
+  assert.equal(fit.first, 0)
+  assert.ok(fit.cut > 0)
+  assert.equal(m.rowsOf(0, fit.cut), 1)
+  assert.ok(m.rowsOf(0, fit.cut - 1) > 1, 'the smallest cut that fits')
+  assert.ok(long.endsWith(m.shown(0, fit.cut)))
+})
+
+test('Lines 2: older lines leave whole before the newest rolls', () => {
+  const m = measure(['short one', 'a second line that wraps onto two rows here'], 25)
+  assert.deepEqual(plainFit(O.fitRows(m.counts, 2, m.rowsOf)), { first: 1, cut: 0 })
+  const fits = measure(['short one', 'fits on one row'], 25)
+  assert.deepEqual(plainFit(O.fitRows(fits.counts, 2, fits.rowsOf)), { first: 0, cut: 0 })
+  const three = measure(['x', 'a newest line long enough to need three rows of text at this width'], 25)
+  const fit = O.fitRows(three.counts, 2, three.rowsOf)
+  assert.equal(fit.first, 1)
+  assert.equal(three.rowsOf(1, fit.cut), 2)
+})
+
+test('text without spaces rolls by characters; a line is never emptied', () => {
+  assert.deepEqual(plainFit(O.tokensOf('今日は良い天気です')), { parts: [...'今日は良い天気です'], joiner: '' })
+  const m = measure(['今日は良い天気ですね明日も晴れるでしょう'], 5)
+  const fit = O.fitRows(m.counts, 1, m.rowsOf)
+  assert.equal(m.rowsOf(0, fit.cut), 1)
+  const one = measure(['Supercalifragilistic'], 5)
+  const oneFit = O.fitRows(one.counts, 1, one.rowsOf)
+  assert.equal(one.shown(0, oneFit.cut), 'istic')
+  const dot = measure(['.'], 5)
+  assert.equal(O.fitRows(dot.counts, 1, dot.rowsOf).cut, 0)
+  assert.deepEqual(plainFit(O.fitRows([], 2, () => 1)), { first: 0, cut: 0 })
+})
+
+function plainFit(v) {
+  return JSON.parse(JSON.stringify(v))
+}
