@@ -77,6 +77,8 @@ class Plugin:
 
     async def start(self, choices: Choices) -> dict:
         options = await self.resolve_options(choices)
+        if self._build is None:
+            await asyncio.to_thread(glue.model_preflight)
         return await self.controller.start(options, self.builder())
 
     def unload(self) -> None:
@@ -131,6 +133,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="hermeneus_command", metavar="COMMAND")
     p_doc = sub.add_parser("doctor", help="check what live translation needs on this Mac")
     p_doc.add_argument("--json", action="store_true", help="print the checks as JSON")
+    p_doc.add_argument("--test-model", action="store_true",
+                       help="also make one tiny call on the live_translate model (spends a few tokens)")
     p_dev = sub.add_parser("devices", help="list audio sources and output devices")
     p_dev.add_argument("--json", action="store_true", help="print the devices as JSON")
     p_run = sub.add_parser("run", help="show live subtitles here; joins a running session or starts one")
@@ -146,7 +150,7 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
     def handle(args: argparse.Namespace) -> int:
         command = getattr(args, "hermeneus_command", None)
         if command == "doctor":
-            return cmd_doctor(args)
+            return cmd_doctor(args, plugin=plugin)
         if command == "devices":
             return cmd_devices(args)
         if command == "run":
@@ -165,8 +169,33 @@ def _print_status(status: dict, args: argparse.Namespace) -> int:
     return 1 if status.get("state") == "failed" else 0
 
 
-def cmd_doctor(args: argparse.Namespace, *, out: TextIO = sys.stdout) -> int:
+def model_checks(test_model: bool, llm: Any = None) -> list:
+    """Doctor lines for the translation model: a missing Hermes extra (no tokens), then an opt-in live call.
+
+    Hermes has no public way to resolve the auxiliary route without calling
+    it: the resolvers in agent/auxiliary_client.py are private and that
+    module is not on the plugin API list (public-api.md), so a live check
+    needs one real call and runs only with --test-model.
+    """
+    checks = []
+    provider = glue._aux_provider()
+    extra = glue.missing_model_extra(provider)
+    if extra:
+        checks.append(doctor.Check("translation model feature", False,
+                                   f"the live_translate provider ({provider}) needs Hermes' {extra!r} feature",
+                                   f"run: {glue._install_hint(extra)}"))
+    if test_model:
+        ok, detail = asyncio.run(glue.test_model(llm if llm is not None else glue.standalone_llm()))
+        checks.append(doctor.Check("translation model (live call)", ok, detail,
+                                   "" if ok else "pick another model with: hermes model "
+                                   "(Configure auxiliary models > Live translation)"))
+    return checks
+
+
+def cmd_doctor(args: argparse.Namespace, *, out: TextIO = sys.stdout, plugin: Optional["Plugin"] = None) -> int:
     report = doctor.run(get_secret=glue.get_secret, aux_config=glue.aux_config())
+    llm = plugin.ctx.llm if plugin is not None and plugin.ctx is not None else None
+    report.checks.extend(model_checks(bool(getattr(args, "test_model", False)), llm))
     print(json.dumps(report.to_dict(), indent=2) if args.json else report.render(), file=out)
     return report.exit_code
 
@@ -222,11 +251,34 @@ def cmd_devices(args: argparse.Namespace, *, out: TextIO = sys.stdout,
     return 0
 
 
-def _format_line(event: dict) -> Optional[str]:
+class SpeakerNumbers:
+    """Speaker 1, 2, ... by first appearance, the way the pane numbers them (desktop/plugin.js:110-116, 166-180).
+
+    Scribe ids look like ``s1:speaker_0``; the ``s<N>`` part changes with every
+    Scribe session, so the raw id means nothing to a reader.
+    """
+
+    def __init__(self) -> None:
+        self._numbers: dict[str, int] = {}
+
+    def label(self, speaker_id: Optional[str]) -> Optional[str]:
+        if not speaker_id:
+            return None
+        if speaker_id not in self._numbers:
+            self._numbers[speaker_id] = len(set(self._numbers.values())) + 1
+        return f"Speaker {self._numbers[speaker_id]}"
+
+    def relabel(self, from_id: str, to_id: str) -> None:
+        """The surviving speaker keeps its number; a new id inherits the merged one's."""
+        if to_id not in self._numbers and from_id in self._numbers:
+            self._numbers[to_id] = self._numbers[from_id]
+
+
+def _format_line(event: dict, speakers: Optional[SpeakerNumbers] = None) -> Optional[str]:
     line = event.get("line") or {}
     state = line.get("state")
-    speaker = line.get("speaker_id")
-    prefix = f"[{speaker}] " if speaker else ""
+    label = (speakers or SpeakerNumbers()).label(line.get("speaker_id"))
+    prefix = f"[{label}] " if label else ""
     if state == "translated":
         return f"{prefix}{line.get('translation', '')}"
     if state == "failed":
@@ -240,6 +292,7 @@ class _Printer:
         self.out = out
         self.err = err
         self.last_state = ""
+        self.speakers = SpeakerNumbers()
 
     def __call__(self, event: dict) -> None:
         if self.as_json:
@@ -252,11 +305,11 @@ class _Printer:
                 self.last_state = body.get("state", "")
                 print(f"-- {describe_status(body)}", file=self.err, flush=True)
         elif kind == "line":
-            text = _format_line(event)
+            text = _format_line(event, self.speakers)
             if text:
                 print(text, file=self.out, flush=True)
-        elif kind == "relabel" and not self.as_json:
-            print(f"-- {event.get('from')} is now {event.get('to')}", file=self.err, flush=True)
+        elif kind == "relabel":
+            self.speakers.relabel(str(event.get("from")), str(event.get("to")))
 
 
 async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys.stdout,
@@ -298,11 +351,14 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
                 printer(event)
 
         pump_task = asyncio.create_task(pump())
-        stop_task = asyncio.create_task(stop.wait())
-        closed_task = asyncio.create_task(runtime.session.wait_closed())
-        await asyncio.wait({stop_task, closed_task}, return_when=asyncio.FIRST_COMPLETED)
-        stop_task.cancel()
-        closed_task.cancel()
+        # Three ways to end: Ctrl+C or SIGTERM here, a stop from another
+        # process over the socket (hermes hermeneus stop, /translate stop, the
+        # pane), or the session ending by itself.
+        waits = {asyncio.create_task(stop.wait()), asyncio.create_task(runtime.wait_stop_requested()),
+                 asyncio.create_task(runtime.session.wait_closed())}
+        await asyncio.wait(waits, return_when=asyncio.FIRST_COMPLETED)
+        for task in waits:
+            task.cancel()
         failed = runtime.session.state == "failed"
         await runtime.close()
         await asyncio.wait({pump_task}, timeout=0.5)

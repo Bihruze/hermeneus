@@ -30,6 +30,7 @@ from dataclasses import dataclass, field, replace
 from typing import AsyncIterator, Awaitable, Callable, Optional, Protocol
 
 from .bus import SubtitleBus, wire_language
+from .sentences import DEFAULT_STABLE_MS, DEFAULT_STABLE_PARTIALS, SentenceSplitter
 from .contracts import (
     ENGINE_CHANNELS,
     ENGINE_SAMPLE_RATE,
@@ -65,6 +66,10 @@ STOP_TIMEOUT_S = 1.5
 
 METRICS_INTERVAL_S = 2.0
 
+# A failing model fails every line. The status message names the reason at
+# once and when it changes, and repeats the same reason at most this often.
+FAILURE_MESSAGE_INTERVAL_S = 30.0
+
 
 class SttClient(Protocol):
     async def start(self) -> None: ...
@@ -98,6 +103,10 @@ class SessionOptions:
     context_segments: int = 3
     max_lines: int = 200
     max_queued_seconds: float = DEFAULT_MAX_QUEUED_SECONDS
+    # Early translation of stable sentences (sentences.py). A negative
+    # stable_ms turns it off: lines are then whole Scribe segments.
+    sentence_stable_ms: float = DEFAULT_STABLE_MS
+    sentence_stable_partials: int = DEFAULT_STABLE_PARTIALS
 
     def source_dict(self) -> dict:
         return {"backend": self.source.backend, "source_id": self.source.source_id,
@@ -266,8 +275,15 @@ class TranslationSession:
         self._started_ns = 0
         self._detected: Optional[str] = None
         self._capture_note = ""
+        self._failure_message = ""
+        self._splitter = SentenceSplitter(stable_ms=options.sentence_stable_ms,
+                                          stable_partials=options.sentence_stable_partials)
+        self._segment_lines: list[str] = []      # lines of the segment being spoken
+        self._segments: "OrderedDict[int, list[str]]" = OrderedDict()  # segment_index -> its lines
+        self._failure_published_ns = 0
         self.stats: dict[str, int] = {"lines_committed": 0, "lines_translated": 0,
-                                      "lines_failed": 0, "speak_errors": 0}
+                                      "lines_failed": 0, "speak_errors": 0,
+                                      "sentences_released_early": 0}
 
     # -- status -----------------------------------------------------------
 
@@ -471,56 +487,96 @@ class TranslationSession:
         if not text:
             return
         speaker = _majority_speaker(event.words)
+        now = event.received_ns or self._clock()
+        for sentence in self._splitter.on_partial(text, now):
+            # The sentence takes over the partial line's id, so the display
+            # keeps one line per sentence in speaking order.
+            self._release(sentence, speaker=speaker, source_language=self._detected,
+                          segment_index=None, received_ns=now, early=True)
+        rest = self._splitter.remainder(text)
+        if not rest:
+            return
         if self._partial_id is None:
             self._partial_id = self._new_id()
-            line = SubtitleLine(line_id=self._partial_id, state=LineState.PARTIAL, original=text,
+            line = SubtitleLine(line_id=self._partial_id, state=LineState.PARTIAL, original=rest,
                                 speaker_id=speaker, target_language=self.options.target_language,
-                                timings_ns={"first_partial": event.received_ns})
+                                timings_ns={"partial": now})
         else:
             prev = self._lines[self._partial_id]
-            if prev.original == text and (speaker is None or speaker == prev.speaker_id):
+            if prev.original == rest and (speaker is None or speaker == prev.speaker_id):
                 return
-            line = replace(prev, original=text, speaker_id=speaker or prev.speaker_id)
+            line = replace(prev, original=rest, speaker_id=speaker or prev.speaker_id)
         self._store(line)
 
-    def _on_committed(self, event: CommittedTranscript) -> None:
-        text = event.text.strip()
-        if not text:
-            return
+    def _release(self, text: str, *, speaker: Optional[str], source_language: Optional[str],
+                 segment_index: Optional[int], received_ns: int, early: bool) -> SubtitleLine:
+        """Turn the current partial line (or a new one) into a committed line and send it to translation."""
         if self._partial_id is not None:
             prev = self._lines[self._partial_id]
             timings = dict(prev.timings_ns)
-            speaker = prev.speaker_id
+            speaker = prev.speaker_id or speaker
             line_id = self._partial_id
         else:
-            timings, speaker, line_id = {}, None, self._new_id()
+            timings, line_id = {}, self._new_id()
         self._partial_id = None
-        timings["commit"] = event.received_ns or self._clock()
-        source_language = wire_language(event.language_code)
-        if source_language and source_language != self._detected:
-            self._detected = source_language
-            self._publish_status()
+        timings["commit"] = received_ns
+        if early:
+            timings["sentence_released"] = received_ns
         line = SubtitleLine(line_id=line_id, state=LineState.COMMITTED, original=text,
                             speaker_id=speaker, source_language=source_language,
                             target_language=self.options.target_language,
-                            segment_index=event.segment_index, timings_ns=timings)
+                            segment_index=segment_index, timings_ns=timings)
         self._store(line)
+        self._segment_lines.append(line_id)
         self.stats["lines_committed"] += 1
+        if early:
+            self.stats["sentences_released_early"] += 1
         assert self._scheduler is not None
         try:
             self._scheduler.submit(replace(line, timings_ns=dict(timings)))
         except Exception as exc:
             self._on_translated(replace(line, state=LineState.FAILED, error=f"translation unavailable: {exc}"))
+        return line
+
+    def _on_committed(self, event: CommittedTranscript) -> None:
+        text = event.text.strip()
+        source_language = wire_language(event.language_code)
+        if source_language and source_language != self._detected:
+            self._detected = source_language
+            self._publish_status()
+        received = event.received_ns or self._clock()
+        pieces = self._splitter.on_commit(text) if text else []
+        for piece in pieces:
+            self._release(piece, speaker=None, source_language=source_language,
+                          segment_index=event.segment_index, received_ns=received, early=False)
+        if not pieces and self._partial_id is not None:
+            # The commit holds nothing beyond what was already released, so
+            # the partial line on screen had words Scribe dropped at the end.
+            # The event schema has no removal; the line ends empty.
+            prev = self._lines[self._partial_id]
+            self._partial_id = None
+            self._store(replace(prev, state=LineState.TRANSLATED, original="", translation=""))
+        if event.segment_index is not None:
+            self._segments[event.segment_index] = list(self._segment_lines)
+            while len(self._segments) > 64:
+                self._segments.pop(next(iter(self._segments)))
+        self._segment_lines = []
 
     def _on_diarized(self, event: DiarizedTranscript) -> None:
-        speaker = _majority_speaker(event.words)
-        if speaker is None:
+        """Give each line of the segment the main speaker of its own words."""
+        line_ids = [i for i in self._segments.get(event.segment_index, []) if i in self._lines]
+        words = [w for w in event.words if w.type in (None, "word")]
+        if not line_ids or not words:
             return
-        for line in reversed(self._lines.values()):
-            if line.segment_index == event.segment_index:
-                if line.speaker_id != speaker:
-                    self._store(replace(line, speaker_id=speaker))
-                return
+        pos = 0
+        for i, line_id in enumerate(line_ids):
+            line = self._lines[line_id]
+            n = len(line.original.split())
+            chunk = words[pos:pos + n] if i < len(line_ids) - 1 else words[pos:]
+            pos += n
+            speaker = _majority_speaker(chunk)
+            if speaker is not None and line.speaker_id != speaker:
+                self._store(replace(line, speaker_id=speaker))
 
     def _on_merged(self, event: SpeakersMerged) -> None:
         for line_id, line in list(self._lines.items()):
@@ -542,6 +598,18 @@ class TranslationSession:
         if mapped and self._state not in ("stopping", "idle", "failed"):
             self._publish_status(mapped, event.message or ("live" if mapped == "live" else ""))
 
+    def _note_translation_failure(self, error: str) -> None:
+        """Show why translation fails in the status, without one status per failed line."""
+        if not error or error.startswith("Skipped to keep up"):
+            return  # backlog skips are a choice, not a fault
+        now = self._clock()
+        if (error != self._failure_message
+                or now - self._failure_published_ns >= FAILURE_MESSAGE_INTERVAL_S * 1e9):
+            self._failure_message = error
+            self._failure_published_ns = now
+            if self._state in ("live", "reconnecting"):
+                self._publish_status(message=error)
+
     def _on_translated(self, done: SubtitleLine) -> None:
         """Scheduler callback, on the loop thread, once per committed line."""
         current = self._lines.get(done.line_id)
@@ -552,8 +620,13 @@ class TranslationSession:
         if done.state == LineState.TRANSLATED:
             timings.setdefault("translated", self._clock())
             self.stats["lines_translated"] += 1
+            if self._failure_message:
+                self._failure_message = ""
+                if self._state in ("live", "reconnecting"):
+                    self._publish_status(message="")
         else:
             self.stats["lines_failed"] += 1
+            self._note_translation_failure(done.error)
         line = replace(done, original=original, speaker_id=speaker, timings_ns=timings)
         self._store(line)
         if (line.state == LineState.TRANSLATED and line.translation and self._speech is not None
