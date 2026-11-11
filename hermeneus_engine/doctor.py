@@ -215,7 +215,10 @@ def run(*, get_secret: SecretGetter, aux_config: Optional[dict],
         verify_tap_audio: Callable[[], tuple[bool, str]] = components.verify_tap_audio,
         audio_check: bool = True) -> DoctorReport:
     """Process tap first. The virtual-device and Multi-Output lines describe the fallback and
-    never fail the report while the process tap works."""
+    never fail the report while the process tap works. Windows has its own checks (doctor_windows)."""
+    if sys.platform == "win32":
+        from .doctor_windows import run as run_windows
+        return run_windows(get_secret=get_secret, aux_config=aux_config, which=which)
     report = DoctorReport()
     report.checks.append(_macos(mac_ver))
     capture = _capture(verify_tap_audio if audio_check else None)

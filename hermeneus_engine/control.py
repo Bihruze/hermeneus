@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
 from .bus import idle_status, last_process_seq
-from .ipc import SessionClient, SessionUnavailable
+from . import messages
+from .ipc import SessionClient, SessionUnavailable, SettingsRefused
 from .runtime import ComponentBuilder, SessionBusy, SessionHost, lock_holder, socket_path
 from .session import SessionOptions
 
@@ -60,7 +61,7 @@ class Controller:
                                   "message": f"a session is starting in process {holder.get('pid')}"})
         return _status_event(idle_status())
 
-    async def start(self, options: SessionOptions, build: ComponentBuilder) -> dict:
+    async def start(self, options: SessionOptions, build: ComponentBuilder, *, overlay_page=None) -> dict:
         """Start a session owned by this process. Raises SessionBusy, UsageError-like errors or the start error."""
         if self.local_bus is not None:
             raise SessionBusy({"pid": None, "owner": self.host_owner})
@@ -70,7 +71,18 @@ class Controller:
         if self._host is None or not self._host.running:
             self._host = SessionHost(self.data_dir, owner=self.host_owner)
         host = self._host
-        return await asyncio.to_thread(host.start, options, build)
+        return await asyncio.to_thread(lambda: host.start(options, build, overlay_page=overlay_page))
+
+    async def overlay(self, on: Optional[bool] = None, port: Optional[int] = None) -> Optional[dict]:
+        """Switch the session's overlay page (None only asks). None when no session answers."""
+        host = self._host
+        runtime = host.runtime if host is not None and host.running else None
+        if runtime is not None and runtime.overlay_page is not None:
+            return await asyncio.to_thread(runtime.overlay_page.switch, on, port)
+        try:
+            return await self._client().overlay(on, port)
+        except SessionUnavailable:
+            return None
 
     async def stop(self) -> dict:
         host = self._host
@@ -90,6 +102,20 @@ class Controller:
             await asyncio.sleep(0.05)
         return await self.status()
 
+    async def set(self, changes: dict) -> dict:
+        """Change the running session's settings, from any process. Answers at once.
+
+        Returns ``{"ok", "accepted", "applying", "status"}``; raises
+        SettingsRefused with the reason. The owner's socket serves the change
+        even when this process owns the session, so there is one code path.
+        """
+        try:
+            return await self._client().set(changes)
+        except SessionUnavailable:
+            if lock_holder(self.data_dir):
+                raise SettingsRefused("The session is still starting; try the change again in a moment.") from None
+            raise SettingsRefused(messages.NOT_RUNNING) from None
+
     def stop_local(self, timeout: float = 2.0) -> bool:
         """Synchronous stop for unload hooks. True when nothing local is left running."""
         host = self._host
@@ -108,8 +134,13 @@ class Controller:
             page.pop("type", None)
             return page
         except SessionUnavailable:
+            # No session to ask. The lines a consumer holds came from the
+            # session that just ended, possibly in another process, and stay
+            # valid until the next session starts (that session's hello makes
+            # the consumer resync, and its seq range resets it then). Only a
+            # consumer that holds nothing gets a reset.
             status = self._idle_event(await self.status())
-            return {"seq": status["seq"], "reset": after is None or after != status["seq"], "events": [status]}
+            return {"seq": status["seq"], "reset": after is None, "events": [status]}
 
     @staticmethod
     def _idle_event(status: dict) -> dict:

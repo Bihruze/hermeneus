@@ -19,7 +19,7 @@ import sys
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import APIRouter, Body, Query, WebSocket, WebSocketDisconnect
+from fastapi import APIRouter, Body, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
 _PACKAGE_NAME = "hermeneus_dashboard_package"
@@ -50,6 +50,8 @@ _doctor = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.doctor")
 _options = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.options")
 _runtime = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.runtime")
 _contracts = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.contracts")
+_ipc = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.ipc")
+_voice_catalog = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.tts.voice_catalog")
 
 router = APIRouter()
 plugin = _commands.Plugin(None, owner="gateway")
@@ -70,11 +72,18 @@ async def lines(after: Optional[int] = Query(None, ge=0)) -> dict:
     return await plugin.controller.lines(after)
 
 
+def _surface(request: Request) -> str:
+    """``desktop`` for a Desktop on this machine, ``remote`` otherwise: the overlay opens only on the Mac
+    whose screen the request comes from."""
+    host = request.client.host if request.client else ""
+    return "desktop" if host in ("127.0.0.1", "::1", "localhost") else "remote"
+
+
 @router.post("/start")
-async def start(body: Optional[dict] = Body(default=None)):
+async def start(request: Request, body: Optional[dict] = Body(default=None)):
     choices = _options.Choices.from_mapping(body or {})
     try:
-        return await plugin.start(choices)
+        return await plugin.start(choices, platform=_surface(request))
     except _runtime.SessionBusy as exc:
         return _error(409, str(exc), session=await plugin.controller.status())
     except _options.UsageError as exc:
@@ -90,6 +99,42 @@ async def stop() -> dict:
     return await plugin.controller.stop()
 
 
+@router.post("/settings")
+async def settings(body: Optional[dict] = Body(default=None)):
+    """Change the running session. Answers at once with the accepted change or a refusal."""
+    try:
+        changes = _options.changes_from_mapping(body or {})
+        return await plugin.set(changes)
+    except _options.UsageError as exc:
+        return _error(400, str(exc))
+    except _ipc.SettingsRefused as exc:
+        return _error(409, str(exc), session=await plugin.controller.status())
+
+
+@router.get("/voices")
+async def voices(refresh: bool = Query(False)):
+    try:
+        return await plugin.voices(refresh=refresh)
+    except _voice_catalog.VoiceListError as exc:
+        return _error(502, str(exc))
+
+
+@router.get("/overlay")
+async def overlay_status() -> dict:
+    return plugin.overlay.status()
+
+
+@router.post("/overlay")
+async def overlay(request: Request, body: Optional[dict] = Body(default=None)):
+    visible = (body or {}).get("visible")
+    if not isinstance(visible, bool):
+        return _error(400, 'body must be {"visible": true} or {"visible": false}')
+    try:
+        return await plugin.overlay.set_visible(visible, _surface(request))
+    except _commands.OverlayUnavailable as exc:
+        return _error(409, str(exc), **plugin.overlay.status())
+
+
 @router.get("/devices")
 async def devices(backend: Optional[str] = Query(None), source_id: Optional[str] = Query(None)) -> dict:
     return await asyncio.to_thread(_commands.devices_payload, backend, source_id)
@@ -98,6 +143,7 @@ async def devices(backend: Optional[str] = Query(None), source_id: Optional[str]
 @router.get("/doctor")
 async def doctor() -> dict:
     report = await asyncio.to_thread(_doctor.run, get_secret=_glue.get_secret, aux_config=_glue.aux_config())
+    report.checks.append(_commands.overlay_check(plugin.settings(), await plugin.controller.overlay()))
     return report.to_dict()
 
 

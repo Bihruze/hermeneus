@@ -13,8 +13,10 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .hermeneus_engine import overlay_page, overlay_settings
 from .hermeneus_engine.components import HermesServices
 from .hermeneus_engine.contracts import ChatMessage, TranslationError
+from .hermeneus_engine.messages import MODEL_FIX
 
 PLUGIN_NAME = "hermeneus"
 AUX_TASK = "live_translate"
@@ -33,6 +35,9 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "output_device": "",
     "voice_id": "",
     "context_segments": 3,
+    overlay_page.KEY_ENABLED: False,
+    overlay_page.KEY_PORT: overlay_page.DEFAULT_PORT,
+    **overlay_settings.DEFAULTS,
 }
 
 
@@ -104,33 +109,48 @@ def describe_llm_error(exc: BaseException, provider: str = "auto") -> str:
     if "insufficient_credits" in low or "requires available credits" in low or "insufficient credit" in low \
             or "balance is too low" in low or ("402" in low and "payment" in low):
         return (f"Translation failed: the model provider reports insufficient credits{where}. "
-                "Pick another model under auxiliary.live_translate.")
+                f"Add credits with that provider, or pick another model with: {MODEL_FIX}")
     if "401" in low or "403" in low or "invalid api key" in low or "unauthorized" in low or "authentication" in low:
         return (f"Translation failed: the model provider rejected the credentials{where}. "
-                "Check that provider with: hermes model")
+                "Check that provider's key, or pick another provider with: hermes model")
     if "429" in low or "rate limit" in low or "rate_limit" in low or "too many requests" in low:
         return (f"Translation failed: the model provider is rate limiting{where}. "
                 "Lines will translate again when it allows more requests.")
     if "model_not_found" in low or "does not exist" in low or "unknown model" in low:
         return (f"Translation failed: the model provider does not offer the configured model{where}. "
-                "Pick another model under auxiliary.live_translate.")
+                f"Pick another model with: {MODEL_FIX}")
     if len(text) > 160:
         text = text[:157] + "..."
     return f"Translation failed: {type(exc).__name__}: {text}" if text else f"Translation failed: {type(exc).__name__}."
 
 
 def _install_hint(extra: str) -> str:
+    """The command Hermes itself tells users to run for a missing extra (pm/extras.py:212-214).
+
+    Built here because ``pm.extras`` is not on the public plugin API list
+    (public-api.md names ``pm`` only), so the validator counts it as private.
+    """
+    return f"hermes pm install --extra {extra}"
+
+
+# api_mode of a provider profile -> (Hermes extra its client imports, the
+# module that extra provides). Extras: agent/anthropic_adapter.py:47-48
+# ensure_import("anthropic"), agent/bedrock_adapter.py:109-110
+# ensure_import("bedrock"). Modules: the anchors Hermes checks for those
+# extras, pm/extras.py:17-19 ("anthropic": "anthropic", "bedrock": "boto3").
+_API_MODE_EXTRAS = {"anthropic_messages": ("anthropic", "anthropic"), "bedrock_converse": ("bedrock", "boto3")}
+
+
+def _importable(module: str) -> bool:
+    """Whether ``module`` can be imported here, without importing it (the same test as pm/extras.py:78-89)."""
+    import importlib.util
+    import sys
+    if module in sys.modules:
+        return True
     try:
-        from pm.extras import install_hint
-        return install_hint(extra)
-    except Exception:
-        return f"hermes pm install --extra {extra}"
-
-
-# api_mode of a provider profile -> the Hermes extra its client imports
-# (agent/anthropic_adapter.py:47-48 ensure_import("anthropic"),
-#  agent/bedrock_adapter.py:109-110 ensure_import("bedrock")).
-_API_MODE_EXTRAS = {"anthropic_messages": "anthropic", "bedrock_converse": "bedrock"}
+        return importlib.util.find_spec(module) is not None
+    except (ImportError, ValueError):
+        return False
 
 
 def missing_model_extra(provider: str) -> Optional[str]:
@@ -148,13 +168,12 @@ def missing_model_extra(provider: str) -> Optional[str]:
         return None
     try:
         from providers import get_provider_profile
-        from pm.extras import available
     except Exception:
         return None
     profile = get_provider_profile(provider)
-    extra = _API_MODE_EXTRAS.get(getattr(profile, "api_mode", "") or "")
-    if extra and not available(extra):
-        return extra
+    needed = _API_MODE_EXTRAS.get(getattr(profile, "api_mode", "") or "")
+    if needed and not _importable(needed[1]):
+        return needed[0]
     return None
 
 

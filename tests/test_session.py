@@ -98,13 +98,14 @@ async def test_relabel_reaches_bus_stored_lines_and_scheduler(data_dir):
 async def test_stt_failed_status_reaches_consumers_and_releases_lock(data_dir):
     rt, rig = await started(data_dir)
     sub = rt.bus.subscribe()
-    rig.stt.emit(SttStatus(SttState.FAILED, message="The API key was rejected."))
+    rig.stt.emit(SttStatus(SttState.FAILED, message="The API key was rejected.", error_type="auth_error"))
     await asyncio.wait_for(rt.session.wait_closed(), 2)
     states = []
     while (e := await sub.get(timeout=0.2)) is not None:
         if e["type"] == "status":
             states.append((e["state"], e["message"]))
-    assert states[-1] == ("failed", "The API key was rejected.")
+    assert states[-1][0] == "failed"
+    assert states[-1][1].startswith("Speech to text: ElevenLabs rejected the API key. Check ELEVENLABS_API_KEY")
     await rt.wait()
     assert lock_holder(data_dir) is None
 
@@ -117,7 +118,9 @@ async def test_capture_error_from_backend_thread_fails_session(data_dir):
     t.start()
     t.join()
     await asyncio.wait_for(rt.session.wait_closed(), 2)
-    assert rt.bus.status() == {**rt.bus.status(), "state": "failed", "message": "BlackHole 2ch disappeared"}
+    assert rt.bus.status()["state"] == "failed"
+    assert rt.bus.status()["message"] == ("BlackHole 2ch disappeared. Start translation again, or pick another "
+                                          "source (see: hermes hermeneus devices).")
     await rt.close()
 
 
@@ -339,3 +342,49 @@ async def test_model_failure_reason_reaches_the_status_once(data_dir):
             messages.append(e["message"])
     assert messages.count("Translation failed: the model provider reports insufficient credits (nous).") == 1
     await rt.close()
+
+
+async def test_last_sentence_emitted_during_stt_close_reaches_the_bus(data_dir):
+    """F17: the STT client commits trailing audio inside close(); that line must not be lost."""
+    rt, rig = await started(data_dir)
+    await wait_for(lambda: rt.bus.status()["state"] == "live")
+    rig.stt.emit(PartialTranscript("and finally"))
+    await wait_for(lambda: any(l.original == "and finally" for l in rt.bus.lines()))
+    rig.stt.on_close = [CommittedTranscript("and finally the end.", segment_index=3)]
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await rt.close()
+    assert loop.time() - t0 < 1.5
+    assert rig.stt.close_timeout == 1.2
+    [line] = [l for l in rt.bus.lines() if l.original]
+    assert line.original == "and finally the end." and line.state == LineState.FAILED
+    assert line.error == "Not translated: the session stopped while this sentence arrived."
+    assert rt.bus.status()["state"] == "idle"
+
+
+async def test_stt_loop_is_cancelled_at_the_stop_deadline(data_dir):
+    rt, rig = await started(data_dir, make_rig(stt=FakeStt(close_delay=5.0)))
+    loop = asyncio.get_running_loop()
+    t0 = loop.time()
+    await rt.close()
+    assert loop.time() - t0 < 2.0
+    await asyncio.sleep(0)
+    assert rt.session._stt_task.cancelled()
+
+
+async def test_lines_of_a_session_owned_elsewhere_stay_after_it_ends(data_dir):
+    """F27: the pane asks the gateway for /lines?after=<last seq> after a CLI session ended."""
+    from hermeneus_engine.control import Controller
+    rt, rig = await started(data_dir)
+    gateway = Controller(lambda: data_dir, owner="gateway")
+    rig.stt.emit(CommittedTranscript("hello there", segment_index=0))
+    await wait_for(lambda: any(l.state == LineState.TRANSLATED for l in rt.bus.lines()))
+    page = await gateway.lines(None)
+    assert page["reset"] is True and any(e["type"] == "line" for e in page["events"])
+    seen = page["seq"]
+    await rt.close()
+    after = await gateway.lines(seen)
+    assert after["reset"] is False  # the pane keeps the lines it has
+    assert [e["type"] for e in after["events"]] == ["status"] and after["events"][0]["state"] == "idle"
+    fresh = await gateway.lines(None)
+    assert fresh["reset"] is True  # a pane that has nothing gets an empty snapshot

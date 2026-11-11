@@ -79,7 +79,13 @@ def wire_language(code: Optional[str]) -> Optional[str]:
 def idle_status(message: str = "") -> dict[str, Any]:
     """Status body for a machine with no session."""
     return {"state": "idle", "message": message, "source": None, "target_language": "",
-            "detected_language": None, "speak": False, "metrics": {}, "languages": languages_payload()}
+            "detected_language": None, "speak": False, "metrics": {}, "languages": languages_payload(),
+            **{k: (list(v) if isinstance(v, list) else v) for k, v in IDLE_SETTINGS.items()}}
+
+
+# Status fields for the settings that change while running (session.apply_settings).
+IDLE_SETTINGS: dict[str, Any] = {"mode": "subtitles", "subtitles": True, "voice_id": None,
+                                 "output_device": None, "applying": []}
 
 
 class Subscription:
@@ -203,13 +209,19 @@ class SubtitleBus:
 
     def publish_status(self, *, state: str, message: str = "", source: Optional[dict] = None,
                        target_language: str = "", speak: bool = False,
-                       detected_language: Optional[str] = None, metrics: Optional[dict] = None) -> dict:
+                       detected_language: Optional[str] = None, metrics: Optional[dict] = None,
+                       extra: Optional[dict] = None) -> dict:
+        """``extra`` holds the live settings fields (mode, subtitles, voice_id, output_device, applying)."""
         if state not in SESSION_STATES:
             raise ValueError(f"unknown session state {state!r}")
         with self._lock:
             event = {"type": "status", "seq": self._next(), "state": state, "message": message,
                      "source": source, "target_language": target_language, "detected_language": detected_language,
                      "speak": bool(speak), "metrics": dict(metrics or {}), "languages": languages_payload()}
+            settings = dict(IDLE_SETTINGS)
+            settings.update(extra or {})
+            for key, value in settings.items():
+                event.setdefault(key, list(value) if isinstance(value, list) else value)
             self._status = event
             self._fan_out(event)
             return event

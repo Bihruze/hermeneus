@@ -9,11 +9,11 @@ Hermeneus live-translates the audio playing on a Mac. It captures one app, or al
 | Surface | Where |
 | --- | --- |
 | `ctx.register_command("translate", ...)`: `/translate start\|stop\|status` | `__init__.py`, `commands.py` |
-| `ctx.register_cli_command("hermeneus", ...)`: `hermes hermeneus doctor\|devices\|run\|stop\|status` | `__init__.py`, `commands.py` |
+| `ctx.register_cli_command("hermeneus", ...)`: `hermes hermeneus doctor\|devices\|run\|stop\|status\|overlay-page` | `__init__.py`, `commands.py` |
 | `ctx.register_auxiliary_task("live_translate", ...)` and `ctx.llm.acomplete(..., task="live_translate")` | `__init__.py`, `glue.py` |
 | `agent.plugin_llm.PluginLlm` for the dashboard routes, which have no `ctx` | `glue.py` |
 | `requires_env: ELEVENLABS_API_KEY`, read with `agent.secret_scope.get_secret` (rule 11) | `plugin.yaml`, `glue.py` |
-| `config_schema` settings under `plugins.entries.hermeneus.settings`, read with `ctx.get_config` | `plugin.yaml`, `glue.py` |
+| `config_schema` settings under `plugins.entries.hermeneus.settings`, read with `ctx.get_config`; `hermes hermeneus overlay-page on\|off` writes `overlay_page` and `overlay_page_port` with `ctx.set_config` | `plugin.yaml`, `glue.py`, `commands.py` |
 | `plugins.plugin_storage.plugin_data_dir("hermeneus")` for the session socket and lock | `glue.py`, `hermeneus_engine/runtime.py` |
 | `hermes_cli.config.load_config_readonly` for settings and `auxiliary.live_translate` outside `ctx` | `glue.py` |
 | `ctx.on_unload` to stop a session the process owns | `__init__.py` |
@@ -31,7 +31,8 @@ The plugin registers no tools, hooks or middleware.
 - Permission: needs the macOS System Audio Recording permission for the app that runs Hermes (Terminal or another terminal app for the CLI, Hermes for Desktop). The fallback needs the Microphone permission for that app, because a virtual device is an input device.
 - Background process: the process tap runs one Python worker subprocess per session (`python -m hermeneus_engine.capture._tap_worker`, the interpreter Hermes runs on). It stops with the session (stdin closed, then SIGTERM, then SIGKILL, 5 seconds apart), when its stdin closes because Hermes exited, on SIGTERM, SIGINT or SIGHUP, on plugin unload and at interpreter exit. It inherits the Hermes process environment.
 - Background thread: one session at a time, run in-process on its own thread and event loop.
-- IPC: a Unix domain socket at `<HERMES_HOME>/plugin-data/hermeneus/run/sock`, mode 0600 inside a 0700 directory. No TCP port is opened. The Desktop pane uses routes mounted on Hermes's own server.
+- IPC: a Unix domain socket at `<HERMES_HOME>/plugin-data/hermeneus/run/sock`, mode 0600 inside a 0700 directory. The Desktop pane uses routes mounted on Hermes's own server.
+- Listening port, off by default: with `overlay_page` on (`hermes hermeneus overlay-page on`), the session owner process listens on 127.0.0.1:47821 (`overlay_page_port`; a busy port is an error, no fallback port) while the session runs, on its own thread. Loopback only, never 0.0.0.0. It serves one self-contained page and a Server-Sent Events stream of subtitle lines for OBS browser sources and second screens. Every path needs a per-session random token (`secrets.token_urlsafe(24)`), requests without it get 403, the Host header must be `127.0.0.1:<port>` or `localhost:<port>` (DNS rebinding), GET and HEAD only, no CORS headers, no control routes, a hash-based Content-Security-Policy. It stops with the session, on plugin unload and with the process. Code: `hermeneus_engine/overlay_page.py`, page: `hermeneus_engine/overlay_page.html`.
 - Shell commands: `system_profiler SPAudioDataType -json` (read only, argv list) to read audio device names and check that spoken output cannot feed back into the capture.
 - Files: a lock file `run/lock` next to the socket holds the owner pid, owner kind, start time and socket path, and is emptied when the session stops. Subtitles stay in memory (last 200 lines). No audio and no transcript is written to disk.
 - Third-party software: BlackHole 2ch or VB-Cable, for the fallback only, installed by the user from the official source. Nothing is bundled, downloaded or installed by the plugin.

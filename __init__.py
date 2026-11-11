@@ -23,7 +23,7 @@ def register(ctx) -> None:
                                 description=glue.AUX_DESCRIPTION)
     ctx.register_command(SLASH_COMMAND, plugin.slash,
                          description="Live translation of audio playing on this Mac",
-                         args_hint="start|stop|status")
+                         args_hint="start|set|stop|status|voices|overlay")
     ctx.register_cli_command(CLI_COMMAND, help="live translation of audio playing on this Mac",
                              setup_fn=setup_cli, handler_fn=cli_handler(plugin),
                              description=SLASH_USAGE)
