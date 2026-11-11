@@ -351,3 +351,15 @@ def test_missing_model_extra_checks_the_sdk_module(monkeypatch):
     assert glue.missing_model_extra("bedrock") == "bedrock"  # boto3 missing
     assert glue.missing_model_extra("openrouter") is None
     assert glue.missing_model_extra("auto") is None
+
+
+def test_model_preflight_unavailable_is_logged_and_shown_in_doctor(monkeypatch, caplog):
+    glue = pkg.glue
+    monkeypatch.setitem(sys.modules, "providers", None)  # the import raises ImportError
+    monkeypatch.setattr(glue, "_aux_provider", lambda: "anthropic")
+    with caplog.at_level("WARNING", logger="hermeneus.glue"):
+        glue.model_preflight()  # start is not blocked
+    assert "model preflight unavailable" in caplog.text
+    checks = [c for c in pkg.commands.model_checks(False) if c.name == "translation model feature"]
+    assert checks and checks[0].ok is None and checks[0].state == "warn"
+    assert checks[0].detail.startswith("model preflight unavailable")

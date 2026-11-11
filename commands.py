@@ -373,10 +373,14 @@ def model_checks(test_model: bool, llm: Any = None) -> list:
     checks = []
     provider = glue._aux_provider()
     extra = glue.missing_model_extra(provider)
+    unavailable = None if extra else glue.model_preflight_unavailable(provider)
     if extra:
         checks.append(doctor.Check("translation model feature", False,
                                    f"the live_translate provider ({provider}) needs Hermes' {extra!r} feature",
                                    f"run: {glue._install_hint(extra)}"))
+    elif unavailable:
+        checks.append(doctor.Check("translation model feature", None, f"model preflight unavailable: {unavailable}",
+                                   "update Hermes, then run doctor again"))
     if test_model:
         ok, detail = asyncio.run(glue.test_model(llm if llm is not None else glue.standalone_llm()))
         checks.append(doctor.Check("translation model (live call)", ok, detail,
