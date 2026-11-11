@@ -25,7 +25,13 @@ higher. After a gap (socket dropped, process restarted) it asks
 
 - `hello` opens every accepted socket. `session` holds the latest status
   fields and the latest `seq`.
-- `line`: the same `line_id` updates a line in place. `state` is `partial`
+- `line`: the same `line_id` updates a line in place. A line holds one
+  sentence: a sentence is sent for translation as soon as the partial
+  transcript shows it complete and unchanged (`hermeneus_engine/sentences.py`),
+  and the partial line keeps only the words after it. When Scribe commits the
+  segment, its remaining sentences become their own lines. A line that ended
+  up with no words (Scribe dropped them at commit) is sent as `translated`
+  with empty `original` and `translation`; consumers may hide it. `state` is `partial`
   (still changing), `committed` (final original, translation pending),
   `translated`, or `failed` (translation failed or was skipped to keep up; the
   original stays, `error` says why).
@@ -36,7 +42,10 @@ higher. After a gap (socket dropped, process restarted) it asks
   `stopping`, `failed`. `message` is plain language. `metrics` holds counters
   (`audio_chunks_in`, `audio_chunks_dropped`, `audio_dropped_ms`,
   `audio_queued_ms`, `lines_committed`, `lines_translated`, `lines_failed`,
-  `speak_errors`, `translation_backlog`, `uptime_s`).
+  `speak_errors`, `sentences_released_early`, `translation_backlog`,
+  `uptime_s`). When translations fail, `message` names the reason and the
+  fix once, again when it changes, and at most every 30 s otherwise; it is
+  cleared by the next translated line.
 - `status.languages` lists every subtitle target with `speakable` for spoken
   translation. `code`, `target_language`, `source_language` and
   `detected_language` use ISO 639-1 where one exists, otherwise ISO 639-3.

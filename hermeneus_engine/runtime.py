@@ -227,6 +227,11 @@ class SessionRuntime:
         if self._stop_requested is not None:
             self._stop_requested.set()
 
+    async def wait_stop_requested(self) -> None:
+        """Return when a stop was asked for, for example by ``{"op": "stop"}`` on the socket."""
+        assert self._stop_requested is not None, "start() was not called"
+        await self._stop_requested.wait()
+
     async def wait(self) -> None:
         """Return when the session ended by itself or a stop was requested, then clean up."""
         assert self.session is not None and self._stop_requested is not None
