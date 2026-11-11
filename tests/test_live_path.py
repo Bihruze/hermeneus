@@ -132,3 +132,53 @@ async def test_real_client_and_session_map_word_times_and_release_at_a_pause(ser
     finally:
         await rt.close()
         remove_tmpdir(data_dir)
+
+
+async def test_each_line_ends_with_its_timings_and_no_update_repeats_the_last(server):
+    """E23 and E24: an early-released line gets one more update when the diarized words arrive,
+    carrying speech_end_ms and capture_ms; no line event repeats the previous one for that line."""
+    text = "The council approved the plan."
+
+    async def script(conn):
+        await conn.started()
+        await wait_audio(conn, 1.0)
+        await conn.send("partial_transcript", text=text, words=timed(text, 0.1))
+        await wait_audio(conn, 2.2)
+        await conn.send("committed_transcript", text=text, segment_index=0)
+        await conn.send("diarized_transcript", segment_index=0, text=text, words=timed(text, 0.1))
+        await asyncio.sleep(0.2)
+        # Scribe can send the same diarized words again (W03 drain); nothing new to publish then.
+        await conn.send("diarized_transcript", segment_index=0, text=text, words=timed(text, 0.1))
+        await conn.closed_by_client.wait()
+
+    server.scripts = [script]
+    client = ScribeLiveClient(
+        SttConfig(base_url=server.url, commit_strategy=CommitStrategy.VAD, diarize=True,
+                  include_language_detection=False),
+        Keys("key-1"), tuning=ScribeTuning(drain_quiet=0.1, drain_timeout=1.0, language_wait=0.5),
+        rng=lambda: 1.0, stream_times=True)
+    data_dir = short_tmpdir()
+    rt = SessionRuntime(data_dir, options(sentence_pause_ms=300), make_rig(stt=client).build, owner="test")
+    try:
+        await rt.start()
+        sub = rt.bus.subscribe(maxsize=100000)
+        t0 = time.monotonic_ns()
+        for i in range(200):
+            due = t0 + i * 20_000_000
+            await asyncio.sleep(max(0.0, (due - time.monotonic_ns()) / 1e9))
+            rt.session._frames.put(CHUNK, due)
+        await asyncio.sleep(0.3)
+        events = []
+        while (e := await sub.get(timeout=0.1)) is not None:
+            if e["type"] == "line":
+                events.append(e)
+        mine = [e for e in events if e["line"]["original"] == text]
+        assert mine[-1]["line"]["state"] == "translated"
+        assert {"speech_end_ms", "capture_ms", "released_ms", "translated_ms"} <= set(mine[-1]["timings"])
+        translated = [e for e in mine if e["line"]["state"] == "translated"]
+        assert len(translated) == 2  # the translation, then the timing update from the diarized words
+        for a, b in zip(mine, mine[1:]):
+            assert (a["line"], a["timings"]) != (b["line"], b["timings"])
+    finally:
+        await rt.close()
+        remove_tmpdir(data_dir)

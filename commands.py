@@ -619,6 +619,11 @@ class _Printer:
         self.err = err
         self.last_state = ""
         self.speakers = SpeakerNumbers()
+        # A line is printed once, when it is final. Later updates of the same
+        # line (timings or the speaker from Scribe's diarization, which comes
+        # with the commit, seconds after an early translation) are not news on
+        # a terminal that cannot rewrite earlier output.
+        self.printed: dict = {}  # line_id -> None, oldest first, bounded
 
     def __call__(self, event: dict) -> None:
         if self.as_json:
@@ -631,8 +636,12 @@ class _Printer:
                 self.last_state = body.get("state", "")
                 print(f"-- {describe_status(body)}", file=self.err, flush=True)
         elif kind == "line":
+            line_id = (event.get("line") or {}).get("line_id")
             text = _format_line(event, self.speakers)
-            if text:
+            if text and line_id not in self.printed:
+                self.printed[line_id] = None
+                if len(self.printed) > 5000:
+                    self.printed.pop(next(iter(self.printed)))
                 print(text, file=self.out, flush=True)
         elif kind == "relabel":
             self.speakers.relabel(str(event.get("from")), str(event.get("to")))

@@ -835,6 +835,8 @@ class TranslationSession:
         return mapped[0]
 
     def _store(self, line: SubtitleLine) -> None:
+        if self._lines.get(line.line_id) == line:
+            return  # same content and timings as the last update of this line: nothing to publish
         self.latency.record_timings(line.line_id, line.timings_ns)
         released = line.timings_ns.get("released")
         if isinstance(released, int) and "released" not in self.latency.get(line.line_id):
