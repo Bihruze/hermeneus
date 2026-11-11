@@ -441,7 +441,13 @@ Everything is under `<HERMES_HOME>/plugin-data/hermeneus/` (by default `~/.herme
   - `positions.json.lock`: empty, and locked only while `positions.json` is written.
   - `overlay.log`: its error output, replaced at each start.
 
-Two processes write `positions.json`: the strip, and the process that serves the pane's overlay routes, which rewrites only its rows entries (`lines`, and the displays' `rows` when a rows pick in the pane or in Settings won over a drag). Both write under an exclusive lock on `positions.json.lock`, through a short-lived temp file of their own (`.positions-*.tmp`, renamed over the file at once). A writer waits at most 50 ms for the lock and otherwise skips that write, so the strip never freezes. No subtitle text is written anywhere. Nothing else is written.
+Two processes write `positions.json`: the strip, and the process that serves the pane's overlay routes, which rewrites only its rows entries (`lines`, and the displays' `rows` when a rows pick in the pane or in Settings won over a drag). Both write under an exclusive lock on `positions.json.lock`, through a short-lived temp file of their own (`.positions-*.tmp`, renamed over the file at once). A writer waits at most 50 ms for the lock and otherwise skips that write, so the strip never freezes.
+
+`setup.json`, `overlay/settings.json` and `overlay/theme.json` are each written to a short-lived `.tmp` file next to them (`setup.tmp`, `overlay/settings.tmp`, `overlay/theme.tmp`) that is renamed over the file at once.
+
+Settings you change in the pane, in Settings or with `hermes hermeneus overlay-page on|off|--port` are saved by Hermes in its own `config.yaml`, under `plugins.entries.hermeneus.settings`.
+
+No subtitle text is written anywhere. Nothing else is written.
 
 ### The permission it asks for
 

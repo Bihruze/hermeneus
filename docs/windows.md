@@ -1,6 +1,6 @@
 # Hermeneus on Windows (preview)
 
-This page holds the Windows details that used to be in the README. The README's [Platforms](../README.md#platforms) section has the summary.
+This page holds the Windows details. The README's [Platforms](../README.md#platforms) section has the summary.
 
 Status: implemented and reviewed against documentation, not yet run on a Windows machine. macOS is tested on real audio; Windows is not. The catalog entry lists macOS only, so `hermes plugins install hermeneus` refuses to install on Windows. To try the preview, install from the repository URL; Hermes v0.23.1 does not gate loading on the `platforms` field of `plugin.yaml`.
 
@@ -22,7 +22,7 @@ Status: implemented and reviewed against documentation, not yet run on a Windows
 
 | Area | macOS | Windows |
 |---|---|---|
-| Floating subtitle popup (`overlay`, `/translate overlay`, the pane's overlay switch) | NSPanel window | Not available. The command answers that the overlay is built for macOS; the six `overlay_*` settings have no effect. Use the Desktop pane or `hermes hermeneus overlay-page`. |
+| Floating subtitle popup (`overlay`, `/translate overlay`, the pane's overlay switch) | NSPanel window | Not available. The command answers that the overlay is built for macOS, and the `overlay` setting has no popup to open. The eight look settings (`overlay_text_size`, `overlay_max_lines`, `overlay_show_original`, `overlay_opacity`, `overlay_show_speaker`, `overlay_style`, `overlay_pace` and `overlay_reading_cps`) still set the overlay page. Use the Desktop pane or `hermes hermeneus overlay-page`. |
 | Source names | `app:<bundle id>`, for example `app:com.google.Chrome` | `app:<exe>`, for example `app:chrome.exe`. A `source` setting written on one system does not match on the other; `system` matches on both. |
 | App list | apps with audio, from Core Audio | apps with an audio session on the default output device. An app that plays only to another device is reachable with `--source system`. |
 | `pid:<pid>` source | that process | that process and its children. A pid of Hermeneus or one of its parents (for example Hermes Desktop) is refused, because its tree would include Hermeneus's own speech. |
@@ -34,13 +34,15 @@ Status: implemented and reviewed against documentation, not yet run on a Windows
 | Ctrl+C in `hermes hermeneus run` | loop signal handlers | `signal.signal` for SIGINT and SIGBREAK |
 | Wording | "this Mac" | "this PC" |
 
+The Windows endpoint file `run/sock` is written to `run/sock.tmp` first and renamed over it at once.
+
 ## Adding a Windows popup later
 
 The overlay's logic is platform neutral (`hermeneus_engine/overlay/app.py`, `model.py`, `placement.py`). A window backend implements the `Panel` protocol in `overlay/app.py`: `displays()`, `main_display()`, `measure(text, run, settings)`, `measure_original(text, settings)`, `strip_height(settings)`, `text_inset()`, `set_frame(frame)`, `render(view, settings)` and `set_visible(visible)`, and it calls `OverlayApp.scroll(rows, now)` and `back_to_live(now)` from its history controls. The display queue and the roll-up rows are platform neutral too (`overlay/pace.py`). A Windows panel would need a topmost, borderless, click-through-optional layered window (`WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`) that does not take focus, per-monitor DPI awareness, text measurement with DirectWrite or GDI, a message loop in the overlay subprocess, and `overlay/control.py` changes for Windows (it uses `fcntl`, `select` on a pipe and SIGTERM today). It is not built: it could not be tested without a Windows machine, and whether to add it is the owner's decision.
 
 ## Assumptions only a Windows run can confirm
 
-From the A4 review (COM and WASAPI), R1 to R19:
+From the review of the COM and WASAPI code, R1 to R24:
 
 - R1 ActivateAudioInterfaceAsync accepts the comtypes handler (it answers IAgileObject and now also aggregates the free-threaded marshaler) and ActivateCompleted runs.
 - R2 The ctypes PROPVARIANT and parameter blob are accepted and activation returns a real IAudioClient.
@@ -67,7 +69,7 @@ From the A4 review (COM and WASAPI), R1 to R19:
 - R23 Spoken translation opens the WASAPI entry of the output device at 24 kHz with `WasapiSettings(auto_convert=True)` and plays at the right pitch and speed, whatever the mixer rate is (sounddevice: auto_convert "is in particular required for streams not matching the system mixer sample rate").
 - R24 A tick thread still inside an activation when capture stops keeps running until that activation returns or the worker exits; the stream it gets is closed, never started, and the worker still exits within the parent's 5 s stop window.
 
-From the A5 review (parity and packaging):
+From the review of parity and packaging:
 
 - Hermes on Windows puts plugin dependencies on `sys.path` the way it does on macOS, so the worker finds them through the parent's search path.
 - PortAudio lists each endpoint once per host API under the same name, and the WASAPI entry plays (the device list shape is modelled, not read from a Windows machine).
