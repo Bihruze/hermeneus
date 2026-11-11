@@ -15,6 +15,7 @@ import fcntl
 import json
 import os
 import tempfile
+import time
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Callable, Optional
@@ -128,7 +129,12 @@ class Positions:
     ``lines.seen`` is the last ``overlay_max_lines`` value the overlay was handed, so a change made while it was
     closed is recognised. ``lines.wanted`` is the rows the user last dragged the strip to, until that value comes
     back as the setting: the Desktop pane reads it (``GET /overlay`` answers ``resized``) and saves it the way its
-    own look controls do."""
+    own look controls do.
+
+    The process serving ``GET /overlay`` may settle ``lines`` and clear ``rows`` on disk while the overlay runs
+    (``wanted_rows``). So a save merges three ways, under the lock: for ``seen``, ``wanted`` and each display's
+    ``rows``, a value the overlay has not changed since it last read or wrote the file takes what is on disk; a
+    value it changed is its own. The overlay never writes a settled hand-back back from an older copy."""
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
@@ -139,26 +145,30 @@ class Positions:
         self._load()
 
     def _load(self) -> None:
-        try:
-            data = json.loads(self.path.read_text(encoding="utf-8"))
-        except (OSError, ValueError):
+        data = _read(self.path)
+        if data:
+            self.last = str(data.get("last") or "")
+            self.spots = _spots(data)
+            self.seen, self.wanted = _lines(data)
+        self._base = self._shared()
+
+    def _shared(self) -> tuple:
+        """The values another process may change: ``seen``, ``wanted`` and the rows per display."""
+        return self.seen, self.wanted, {k: s.rows for k, s in self.spots.items()}
+
+    def _merge(self, data: dict) -> None:
+        if not data:
             return
-        if not isinstance(data, dict):
-            return
-        self.last = str(data.get("last") or "")
-        for key, raw in (data.get("displays") or {}).items():
-            if isinstance(raw, dict):
-                try:
-                    rows = raw.get("rows")
-                    self.spots[str(key)] = Spot(_clamp(float(raw.get("cx", 0.5)), 0, 1),
-                                                _clamp(float(raw.get("bottom", DEFAULT_BOTTOM)), 0, 1),
-                                                _clamp(float(raw.get("width", DEFAULT_WIDTH)), 0.1, 1),
-                                                None if rows is None or isinstance(rows, bool) else clamp_rows(rows))
-                except (TypeError, ValueError):
-                    continue
-        lines = data.get("lines")
-        if isinstance(lines, dict):
-            self.seen, self.wanted = _rows_or_none(lines.get("seen")), _rows_or_none(lines.get("wanted"))
+        seen, wanted, rows = self._base
+        disk_seen, disk_wanted = _lines(data)
+        disk_spots = _spots(data)
+        self.seen = _take(self.seen, seen, disk_seen)
+        self.wanted = _take(self.wanted, wanted, disk_wanted)
+        for key, spot in self.spots.items():
+            if key in disk_spots and key in rows:
+                merged = _take(spot.rows, rows[key], disk_spots[key].rows)
+                if merged != spot.rows:
+                    self.spots[key] = replace(spot, rows=merged)
 
     def spot(self, key: str) -> Spot:
         return self.spots.get(key, Spot())
@@ -196,8 +206,19 @@ class Positions:
         self.save()
 
     def save(self) -> bool:
-        """Write the whole file (the overlay process owns it). False when it could not be written: the overlay
-        keeps drawing with what it has in memory."""
+        """Write the file (the overlay process owns it), merged with what another process settled on disk. False
+        when it could not be written, or the lock was not free in time: the overlay keeps drawing with what it
+        has in memory and the next save writes it."""
+        try:
+            with locked(self.path):
+                self._merge(_read(self.path))
+                _write(self.path, self._body())
+        except OSError:
+            return False
+        self._base = self._shared()
+        return True
+
+    def _body(self) -> dict:
         displays = {}
         for k, s in self.spots.items():
             entry = {"cx": round(s.cx, 4), "bottom": round(s.bottom, 4), "width": round(s.width, 4)}
@@ -208,27 +229,55 @@ class Positions:
         lines = {k: v for k, v in (("seen", self.seen), ("wanted", self.wanted)) if v is not None}
         if lines:
             body["lines"] = lines
-        try:
-            with locked(self.path):
-                _write(self.path, body)
-        except OSError:
-            return False
-        return True
+        return body
+
+
+def _take(ours, base, theirs):
+    """Three-way merge of one value: the other process's change wins only where this one changed nothing."""
+    return theirs if ours == base and theirs != base else ours
+
+
+def _spots(data: dict) -> dict[str, Spot]:
+    spots = {}
+    for key, raw in (data.get("displays") or {}).items():
+        if isinstance(raw, dict):
+            try:
+                rows = raw.get("rows")
+                spots[str(key)] = Spot(_clamp(float(raw.get("cx", 0.5)), 0, 1),
+                                       _clamp(float(raw.get("bottom", DEFAULT_BOTTOM)), 0, 1),
+                                       _clamp(float(raw.get("width", DEFAULT_WIDTH)), 0.1, 1),
+                                       None if rows is None or isinstance(rows, bool) else clamp_rows(rows))
+            except (TypeError, ValueError):
+                continue
+    return spots
 
 
 def lock_file(path: Path) -> Path:
     return Path(path).with_name(Path(path).name + ".lock")
 
 
+LOCK_WAIT_S = 0.05  # the longest a writer waits for the lock; the overlay's main thread never blocks longer
+
+
 @contextlib.contextmanager
-def locked(path: Path):
+def locked(path: Path, wait: float = LOCK_WAIT_S):
     """An exclusive ``flock`` on ``positions.json.lock`` next to ``path``, held by every writer of the positions
-    file (the overlay process and the process serving ``GET /overlay``) around its read-modify-write."""
+    file (the overlay process and the process serving ``GET /overlay``) around its read-modify-write. Tries
+    without blocking, with short retries for at most ``wait`` seconds, then raises ``TimeoutError`` (an
+    ``OSError``): the caller skips that write instead of freezing."""
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
     fd = os.open(lock_file(path), os.O_RDWR | os.O_CREAT, 0o600)
     try:
-        fcntl.flock(fd, fcntl.LOCK_EX)
+        deadline = time.monotonic() + wait
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() >= deadline:
+                    raise TimeoutError(f"{lock_file(path)} is held by another process") from None
+                time.sleep(0.002)
         yield
     finally:
         os.close(fd)  # closing releases the lock

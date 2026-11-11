@@ -569,3 +569,90 @@ def test_each_handle_has_a_cursor():
     assert panel_mac.handle_cursor("top") == NSCursor.resizeUpDownCursor()
     assert panel_mac.handle_cursor("corner") is not None
     assert panel_mac.handle_cursor("move") == NSCursor.openHandCursor()
+
+
+# -- two processes on positions.json (A8-13, the lock wait) ----------------------------
+
+PLUGIN_POLL = r'''
+import asyncio, json, sys
+from pathlib import Path
+from hermeneus_engine.overlay.service import OverlayService
+async def st(): return {"state": "live"}
+svc = OverlayService(lambda: Path(sys.argv[1]), lambda: {"overlay_max_lines": int(sys.argv[2])}, st,
+                     status_fn=lambda _d: {"visible": True, "pid": 1})
+print(json.dumps(svc.status().get("resized")))
+'''
+
+LOCK_HOLDER = r'''
+import sys, time
+from hermeneus_engine.overlay.placement import locked
+with locked(sys.argv[1]):
+    print("held", flush=True)
+    time.sleep(30)
+'''
+
+
+def _python(code, *args, **kw):
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+    root = str(Path(__file__).resolve().parents[1])
+    env = {**os.environ, "PYTHONPATH": root}
+    return subprocess.Popen([sys.executable, "-c", code, *map(str, args)], env=env, cwd=root, text=True,
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kw)
+
+
+def plugin_poll(data_dir, setting):
+    proc = _python(PLUGIN_POLL, data_dir, setting)
+    out, err = proc.communicate(timeout=30)
+    assert proc.returncode == 0, err
+    return json.loads(out)
+
+
+def test_an_open_overlay_with_an_older_copy_never_revives_a_settled_drag(data_dir):
+    """A8-13 (re-audit probe a8_twoproc T2): the plugin runs in its own process. Drag 4; the user picks 3 (the
+    plugin settles); the overlay, not yet having read settings.json, saves a move; the user picks back 2."""
+    _, app = make_in(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(4)), True)
+    assert plugin_poll(data_dir, 3) is None
+    path = control.positions_file(data_dir)
+    assert json.loads(path.read_text())["lines"] == {"seen": 3}
+    app.moved(frame_for(Spot(0.3, 0.2, 0.5), D1, app.frame.h))  # whole file from the overlay's older copy
+    body = json.loads(path.read_text())
+    assert body["lines"] == {"seen": 3} and "rows" not in body["displays"][D1.key]
+    assert body["displays"][D1.key]["bottom"] == pytest.approx(0.2)  # the move itself is kept
+    assert plugin_poll(data_dir, 2) is None
+    app.apply_settings(ovs.OverlaySettings(max_lines=2, text_size=34))  # the overlay's tick reads the setting
+    assert app.settings.max_lines == 2 and plugin_poll(data_dir, 2) is None
+
+
+def test_a_new_drag_after_a_settle_is_the_overlays_own(data_dir):
+    """The merge keeps what the overlay changed itself: a drag made after the plugin settled is not undone."""
+    _, app = make_in(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(4)), True)
+    assert plugin_poll(data_dir, 3) is None  # the pick of 3 won on disk
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(5)), True)
+    body = json.loads(control.positions_file(data_dir).read_text())
+    assert body["displays"][D1.key]["rows"] == 5 and body["lines"]["wanted"] == 5
+
+
+def test_a_held_lock_never_blocks_the_overlay(data_dir):
+    """Another process holds the lock and never lets go: the overlay's save gives up within about 50 ms and
+    returns False, and the next save after the holder is gone writes everything."""
+    import time
+    from hermeneus_engine.overlay import placement
+    path = control.positions_file(data_dir)
+    pos = Positions(path)
+    holder = _python(LOCK_HOLDER, path)
+    try:
+        assert holder.stdout.readline().strip() == "held"
+        pos.spots[D1.key] = Spot(0.3, 0.2, 0.5, 4)
+        start = time.monotonic()
+        assert pos.save() is False
+        assert time.monotonic() - start < placement.LOCK_WAIT_S + 0.1
+        assert wanted_rows(path, 2) is None  # the plugin side gives up too
+    finally:
+        holder.kill()
+        holder.communicate(timeout=10)
+    assert pos.save() is True and Positions(path).spot(D1.key) == Spot(0.3, 0.2, 0.5, 4)
