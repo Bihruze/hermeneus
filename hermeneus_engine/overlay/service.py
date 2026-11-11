@@ -50,12 +50,14 @@ class OverlayService:
         """Open or not, and ``armed``: whether the ``overlay`` setting opens it with the next session.
 
         ``resized`` is there after the user dragged the strip to a number of rows the settings do not hold yet:
-        ``{"max_lines": n}``. The Desktop pane saves it as ``overlay_max_lines``, as its look controls do."""
+        ``{"max_lines": n}``. The Desktop pane saves it as ``overlay_max_lines``, as its look controls do. It is
+        offered only while the setting is the value the overlay last saw, so a later pick in the pane or in Settings
+        always wins over an older drag (``placement.wanted_rows``)."""
         look = from_settings(self._settings())
         settings = {k: v for k, v in asdict(look).items() if k != "auto"}
         out = {**self._status_fn(self.data_dir), "armed": look.auto, "settings": settings}
-        wanted = wanted_rows(control.positions_file(self.data_dir))
-        if wanted is not None and wanted != look.max_lines:
+        wanted = wanted_rows(control.positions_file(self.data_dir), look.max_lines)
+        if wanted is not None:
             out["resized"] = {"max_lines": wanted}
         return out
 

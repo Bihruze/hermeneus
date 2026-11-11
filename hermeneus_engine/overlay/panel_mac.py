@@ -4,7 +4,7 @@ The strip is a borderless ``NSPanel`` with ``NSWindowStyleMaskNonactivatingPanel
 that ignores the mouse, so every click goes to the app underneath. Small
 child panels take the mouse: the grip at the left edge moves the strip (right
 click opens a menu: width presets, reset position, hide; a double click
-gives back the default size), the handle at the right edge resizes its width,
+gives back the default width and lets the rows follow the setting), the handle at the right edge resizes its width,
 the handle at the top edge its height and the one in the top right corner
 both (the bottom edge stays put; on release the height snaps to whole rows,
 ``OverlayApp.resized``), and the history tab above the strip's right end
@@ -239,6 +239,7 @@ class HermeneusOverlayHandleView(HermeneusOverlayOwnedView):
             self.start = None
             self.owner.on_reset_size()
             return
+        self.owner._drag_began(self.role)
         self.start = (NSEvent.mouseLocation(), self.owner.strip.frame())
 
     def mouseDragged_(self, _event):
@@ -361,6 +362,8 @@ class MacPanel:
         self.on_moved, self.on_width, self.on_reset, self.on_hide = on_moved, on_width, on_reset, on_hide
         self.on_scroll, self.on_live = on_scroll, on_live
         self.on_resized, self.on_reset_size = on_resized, on_reset_size
+        self._held: Optional[str] = None  # the handle the mouse holds, if any: no refit moves the strip meanwhile
+        self._drag_frame: Optional[Rect] = None  # the strip as last dragged, read on release
         self.strings = Strings()
         self._wheel = 0.0  # scroll distance not yet a whole row
         self.view = View()
@@ -493,6 +496,8 @@ class MacPanel:
         return PAD_X
 
     def set_frame(self, frame: Rect) -> None:
+        if self._held is not None:  # the user holds a handle: the drag decides the frame until release
+            return
         target = NSMakeRect(frame.x, frame.y, frame.w, frame.h)
         current = self.strip.frame()
         moving_only = abs(current.size.height - frame.h) < 0.5 and abs(current.size.width - frame.w) < 0.5
@@ -565,6 +570,8 @@ class MacPanel:
         NSAnimationContext.runAnimationGroup_completionHandler_(run, done)
 
     def set_visible(self, visible: bool) -> None:
+        if not visible:
+            self._held, self._drag_frame = None, None  # a hidden handle gets no mouse up
         handles = (self.grip, self.sizer, self.top_handle, self.corner)
         if visible:
             self.strip.orderFrontRegardless()  # never makeKeyAndOrderFront: no focus change
@@ -795,9 +802,14 @@ class MacPanel:
 
     # -- interaction --------------------------------------------------------------------
 
+    def _drag_began(self, role: str) -> None:
+        self._held, self._drag_frame = role, None
+
     def _dragged(self, role: str, start, dx: float, dy: float) -> None:
+        self._held = role
         if role == "move":
             self.strip.setFrameOrigin_((start.origin.x + dx, start.origin.y + dy))
+            self._drag_frame = Rect(start.origin.x + dx, start.origin.y + dy, start.size.width, start.size.height)
             return
         # The height follows the mouse while dragging; it snaps to whole rows on release (``OverlayApp.resized``).
         screen = self.strip.screen() or NSScreen.mainScreen()
@@ -809,10 +821,15 @@ class MacPanel:
                              self.strip_height(self.settings, MAX_LINES_MAX, original))
         self.strip.setFrame_display_(NSMakeRect(frame.x, frame.y, frame.w, frame.h), True)
         self._place_handles(frame)
+        self._drag_frame = frame
 
     def _drag_ended(self, role: str = "move") -> None:
-        f = self.strip.frame()
-        rect = Rect(f.origin.x, f.origin.y, f.size.width, f.size.height)
+        """The mouse let go: snap from the frame the user last dragged to, whatever arrived meanwhile."""
+        rect = self._drag_frame
+        if rect is None:
+            f = self.strip.frame()
+            rect = Rect(f.origin.x, f.origin.y, f.size.width, f.size.height)
+        self._held, self._drag_frame = None, None
         if role == "move":
             self.on_moved(rect)
         else:

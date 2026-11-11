@@ -177,6 +177,12 @@ class Positions:
         self.spots[key] = replace(self.spot(key), rows=None if rows is None else clamp_rows(rows))
         self.save()
 
+    def clear_rows(self) -> None:
+        """Every display follows the setting again (a rows change from the pane or the config)."""
+        if any(s.rows is not None for s in self.spots.values()):
+            self.spots = {k: replace(s, rows=None) for k, s in self.spots.items()}
+            self.save()
+
     def set_lines(self, *, seen: Optional[int] = None, wanted: Optional[int] = None, clear_wanted: bool = False) -> None:
         if seen is not None:
             self.seen = clamp_rows(seen)
@@ -212,7 +218,18 @@ def _rows_or_none(value) -> Optional[int]:
         return None
 
 
-def wanted_rows(path: Path) -> Optional[int]:
+def wanted_rows(path: Path, setting: Optional[int] = None) -> Optional[int]:
     """The rows the user dragged the overlay to and the setting does not hold yet, or None. Read by the plugin's
-    process (``OverlayService.status``); only the overlay process writes the file."""
-    return Positions(path).wanted
+    process (``OverlayService.status``) with the current ``overlay_max_lines`` as ``setting``.
+
+    A drag is handed back only while the setting is still the value the overlay last saw (``lines.seen``): once
+    the user picked rows in the pane or in Settings, that pick wins and a stale drag is never offered again. When
+    the setting already holds the dragged rows, the hand-back is done here too (``wanted`` cleared, ``seen`` set),
+    so it ends even while the overlay is closed."""
+    p = Positions(path)
+    if p.wanted is None or setting is None:
+        return p.wanted if setting is None else None
+    if p.wanted == setting:
+        p.set_lines(seen=setting, clear_wanted=True)
+        return None
+    return p.wanted if p.seen == setting else None

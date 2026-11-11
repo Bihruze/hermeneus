@@ -10,7 +10,7 @@ from __future__ import annotations
 from dataclasses import replace
 from typing import Optional, Protocol
 
-from ..overlay_settings import DEFAULTS, KEY_MAX_LINES, OverlaySettings
+from ..overlay_settings import OverlaySettings
 from . import pace
 from .model import PENDING, TRANSLATED, OverlayModel, Run, Strings, View, fit_head
 from .placement import (DEFAULT_WIDTH, Display, Positions, Rect, Spot, display_at, frame_for, snap_rows,
@@ -39,7 +39,6 @@ class OverlayApp:
         self.positions = positions
         self.config = settings  # as handed to the overlay (settings.json, from the plugin settings)
         self.settings = settings  # what it draws with: ``config`` with the rows chosen on this display
-        self._setting_wins = False
         self._config_arrived(settings)
         self.model = OverlayModel()
         self.frame: Optional[Rect] = None
@@ -57,9 +56,9 @@ class OverlayApp:
     # -- placement ----------------------------------------------------------------
 
     def _config_arrived(self, config: OverlaySettings) -> None:
-        """Settings were handed over (at start or from the pane). ``overlay_max_lines`` wins over rows dragged on
-        this display only when it changed since the overlay last saw it; when it is the value a drag handed
-        back, the hand-back is done."""
+        """Settings were handed over (at start or from the pane). ``overlay_max_lines`` wins over dragged rows
+        when it changed since the overlay last saw it: then every display follows it again, and a drag not yet
+        handed back is dropped. When it is the value a drag handed back, the hand-back is done."""
         value, p = config.max_lines, self.positions
         if p.wanted is not None and value == p.wanted:
             p.set_lines(seen=value, clear_wanted=True)
@@ -67,17 +66,13 @@ class OverlayApp:
             p.set_lines(seen=value)
         elif value != p.seen:
             p.set_lines(seen=value, clear_wanted=True)
-            self._setting_wins = True
+            p.clear_rows()
 
     def _rows_here(self) -> Optional[int]:
         return self.positions.spot(self.display.key).rows if self.display is not None else None
 
     def _use_display(self, display: Display) -> None:
         self.display = display
-        if self._setting_wins:  # the pane changed the rows: this display follows the setting again
-            self._setting_wins = False
-            if self.positions.spot(display.key).rows is not None:
-                self.positions.set_rows(display.key, None)
         rows = self._rows_here()
         self.settings = replace(self.config, max_lines=rows if rows is not None else self.config.max_lines)
 
@@ -98,6 +93,7 @@ class OverlayApp:
         self._use_display(display)
         self.frame = frame_for(spot, display, frame.h)
         self.panel.set_frame(self.frame)
+        self._fit_height(self.view)  # text that arrived while the strip was held
 
     def row_height(self, rows: int) -> float:
         """The strip's height for ``rows`` rows with the current look (and the original line when shown)."""
@@ -113,11 +109,13 @@ class OverlayApp:
         self._store_size(display, spot_for(frame, display, rows), rows_changed)
 
     def reset_size(self) -> None:
-        """Double click on the grip: the default width and rows, in the same place."""
+        """Double click on the grip: the default width, in the same place, and the rows follow the
+        ``overlay_max_lines`` setting again. Nothing is handed back, so the setting is never rewritten."""
         if self.display is None or self.frame is None:
             return
-        spot = replace(spot_for(self.frame, self.display), width=DEFAULT_WIDTH, rows=DEFAULTS[KEY_MAX_LINES])
-        self._store_size(self.display, spot, True)
+        if self.positions.wanted is not None:
+            self.positions.set_lines(clear_wanted=True)
+        self._store_size(self.display, replace(spot_for(self.frame, self.display), width=DEFAULT_WIDTH), False)
 
     def _store_size(self, display: Display, spot: Spot, rows_changed: bool) -> None:
         self.positions.remember(display.key, spot)
@@ -159,10 +157,12 @@ class OverlayApp:
     _now = 0.0
 
     def _fit_height(self, view: View) -> None:
-        """The strip follows its content up to max lines, keeping its bottom edge."""
+        """The strip follows its content up to max lines, keeping its bottom edge. Rows the user dragged the
+        strip to on this display are held: the strip keeps that height, with empty rows at the top until text
+        fills them, so a drag is never undone. Rows from the setting alone are a maximum."""
         if view.empty or self.frame is None or self.display is None:
             return
-        rows = len(view.lines) or 1
+        rows = max(len(view.lines) or 1, self._rows_here() or 0)
         height = self.panel.strip_height(self.settings, rows, bool(view.original))
         if abs(height - self.frame.h) < 0.5:
             return

@@ -10,7 +10,7 @@ from pipeline_fakes import remove_tmpdir, short_tmpdir
 from hermeneus_engine import overlay_settings as ovs
 from hermeneus_engine.overlay import control, pace
 from hermeneus_engine.overlay.app import HISTORY_ROWS, OverlayApp
-from hermeneus_engine.overlay.placement import (MIN_WIDTH_PT, Display, Positions, Rect, Spot,
+from hermeneus_engine.overlay.placement import (MIN_WIDTH_PT, Display, Positions, Rect, Spot, frame_for,
                                                 resize_frame, snap_rows, wanted_rows)
 from hermeneus_engine.overlay.service import OverlayService
 
@@ -251,24 +251,140 @@ def test_service_reports_resized_until_the_setting_holds_it(data_dir):
     assert "resized" not in OverlayService(lambda: data_dir / "none", lambda: {}, status).status()
 
 
-def make_in(data_dir):
+def make_in(data_dir, **settings):
     """An app using the real positions file under the overlay directory, as the overlay process does."""
     control.overlay_dir(data_dir)
     panel = FakePanel()
-    app = OverlayApp(panel, Positions(control.positions_file(data_dir)), ovs.OverlaySettings())
+    app = OverlayApp(panel, Positions(control.positions_file(data_dir)), ovs.OverlaySettings(**settings))
     app.place()
     return panel, app
 
 
+def service(data_dir, settings, visible=False):
+    async def status():
+        return {"state": "idle"}
+
+    return OverlayService(lambda: data_dir, lambda: settings, status,
+                          status_fn=lambda _d: {"visible": visible, "pid": 1 if visible else None})
+
+
+# -- a later rows choice always wins over an older drag (A8-1, A8-2, A8-5) -----------
+
+def test_a_stale_drag_never_overwrites_a_later_pick_while_the_overlay_is_closed(data_dir):
+    """A8-1 (auditor probe P1): the pane saved a drag of 4 with the overlay closed, then the user picked 3."""
+    control.overlay_dir(data_dir)
+    path = control.positions_file(data_dir)
+    path.write_text(json.dumps({"last": "", "displays": {}, "lines": {"seen": 2, "wanted": 4}}))
+    settings = {"overlay_max_lines": 4}  # the pane saved the drag
+    svc = service(data_dir, settings)
+    assert svc.status().get("resized") is None
+    assert json.loads(path.read_text())["lines"] == {"seen": 4}  # the hand-back ended on the plugin side
+    settings["overlay_max_lines"] = 3  # later the user picks 3, the overlay still closed
+    assert svc.status().get("resized") is None
+    assert svc.apply().get("resized") is None
+    settings["overlay_max_lines"] = 2  # and back to the value the overlay saw before the drag
+    assert svc.status().get("resized") is None
+    _, app = make_in(data_dir, max_lines=2)  # the overlay opens: the pick wins
+    assert app.settings.max_lines == 2
+
+
+def test_a_pick_made_before_the_open_overlay_read_it_wins(data_dir):
+    """A8-2 (auditor probe P1b): wanted 4 is pending and the user picks 3 before the overlay's next tick."""
+    _, app = make_in(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(4)), True)
+    assert service(data_dir, {"overlay_max_lines": 2}, visible=True).status()["resized"] == {"max_lines": 4}
+    assert service(data_dir, {"overlay_max_lines": 3}, visible=True).status().get("resized") is None
+    app.apply_settings(ovs.OverlaySettings(max_lines=3))  # the overlay reads settings.json
+    assert app.settings.max_lines == 3 and app.positions.wanted is None
+
+
+def test_a_rows_change_from_the_pane_applies_to_every_display(data_dir):
+    """A8-5 (auditor probe P3): rows dragged on another display do not come back after a pane change."""
+    a, b = Display("1:A", Rect(0, 0, 1440, 878)), Display("2:B", Rect(-1920, 120, 1920, 1055))
+    panel = FakePanel([a, b])
+    app = OverlayApp(panel, Positions(data_dir / "p.json"), ovs.OverlaySettings(max_lines=2))
+    app.place()
+    app.moved(frame_for(Spot(0.5, 0.1, 0.5), b, height(2)))
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(5)), True)
+    app.apply_settings(ovs.OverlaySettings(max_lines=5))  # the pane saved the drag
+    app.moved(frame_for(Spot(0.5, 0.1, 0.5), a, app.frame.h))
+    app.apply_settings(ovs.OverlaySettings(max_lines=2))  # then the user picked 2 in the pane, on display A
+    assert app.settings.max_lines == 2
+    panel._displays = [b]  # A unplugged
+    app.screens_changed()
+    assert app.display.key == b.key and app.settings.max_lines == 2
+    assert all("rows" not in d for d in stored(data_dir)["displays"].values())
+
+
+# -- a drag is held (A8-4) and never undone by text arriving mid-drag (A8-3) ---------
+
+def test_the_dragged_height_is_held_with_empty_rows_until_text_fills_them(data_dir):
+    panel, app = make(data_dir)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(5)), True)
+    feed(app, 1)
+    assert len(panel.renders[-1][0].lines) == 1 and panel.frames[-1].h == height(5)
+    app.apply_settings(ovs.OverlaySettings(max_lines=4))  # a pane pick: a maximum, the strip fits its text
+    feed(app, 1, start=50.0)
+    assert app.settings.max_lines == 4 and panel.frames[-1].h == height(1)
+
+
+def test_a_move_refits_the_text_that_arrived_while_the_grip_was_held(data_dir):
+    panel, app = make(data_dir)
+    feed(app, 1)
+    app.moved(Rect(300, 300, app.frame.w, height(4)))  # the drag started from a taller strip
+    assert panel.frames[-1].h == height(1)
+
+
+def test_text_arriving_mid_drag_does_not_move_the_held_strip():
+    """A8-3 (auditor probe a8_middrag_refresh): offscreen, no window is ordered on screen, no events."""
+    pytest.importorskip("AppKit")
+    from hermeneus_engine.overlay import panel_mac
+    path = short_tmpdir()
+    panel_mac.start_application()
+    app = None
+    panel = panel_mac.MacPanel(motion=False, on_resized=lambda f, r: app.resized(f, r))
+    panel.set_visible = lambda v: None
+    panel._sync_tabs = lambda v: None
+    try:
+        app = OverlayApp(panel, Positions(path / "positions.json"), ovs.OverlaySettings())
+        app.place()
+        t = feed(app, 1)
+        start = panel.strip.frame()
+        target = panel.strip_height(app.settings, 5, False)
+        panel._dragged("top", start, 0, target - start.size.height)  # the user holds the top handle at 5 rows
+        app.on_event({"type": "line", "seq": 99, "line": {"line_id": "late", "state": "translated",
+                                                          "original": "x", "translation": "Bir cümle daha geldi.",
+                                                          "speaker_id": "s1:speaker_0"}}, t)
+        for i in range(30):
+            app.refresh(t + i * 0.1)  # the 0.1 s tick
+        assert panel.strip.frame().size.height == target
+        panel._drag_ended("top")  # let go without moving again
+        assert app.settings.max_lines == 5
+        assert Positions(path / "positions.json").spot(app.display.key).rows == 5
+        assert panel.strip.frame().size.height == target  # held after release too
+    finally:
+        panel.close()
+        remove_tmpdir(path)
+
+
 # -- reset, history, pace -----------------------------------------------------------
 
-def test_double_click_reset_gives_default_width_and_rows_in_place(data_dir):
+def test_double_click_reset_gives_default_width_and_the_setting_rows_in_place(data_dir):
     panel, app = make(data_dir)
     app.resized(Rect(100, 200, 1200, height(5)), True)
     app.reset_size()
     spot = Positions(data_dir / "p.json").spot(D1.key)
-    assert (spot.width, spot.rows) == (0.6, 2) and abs(panel.frames[-1].y - 200) < 1e-6
+    assert (spot.width, spot.rows) == (0.6, None) and abs(panel.frames[-1].y - 200) < 1e-6
     assert app.settings.max_lines == 2 and "wanted" not in stored(data_dir)["lines"]
+
+
+def test_double_click_reset_never_rewrites_the_setting(data_dir):
+    """A8-6: with overlay_max_lines 3 the reset draws 3 rows and hands nothing back to the pane."""
+    _, app = make_in(data_dir, max_lines=3)
+    app.resized(Rect(app.frame.x, app.frame.y, app.frame.w, height(5)), True)
+    app.reset_size()
+    assert app.settings.max_lines == 3 and app.positions.wanted is None
+    assert "resized" not in service(data_dir, {"overlay_max_lines": 3}).status()
 
 
 def feed(app, n, start=0.0):
