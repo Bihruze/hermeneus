@@ -655,11 +655,17 @@ class FakePAStream:
         self.blocks = queue_mod.Queue()
         self.closed = False
 
-    def read(self, frames=512):
-        item = self.blocks.get()
-        if item is None:
-            raise RuntimeError("stream closed")
-        return item
+    def read(self, frames=512, stop=None):
+        while True:
+            try:
+                item = self.blocks.get(timeout=0.01)
+            except queue_mod.Empty:
+                if stop is not None and stop.is_set():
+                    return np.zeros(0, dtype=np.float32), False
+                continue
+            if item is None:
+                raise RuntimeError("stream closed")
+            return item
 
     def close(self):
         self.closed = True

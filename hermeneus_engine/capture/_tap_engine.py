@@ -309,7 +309,7 @@ class TapCapture:
             sample_time = 0.0
             while not stop.is_set():
                 try:
-                    x, overflowed = stream.read()
+                    x, overflowed = stream.read(stop=stop)
                 except Exception:
                     if not stop.is_set():
                         log.warning("PortAudio read failed; the watchdog will rebuild the tap")
@@ -336,15 +336,20 @@ class TapCapture:
         hal = self._hal
         failures = []
         if self._pa_stream is not None:
+            # Stop the drain thread first (it polls, so it returns within one poll interval),
+            # then close the stream it was reading.
             self._pa_stop.set()
+            thread = self._pa_thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    log.error("process tap teardown: the PortAudio drain thread did not stop")
+                    failures.append("PortAudio drain thread did not stop")
             try:
                 self._pa_stream.close()
             except Exception as exc:
                 log.error("process tap teardown: closing the PortAudio stream failed: %s", exc)
                 failures.append(f"close PortAudio stream: {exc}")
-            thread = self._pa_thread
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=2.0)
             self._pa_stream = None
             self._pa_thread = None
         steps = []
