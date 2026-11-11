@@ -496,3 +496,28 @@ def test_w19_the_peak_is_swapped_under_the_lock():
     assert done.wait(1.0)
     t.join()
     cap.close()
+
+
+# ---------------------------------------------------------------- W22 wording (A5 re-audit)
+
+def test_w22_remote_start_refusal_names_the_machine(monkeypatch):
+    import importlib
+
+    from plugin_loader import load_plugin_package
+    commands = importlib.import_module(load_plugin_package().__name__ + ".commands")
+    assert commands.REMOTE_START_REFUSED == ("Hermeneus captures audio on " + platform_words.this_machine() +
+                                             ", so start it from " + platform_words.the_machine() +
+                                             " (terminal or Hermes Desktop).")
+    assert platform_words.the_machine("darwin") == "the Mac" and platform_words.the_machine("win32") == "the PC"
+    if sys.platform == "darwin":  # macOS text unchanged, byte for byte
+        assert commands.REMOTE_START_REFUSED == ("Hermeneus captures audio on this Mac, so start it from the Mac "
+                                                 "(terminal or Hermes Desktop).")
+
+
+def test_w22_plugin_yaml_settings_are_os_neutral():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8")
+    block = text[text.index("  allow_remote_start:"):]
+    description = next(line for line in block.splitlines() if line.strip().startswith("description:"))
+    assert "Mac" not in description and "this computer" in description

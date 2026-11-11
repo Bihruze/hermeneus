@@ -64,7 +64,7 @@ config_schema:
     type: bool
     default: false
     label: "Allow start from chat platforms"
-    description: "Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this Mac and sends that audio to ElevenLabs while nobody may be at the Mac. Status and stop work from anywhere either way."
+    description: "Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way."
   overlay_page:
     type: bool
     default: false
