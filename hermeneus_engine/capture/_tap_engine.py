@@ -77,12 +77,19 @@ class TapSpec:
     mode "system": everything except ``exclude_pids``.
     mode "app": every process whose bundle id is ``bundle_id`` or starts with ``bundle_id + "."``.
     mode "pid": the single process ``pid``.
+    ``mute``: the tapped processes are silent on their output device while tapped. Only for
+    "app" and "pid"; the doctor uses it so its test tone is never heard.
     """
 
     mode: str
     bundle_id: str = ""
     pid: int = 0
     exclude_pids: tuple[int, ...] = ()
+    mute: bool = False
+
+    def __post_init__(self) -> None:
+        if self.mute and self.mode == "system":
+            raise TapSetupError("a system-wide tap is never muted")
 
     def to_dict(self) -> dict:
         d = asdict(self)
@@ -92,7 +99,7 @@ class TapSpec:
     @classmethod
     def from_dict(cls, d: dict) -> "TapSpec":
         return cls(mode=str(d["mode"]), bundle_id=str(d.get("bundle_id", "")), pid=int(d.get("pid", 0)),
-                   exclude_pids=tuple(int(p) for p in d.get("exclude_pids", ())))
+                   exclude_pids=tuple(int(p) for p in d.get("exclude_pids", ())), mute=bool(d.get("mute", False)))
 
 
 @dataclass
@@ -241,7 +248,8 @@ class TapCapture:
     def _build(self, objects) -> None:
         hal = self._hal
         try:
-            handle = hal.create_tap(list(objects), self._exclude, TAP_NAME)
+            handle = (hal.create_tap(list(objects), self._exclude, TAP_NAME, mute=True) if self._spec.mute
+                      else hal.create_tap(list(objects), self._exclude, TAP_NAME))
             self.tap_id = handle.tap_id
             self._objects = tuple(objects)
             self.stats.tapped_objects = list(objects)
@@ -520,7 +528,10 @@ class TapCapture:
             if self._stopping.is_set() or self.tap_id is None:
                 return False
             try:
-                self._hal.set_tap_processes(self.tap_id, list(objects), self._exclude, TAP_NAME)
+                if self._spec.mute:
+                    self._hal.set_tap_processes(self.tap_id, list(objects), self._exclude, TAP_NAME, mute=True)
+                else:
+                    self._hal.set_tap_processes(self.tap_id, list(objects), self._exclude, TAP_NAME)
             except Exception as exc:
                 log.warning("process tap refresh: updating the tap failed: %s", exc)
                 return False

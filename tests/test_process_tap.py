@@ -525,30 +525,31 @@ from hermeneus_engine.capture import tap_doctor  # noqa: E402
 
 
 class FakePlayer:
-    def __init__(self, path):
+    def __init__(self, hal, feed):
         self.pid = 77
         self.killed = False
-        assert os.path.getsize(path) > 48000 * 2 * 30  # outlasts the start timeout
+        self.began = False
+        self._hal, self._feed = hal, feed
+
+    def begin(self):
+        self.began = True
+        threading.Thread(target=lambda: (time.sleep(0.2), self._feed(self._hal)), daemon=True).start()
 
     def kill(self):
         self.killed = True
-
-    def wait(self, timeout=None):
-        return 0
 
 
 def doctor_with(hal, feed):
     hal.add_process(1, 77, playing=True)
     players = []
 
-    def player(path):
-        players.append(FakePlayer(path))
-        threading.Thread(target=lambda: (wait_for(lambda: hal.callback is not None), feed(hal)), daemon=True).start()
+    def factory():
+        players.append(FakePlayer(hal, feed))
         return players[-1]
 
     result = tap_doctor.check_process_tap(
         backend_factory=lambda **kw: ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID, **kw),
-        player=player, app_name=lambda: "Terminal")
+        player_factory=factory, app_name=lambda: "Terminal")
     assert players and players[0].killed
     return result
 
@@ -572,6 +573,12 @@ def test_doctor_rejects_audio_that_is_not_the_tone():
     r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, (rng.standard_normal(4800) * 0.1).astype(np.float32))
                                             for i in range(10)])
     assert not r.ok and r.code == "wrong-audio"
+
+
+def test_doctor_mutes_the_tapped_player():
+    hal = FakeHAL()
+    doctor_with(hal, lambda h: [h.feed(i * 4800, sine(440, 4800, amp=0.1, start=i * 4800)) for i in range(10)])
+    assert hal.muted is True
 
 
 def test_doctor_reports_start_failure():

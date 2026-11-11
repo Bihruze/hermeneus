@@ -67,15 +67,16 @@ class FakeHAL:
     def app_info(self, pid):
         return self.apps.get(pid)
 
-    def create_tap(self, objects, exclude, name):
+    def create_tap(self, objects, exclude, name, mute=False):
         self._maybe_fail("create_tap")
+        self.muted = mute
         tap = self._id()
         self.live_taps.add(tap)
         self.tap_processes[tap] = (list(objects), exclude)
         self.calls.append(("create_tap", tuple(objects), exclude))
         return TapHandle(tap, f"uid-{tap}")
 
-    def set_tap_processes(self, tap_id, objects, exclude, name):
+    def set_tap_processes(self, tap_id, objects, exclude, name, mute=False):
         self._maybe_fail("set_tap_processes")
         self.tap_processes[tap_id] = (list(objects), exclude)
         self.calls.append(("set_tap_processes", tuple(objects), exclude))
