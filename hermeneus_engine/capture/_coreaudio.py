@@ -185,6 +185,21 @@ class CoreAudioHAL:
             return None
         return AppInfo(name=str(app.localizedName() or ""), regular=int(app.activationPolicy()) == 0)
 
+    # ---------------------------------------------------------------- devices
+
+    def default_output_device(self) -> int:
+        return self._get_u32(self._sys, self._ca.kAudioHardwarePropertyDefaultOutputDevice, "read default output")
+
+    def device_ids(self) -> tuple[int, ...]:
+        raw = self._get(self._sys, self._ca.kAudioHardwarePropertyDevices, "read device list")
+        return tuple(struct.unpack(f"<{len(raw) // 4}I", raw))
+
+    def device_name(self, device_id: int) -> str:
+        try:
+            return self._get_cfstring(device_id, self._ca.kAudioObjectPropertyName, "read device name")
+        except HALError:
+            return ""
+
     # ---------------------------------------------------------------- tap and aggregate
 
     def _tap_description(self, process_objects: list[int], exclude: bool, name: str, mute: bool = False):

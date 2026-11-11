@@ -58,6 +58,8 @@ STATUS_NO_AUDIO = "no-audio"          # never received audio while a process pla
 STATUS_STALLED = "stalled"            # audio stopped and rebuilding did not bring it back
 STATUS_RECOVERED = "recovered"        # audio is back after a no-audio or stalled report
 STATUS_FORMAT_CHANGED = "format-changed"
+STATUS_DEVICES_CHANGED = "devices-changed"   # default output or device list changed; tap rebuilt
+STATUS_REATTACHED = "reattached"             # the tapped app restarted and the tap follows its new processes
 
 READER_PORTAUDIO = "portaudio"
 READER_IOPROC = "ioproc"
@@ -116,6 +118,8 @@ class TapStats:
     rebuilds: int = 0
     silent_rebuilds: int = 0
     format_rebuilds: int = 0
+    device_rebuilds: int = 0
+    reattaches: int = 0
     sample_rate: float = 0.0
     tapped_objects: list = field(default_factory=list)
     last_status: str = ""
@@ -208,6 +212,7 @@ class TapCapture:
         self._silent_since: Optional[float] = None
         self._attempts = 0
         self._reported = ""
+        self._devices: Optional[tuple] = None  # (default output, device list) seen at the last build
         self.stats = TapStats(reader=reader)
 
     # ------------------------------------------------------------------ lifecycle
@@ -381,6 +386,8 @@ class TapCapture:
                 self.stats.silent_rebuilds += 1
             elif reason == "format":
                 self.stats.format_rebuilds += 1
+            elif reason == "devices":
+                self.stats.device_rebuilds += 1
         return True
 
     # ------------------------------------------------------------------ converter
@@ -440,6 +447,7 @@ class TapCapture:
             return
         now = self._clock() if now is None else now
         self.refresh()
+        self._check_devices()
         self._check_format()
         self._watchdog(now)
 
@@ -450,6 +458,38 @@ class TapCapture:
                 self._on_status(code, message, details)
             except Exception:
                 log.exception("status callback failed")
+
+    def _device_snapshot(self) -> Optional[tuple]:
+        try:
+            return (self._hal.default_output_device(), tuple(sorted(self._hal.device_ids())))
+        except Exception as exc:
+            log.warning("process tap: reading the device list failed: %s", exc)
+            return None
+
+    def _check_devices(self) -> None:
+        """Rebuild when the default output or the set of audio devices changed.
+
+        Polled once per tick (two property reads) instead of a HAL listener block, because a
+        listener block registered through PyObjC cannot be removed reliably (removal needs the
+        same block object, which PyObjC does not guarantee). The first tick only records the state.
+        """
+        snap = self._device_snapshot()
+        if snap is None:
+            return
+        if self._devices is None:
+            self._devices = snap
+            return
+        if snap == self._devices:
+            return
+        old = self._devices
+        self._devices = snap
+        if self.rebuild("devices"):
+            name = self._hal.device_name(snap[0]) if snap[0] != old[0] else ""
+            text = (f"The output device changed to {name}; capture was rebuilt." if name
+                    else "The list of audio devices changed; capture was rebuilt.")
+            self._status(STATUS_DEVICES_CHANGED, text, default_output_changed=snap[0] != old[0],
+                         devices_added=len(set(snap[1]) - set(old[1])),
+                         devices_removed=len(set(old[1]) - set(snap[1])))
 
     def _check_format(self) -> None:
         tap_id = self.tap_id
@@ -535,7 +575,12 @@ class TapCapture:
             except Exception as exc:
                 log.warning("process tap refresh: updating the tap failed: %s", exc)
                 return False
+            previous = self._objects
             self._objects = objects
             self.stats.tap_updates += 1
             self.stats.tapped_objects = list(objects)
+        if self._spec.mode == "app" and previous and objects and not set(previous) & set(objects):
+            self.stats.reattaches += 1
+            self._status(STATUS_REATTACHED, f"{self._spec.bundle_id} restarted; capture follows it again.",
+                         processes=len(objects))
         return True
