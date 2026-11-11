@@ -802,7 +802,7 @@ const S = {
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
   },
-  statusState: { color: 'var(--ui-text-primary)', fontWeight: 500, flexShrink: 0 },
+  statusState: { color: 'var(--ui-text-primary)', fontWeight: 'var(--font-weight-medium)', flexShrink: 0 },
   statusPart: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   statusMessage: {
     color: 'var(--ui-text-tertiary)',
@@ -851,14 +851,24 @@ const S = {
   // scrolled up" mid-glide; `overflow: clip` on the box around it keeps the scroll height true.
   // What it clips is the part below the scroll end, which is off screen anyway.
   contentClip: { overflow: 'clip' },
-  content: { willChange: 'transform' },
-  row: { display: 'grid', gridTemplateColumns: '6.5em minmax(0, 1fr)', columnGap: sp(3), padding: `${sp(1)} 0` },
+  // One grid for every line: the speaker column is as wide as the widest speaker name
+  // (max-content), and each row takes the columns as a subgrid, so names and text align
+  // across rows without a fixed column width.
+  content: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', columnGap: sp(3), willChange: 'transform' },
+  row: { display: 'grid', gridColumn: '1 / -1', gridTemplateColumns: 'subgrid', padding: `${sp(1)} 0` },
   turnGap: { paddingTop: sp(2.5) },
-  speaker: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 },
+  speaker: { whiteSpace: 'nowrap', fontWeight: 'var(--font-weight-medium)' },
   // Long lines wrap at word boundaries first; a single unbroken token (a URL) still breaks
   // instead of widening the pane. `lang` on the row lets hyphenation pick the right rules.
   text: { overflowWrap: 'anywhere', hyphens: 'auto', textWrap: 'pretty' },
-  langTag: { color: 'var(--ui-text-quaternary)', fontWeight: 500, marginRight: sp(1.5), letterSpacing: '0.04em' },
+  // Weight, tracking and width tokens are the Tailwind theme variables the app is built with
+  // (--font-weight-medium 500, --tracking-wider .05em, --container-xl 36rem in dist main CSS).
+  langTag: {
+    color: 'var(--ui-text-quaternary)',
+    fontWeight: 'var(--font-weight-medium)',
+    marginRight: sp(1.5),
+    letterSpacing: 'var(--tracking-wider)'
+  },
   state: {
     display: 'flex',
     flex: 1,
@@ -877,10 +887,10 @@ const S = {
     color: 'var(--ui-text-primary)',
     fontSize: 'var(--conversation-text-base-size)',
     lineHeight: 'var(--conversation-base-line-height)',
-    fontWeight: 500
+    fontWeight: 'var(--font-weight-medium)'
   },
   stateDescription: {
-    maxWidth: '36rem',
+    maxWidth: 'var(--container-xl)',
     color: 'var(--ui-text-tertiary)',
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
@@ -900,13 +910,13 @@ const S = {
   },
   noticeText: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' },
   endMarker: {
+    gridColumn: '1 / -1',
     padding: `${sp(3)} 0 ${sp(1)}`,
     textAlign: 'center',
     color: 'var(--ui-text-quaternary)',
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
   },
-  jump: { position: 'absolute', right: sp(4), bottom: sp(3) },
   doctor: { flex: 1, minHeight: 0, overflowY: 'auto', padding: `${sp(2)} ${sp(3)}` },
   doctorHead: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: sp(2), marginBottom: sp(2) },
   check: { display: 'grid', gridTemplateColumns: `${sp(4)} minmax(0, 1fr)`, columnGap: sp(2), padding: `${sp(1.5)} 0` },
@@ -922,7 +932,8 @@ const S = {
     gap: sp(1.5),
     height: '100%',
     padding: `0 ${sp(1.5)}`,
-    // The core status bar's own item size and gaps (apps/desktop/src/app/shell/statusbar-controls.tsx:31).
+    // The core status bar's own item size, a literal in core too: STATUSBAR_ACTION_CLASS
+    // `text-[0.6875rem]` (apps/desktop/src/app/shell/statusbar-controls.tsx:31). No token carries it.
     fontSize: '0.6875rem',
     color: 'var(--ui-text-tertiary)'
   },
@@ -1455,7 +1466,7 @@ function Notice({ ctrl, kind, link, onDoctor, status, t }) {
   })
 }
 
-function SubtitleList({ ctrl, onDoctor }) {
+function SubtitleList({ ctrl, onDoctor, onJumpChange }) {
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
   const link = useValue(ctrl.link)
@@ -1586,6 +1597,18 @@ function SubtitleList({ ctrl, onDoctor }) {
 
   const live = state.lastTranslated
   const unseen = follow ? 0 : unseenCount(lines, anchorId)
+  const paused = !follow && view.body === 'lines'
+  const jumpRef = useRef(jumpToLive)
+  jumpRef.current = jumpToLive
+
+  // The way back to live sits in the pane's top row (HermeneusPane), outside the list, so it
+  // never covers a line. The list tells it when following stopped and how many lines arrived.
+  useLayoutEffect(() => {
+    onJumpChange?.(paused ? { unseen, jump: () => jumpRef.current() } : null)
+  }, [paused, unseen])
+
+  useLayoutEffect(() => () => onJumpChange?.(null), [])
+
 
   return jsxs('div', {
     style: S.listWrap,
@@ -1631,20 +1654,6 @@ function SubtitleList({ ctrl, onDoctor }) {
             })
           })
         : jsx(EmptyBody, { ctrl, kind: view.body, link, onDoctor, status: state.status, t }),
-      follow || view.body !== 'lines'
-        ? null
-        : jsx('div', {
-            style: S.jump,
-            children: jsxs(Button, {
-              onClick: jumpToLive,
-              size: 'xs',
-              variant: 'secondary',
-              children: [
-                jsx(icons.ArrowBarToDown, {}),
-                unseen > 0 ? `${t('jumpToLive')} · ${t('newLines', unseen)}` : t('jumpToLive')
-              ]
-            })
-          }),
       // Screen readers hear each new translation once; partial updates stay silent.
       jsx('div', {
         'aria-live': 'polite',
@@ -1760,6 +1769,7 @@ function DoctorPanel({ ctrl }) {
 function HermeneusPane({ ctrl }) {
   const t = usePluginI18n(ID)
   const [view, setView] = useState('subtitles')
+  const [jump, setJump] = useState(null)
 
   return jsxs('div', {
     'data-hermeneus-pane': view,
@@ -1773,6 +1783,17 @@ function HermeneusPane({ ctrl }) {
             style: S.topRow,
             children: [
               jsx('div', { style: S.topStatus, children: jsx(StatusLine, { ctrl }) }),
+              view === 'subtitles' && jump
+                ? jsxs(Button, {
+                    onClick: jump.jump,
+                    size: 'xs',
+                    variant: 'secondary',
+                    children: [
+                      jsx(icons.ArrowBarToDown, {}),
+                      jump.unseen > 0 ? `${t('jumpToLive')} · ${t('newLines', jump.unseen)}` : t('jumpToLive')
+                    ]
+                  })
+                : null,
               view === 'subtitles' ? jsx(FontSize, { ctrl }) : null,
               jsx(SegmentedControl, {
                 onChange: setView,
@@ -1788,7 +1809,7 @@ function HermeneusPane({ ctrl }) {
         ]
       }),
       view === 'subtitles'
-        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor') })
+        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor'), onJumpChange: setJump })
         : jsx(DoctorPanel, { ctrl })
     ]
   })
