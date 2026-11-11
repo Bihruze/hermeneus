@@ -55,7 +55,7 @@ StatusCallback = Callable[[str, str, dict], None]
 
 # The macOS tap names the System Audio Recording permission here. Windows documents
 # no permission for process loopback; the microphone privacy switch is the one
-# setting that could plausibly silence it (UNVERIFIED until a Windows run, README).
+# setting that could plausibly silence it (UNVERIFIED until a Windows run, docs/windows.md).
 PRIVACY_PANE = "Settings > Privacy & security > Microphone"
 NO_AUDIO_TEXT = ("Windows is giving Hermeneus silence instead of audio. Open " + PRIVACY_PANE + ", turn on "
                  "Let desktop apps access your microphone, then start translation again.")

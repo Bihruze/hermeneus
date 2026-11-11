@@ -6,7 +6,7 @@ homepage: https://github.com/Bihruze/hermeneus
 kind: standalone
 license: MIT
 # Hermes v0.23.1 reads this field as metadata only; the catalog entry's
-# platforms gate installs. Windows is a preview (README, Windows) until it runs
+# platforms gate installs. Windows is a preview (docs/windows.md) until it runs
 # on a Windows machine.
 platforms:
   - macos

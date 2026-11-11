@@ -18,7 +18,7 @@
   differently numbered cables, never share a key. Windows names an endpoint
   "{name} ({card})", for example "CABLE Output (VB-Audio Virtual Cable)"; the
   Hi-Fi Cable and VoiceMeeter strings are modelled on that scheme, not read
-  from a machine (README, Windows assumptions).
+  from a machine (docs/windows.md, assumptions).
 """
 
 from __future__ import annotations

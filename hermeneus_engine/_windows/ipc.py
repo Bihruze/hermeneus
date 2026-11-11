@@ -22,7 +22,7 @@ The 0o600 mode passed to ``os.open`` does not protect it on Windows: "Windows
 only supports setting the file's read-only flag" (docs.python.org/3/library/
 os.html#os.chmod; ``os.open`` takes the same mode). Privacy comes from the ACL
 of the directory under HERMES_HOME, by default %LOCALAPPDATA%\\hermes, which
-Windows creates per user. That ACL is an assumption until a Windows run (README).
+Windows creates per user. That ACL is an assumption until a Windows run (docs/windows.md).
 """
 
 from __future__ import annotations

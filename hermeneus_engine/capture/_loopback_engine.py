@@ -329,7 +329,7 @@ class LoopbackCapture:
         waited for beyond the join timeout: it keeps running until that activation returns, then
         closes the stream it got without starting it (``_build``), or until the worker process
         exits. The worker exits right after this returns, inside the parent's stop window
-        (README, Windows assumptions, R24)."""
+        (docs/windows.md, assumptions, R24)."""
         self._stopping.set()
         for t in (self._pump, self._ticker):
             if t is not None and t is not threading.current_thread():

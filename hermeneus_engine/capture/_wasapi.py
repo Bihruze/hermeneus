@@ -80,7 +80,7 @@ STREAM_FLAGS = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK 
 # buffering, the caller must set both hnsPeriodicity and hnsBufferDuration to 0."
 # (learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize);
 # the sample passes 0, 0. Windows then picks the buffer; how long it is and how
-# much a busy worker can lag behind it is measured only on a Windows run (README).
+# much a busy worker can lag behind it is measured only on a Windows run (docs/windows.md).
 BUFFER_DURATION_HNS = 0
 PERIODICITY_HNS = 0
 ACTIVATE_TIMEOUT_S = 10.0

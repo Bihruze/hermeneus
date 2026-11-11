@@ -2,7 +2,7 @@
 
 ``Panel`` is what a platform window must do. macOS has ``panel_mac.MacPanel``;
 a Windows build would supply a layered, topmost, no-activate window with the
-same methods (not built; see README). Tests drive ``OverlayApp`` with a fake.
+same methods (not built; see docs/windows.md). Tests drive ``OverlayApp`` with a fake.
 """
 
 from __future__ import annotations
