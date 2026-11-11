@@ -4,7 +4,7 @@ Live translation for Hermes.
 
 Hermeneus listens to the audio playing on your Mac and shows a translated subtitle for each line of speech. It captures one app or all system audio, sends the audio to ElevenLabs Scribe v3 Live for transcription, and translates each finished line with the model you already use in Hermes. Subtitles appear in a Hermes Desktop pane, in your terminal, or as the reply to a slash command. Spoken translation is opt-in: when you turn it on, ElevenLabs Flash v2.5 reads each translated line aloud on an output device you choose.
 
-This release runs on macOS only. Windows and Linux support is planned.
+This release is tested on macOS with real audio. Windows support is a preview: it is implemented and reviewed against Microsoft's documentation, and has not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). Linux support is planned.
 
 ## What it does
 
@@ -164,7 +164,7 @@ Command flags override the settings for one session.
 | Key | Label | Type | Default | Choices | Description |
 | --- | --- | --- | --- | --- | --- |
 | `target_language` | Translate into | str | `""` | | Language code to translate into, for example tr or de. The --to flag overrides it. |
-| `capture_backend` | Capture | str | `auto` | auto, process-tap, virtual-device | auto uses a Core Audio process tap on macOS 14.2 and later, otherwise a virtual device such as BlackHole. |
+| `capture_backend` | Capture | str | `auto` | auto, process-tap, process-loopback, virtual-device | auto uses a Core Audio process tap on macOS 14.2 and later (process-loopback, WASAPI process loopback, on Windows build 20348 and later, preview), otherwise a virtual device such as BlackHole or VB-CABLE. |
 | `source` | Audio source | str | `""` | | Audio source to capture, as hermes hermeneus devices lists it. Empty means all system audio with a process tap. The --source flag overrides it. |
 | `speak` | Spoken translation | bool | `false` | | Speak the translation as well as showing subtitles. The --speak flag turns it on for one session. |
 | `commit_strategy` | Segmenting | str | `vad` | vad, turn_prediction | How Scribe decides a segment is finished. |
@@ -305,9 +305,29 @@ For spoken translation on the fallback, choose your speakers or headphones as th
 
 To undo the setup, choose your speakers again in System Settings > Sound and delete the Multi-Output Device in Audio MIDI Setup.
 
+## Windows (preview)
+
+Status: implemented and reviewed against documentation, not yet run on a Windows machine. macOS is tested on real audio; Windows is not. The catalog entry lists macOS only, so `hermes plugins install hermeneus` refuses to install on Windows. To try the preview, install from the repository URL; Hermes v0.23.1 does not gate loading on the `platforms` field of `plugin.yaml`.
+
+What the Windows build does:
+
+- **Capture without a driver.** WASAPI process loopback (`capture_backend: process-loopback`), on Windows build 20348 or later (Windows 11). `--source system` captures all system audio except the Hermeneus process tree. `--source <app>` captures one app's process tree, for example `app:chrome.exe`. Older Windows uses the virtual device fallback with VB-CABLE, which you install yourself.
+- **Same pipeline.** Scribe v3 Live, translation through your Hermes model, subtitles in the pane, the popup and the terminal, and spoken translation with Flash v2.5. The commands, settings, defaults and messages are the macOS ones.
+- **No feedback loop.** Spoken translation plays from the Hermeneus process, and the system source leaves that process tree out, so any output device is safe.
+- **Python packages.** `comtypes`, `pycaw` and `psutil`, installed from PyPI wheels on Windows only. Nothing compiled is in the repository.
+
+What differs from macOS:
+
+- **Local transport.** Asyncio has no Unix sockets on Windows. Other Hermes processes reach the session over a TCP port on 127.0.0.1 that the system picks, and every request must carry a 256-bit token. The token and the port are in `<HERMES_HOME>\plugin-data\hermeneus\run\sock` (by default under `%LOCALAPPDATA%\hermes`), so only accounts that can read that file can talk to the session.
+- **Capture worker.** It runs with a minimal environment (it keeps `SystemRoot`, which Windows programs need) and no secrets. It is stopped by closing its input and, after 5 seconds, with TerminateProcess. Windows has no SIGTERM or SIGKILL for another process.
+- **App list.** Apps are listed from the audio sessions of the default output device. An app that plays only to another device is reachable with `--source system`.
+- **Doctor.** It checks the Windows build, which capture backends can run, the default output device, your ElevenLabs key and the translation model. It has no real-audio permission check on Windows.
+
+Assumptions that only a run on Windows can confirm are listed in the W24 report; the preview label stays until they are checked.
+
 ## Limits and known issues
 
-- macOS only in this release. Windows and Linux support is planned.
+- Tested on macOS. Windows is a preview that has not yet run on a Windows machine (see above). Linux support is planned.
 - One session at a time. A second start reports the running session.
 - The doctor cannot read the System Audio Recording permission and shows it as a warning.
 - The process tap reads audio before the system output volume is applied, so the volume setting does not change what Hermeneus hears.
