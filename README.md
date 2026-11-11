@@ -193,7 +193,7 @@ hermes hermeneus overlay-page                   # show the page address while a 
 hermes hermeneus overlay-page off
 ```
 
-With the page on, the process that runs the session serves live subtitles at `http://127.0.0.1:47821/<token>/` while the session runs. The command, `run` and the doctor print the full address. Add it in OBS as a Browser source, or open it in a browser on this Mac for a second screen. The page background is transparent. It shows the newest translated lines through the same display queue as the overlay ([Subtitle pace](#subtitle-pace)), three small dots while speech is being translated, and no source-language text unless `overlay_show_original` is on.
+With the page on, the process that runs the session serves live subtitles at `http://127.0.0.1:47821/<token>/` while the session runs. The command, `run` and the doctor print the full address. Add it in OBS as a Browser source, or open it in a browser on this Mac for a second screen. The page background is transparent. It shows the newest translated lines through the same display queue as the overlay ([Subtitle pace](#subtitle-pace)), a small "translating" dot on its own spot below the lines while speech is being translated, and no source-language text unless `overlay_show_original` is on. A line taller than the page's rows goes up in units, as on the strip, so every word is shown.
 
 The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity`, `overlay_show_speaker`, `overlay_style`, `overlay_pace` and `overlay_reading_cps`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1), `theme` (`light`, `dark`, `auto` or `banner`), `pace` (`read` or `live`) and `reading_cps` (0, or 5 to 30). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
 
@@ -243,7 +243,7 @@ The pane talks to the Hermes gateway through the plugin's backend routes under `
 
 ### Subtitle overlay
 
-The overlay is a strip near the bottom of the screen that floats above every other app, so the subtitles stay in view while you watch a video in Chrome or another app, including a full-screen video. It shows the translation only, in large text. A sentence appears when its translation is ready; while speech is still being translated, three small dots show after the last line, never the words in the source language. With `overlay_show_original` on, the heard sentence is shown too, in small text above its translation. Text rolls up: new text enters at the bottom and older rows move up and out, at a pace you can read (see [Subtitle pace](#subtitle-pace)). Each speaker turn starts a row of its own. The strip grows and shrinks with its rows, keeps its last lines up for 7 seconds after the speech stops, and changes cross-fade in 150 ms unless macOS is set to reduce motion.
+The overlay is a strip near the bottom of the screen that floats above every other app, so the subtitles stay in view while you watch a video in Chrome or another app, including a full-screen video. It shows the translation only, in large text. A sentence appears when its translation is ready; while speech is still being translated, a small dot in a faint ring shows in its own spot at the strip's right end, apart from the text so it never reads as "...", and never the words in the source language. With `overlay_show_original` on, the heard sentence is shown too, in small text above its translation. Text rolls up: new text enters at the bottom and older rows move up and out, at a pace you can read (see [Subtitle pace](#subtitle-pace)). Each speaker turn starts a row of its own. The strip grows and shrinks with its rows, clears 7 seconds after the last text went up (once nothing waits), and changes cross-fade in 150 ms unless macOS is set to reduce motion.
 
 - Open it with `hermes hermeneus overlay show`, `/translate overlay show`, the overlay button in the pane's controls row or the one next to the status bar item. While no session runs, those two buttons arm the overlay instead: they turn on the `overlay` setting and it opens with the next session.
 - It closes by itself when the session stops, and with `overlay hide`, the same buttons, or **Hide overlay** in its menu.
@@ -262,21 +262,30 @@ The overlay and the overlay page put text up through a display queue that follow
 
 | Rule | Value | Source |
 |---|---|---|
-| Reading speed | Turkish 17, English 20, most other languages 17 characters per second; `overlay_reading_cps` overrides it (5 to 30) | Netflix Timed Text Style Guides (Turkish I.17, English I.14) |
-| Minimum time on screen | 1 s per unit | between Netflix (5/6 s) and DCMP (1.33 s); BBC gives 1.2 s for 4 words |
-| Unit | a sentence when it fits the strip's rows (at most 84 characters, a two-line subtitle), otherwise phrases cut after punctuation, before a conjunction or after a Turkish postposition, never inside a word | Netflix and BBC line-break rules |
-| Rows | 2 by default (`overlay_max_lines`, 1 to 3), rolling up | BBC live subtitles: two scrolling lines; CEA-608 roll-up: 2 to 4 rows |
-| Hold | the last lines stay 7 s after they had their reading time | Netflix: 7 s at most per subtitle |
-| Mid-sentence | a top row that starts inside a sentence begins with "…" | Netflix: an ellipsis marks a subtitle that starts mid-sentence |
+| Reading speed | Turkish 17, English 20, most other languages 17 characters per second; `overlay_reading_cps` overrides it (5 to 30) | Netflix Timed Text Style Guides (Turkish I.17; English I.14 and II.17) |
+| Minimum time on screen | 1 s per unit | between Netflix (5/6 s) and DCMP (40 frames, 1.33 s at 30 fps); BBC 4.1 gives 1.2 s for 4 words |
+| Unit | a sentence when it fits the strip's rows, otherwise even phrases cut after punctuation, before a conjunction or after a Turkish postposition, never inside a word. The limit is 85% of the characters the rows hold at the strip's width, at least 16 and at most 84 (a two-line subtitle of 42): `min(84, max(16, 0.85 x rows x characters per row))` | Netflix 42 characters per line (Turkish I.8); Netflix and BBC 3.4 line-break rules |
+| Rows | 2 by default (`overlay_max_lines`), rolling up | BBC live subtitles: two scrolling lines (21.5); CEA-608 roll-up: 2 to 4 rows (former 47 CFR 79.101(f)(1)) |
+| Hold | the strip clears 7 s after the last unit went up, once no unit waits; the page clears 7 s after the last unit went up and the last line event arrived | Netflix: 7 s at most per subtitle |
+| Mid-sentence | a top row that starts inside a sentence begins with "…": a row inside a unit, a later unit of a long sentence, or a line that starts inside a sentence (its first letter is lowercase, as when the session cut one sentence into two lines). A capital start never gets one. | Netflix Turkish I.5: an ellipsis marks a subtitle that starts mid-sentence |
 
-Each unit stays its reading time (characters divided by the reading speed, at least the minimum) before the next one enters, in the order the sentences were spoken. A unit enters whole: when it does not fit the rest of the bottom row it starts a new row. No text is dropped or shortened.
+Each unit stays its reading time (characters divided by the reading speed, at least the minimum) before the next one enters, in the order the sentences were spoken. A unit enters whole: when it does not fit the rest of the bottom row it starts a new row. Rows already on screen never change: a new unit only moves its own words. No text is dropped or shortened.
+
+Order: a line whose translation is still on its way holds the lines after it for at most 6 s. After that the later lines go up, and the slow line goes up when its translation arrives, after them. So a line translated more than 6 s late can appear out of speech order. This keeps one slow translation from stopping the subtitles.
 
 When speech is faster than reading speed, `overlay_pace` decides:
 
 - `read` (read everything, the default): every unit keeps its full reading time, so the subtitles may fall behind fast speech and catch up in pauses.
 - `live` (follow live): while more than 3 s of reading waits, units go up faster, down to half their reading time and never under the minimum. Scroll back to read what went by.
 
-Measured by replaying news timing through the queue (20 news sentences into Turkish, 3 rounds, a 0.25 s pause between sentences, translation ready 1.5 s after each sentence ends): at 160 words per minute `read` adds at most 3.0 s, at 200 at most 14.9 s and at 230 at most 42.7 s over four minutes of continuous speech; `live` adds at most 1.6 s, 1.6 s and 2.3 s.
+Measured lag on real audio (the A7 audit): two real sessions with ElevenLabs Scribe v3 Live and translation by anthropic/claude-haiku-5-5 into Turkish, audio taken from the player. Each session's time-stamped events were then replayed through the overlay code with an offscreen strip at the default settings, 860 pt wide. "Production" is speech end to translation ready. "First" and "last" are speech end to a line's first and last part on screen.
+
+| Clip | Production p50 / p95 / max | `read`: first p50; last p50 / p95 / max | `live`: first p50; last p50 / p95 / max |
+|---|---|---|---|
+| Al Jazeera English news, 4.2 min, 155 wpm (14.1 characters per second in Turkish) | 2.03 / 3.29 / 4.42 s | 3.6 s; 6.7 / 9.0 / 10.7 s | 2.5 s; 3.8 / 5.3 / 7.3 s |
+| Last Week Tonight (talk show), 3.7 min, 185 wpm (20.0 characters per second in Turkish) | 1.82 / 2.93 / 6.84 s | 21.5 s; 23.9 / 37.9 / 41.8 s | 3.0 s; 4.0 / 9.5 / 13.3 s |
+
+News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on (41.8 s at most within 3.5 minutes), while `live` stays within 13.3 s. That maximum came on one 404-character line in which the model wrote notes instead of a translation; the translator now rejects such replies (see [Translation model](#translation-model)).
 
 ## Configuration
 
@@ -334,6 +343,8 @@ Providers tested with this release:
 | `nous` | `anthropic/claude-haiku-5.5` | The call reached Nous Portal and returned `insufficient_credits_for_paid_model` on an account without credits. Translation with credits was not tested. |
 
 Other providers go through the same Hermes route and are untested.
+
+Only a translation goes on screen. The prompt asks for the translation alone, once, with no notes, corrections or copied source words. Each reply is then checked with plain string checks, with no second model call and no slower model (about 20 to 30 microseconds per line). A reply is rejected when the model talks about the task ("Hmm, wait, only the Turkish text should be given. Correct output: ..."), when it copies a run of the speech's own words (three or more source-language function words such as "between them and"; names and titles kept as they are do not count), or when it is not written in the target language's script. A rejected line shows "Not translated" and its reply is never shown, spoken or printed. On the two real sessions of the A7 audit (101 translated lines) the check rejected exactly the two leaked replies and no other line.
 
 ### Secret
 

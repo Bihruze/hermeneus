@@ -34,7 +34,13 @@ higher. After a gap (socket dropped, process restarted) it asks
   with empty `original` and `translation`; consumers may hide it. `state` is `partial`
   (still changing), `committed` (final original, translation pending),
   `translated`, or `failed` (translation failed or was skipped to keep up; the
-  original stays, `error` says why).
+  original stays, `error` says why). A reply that is not only a translation (notes
+  about the task, copied source words, the wrong script) also ends as `failed`,
+  with `error` "Translation rejected: ..." and an empty `translation`.
+- Order on screen: the overlay and the page show lines in the order of these
+  events, except that a line still `committed` holds later lines for at most
+  6 s. A line whose translation arrives after that goes up after the lines that
+  went past it, so it can appear out of speech order.
 - `line` events carry `timings`: the stages the line has reached so far, in
   ms since the session started, on the `time.monotonic_ns()` clock that
   capture timestamps use. `capture_ms` is the capture time of the line's
