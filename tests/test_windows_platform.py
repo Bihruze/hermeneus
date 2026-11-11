@@ -104,12 +104,16 @@ def test_unexpected_lock_errors_propagate(data_dir, windows, monkeypatch):
 # ---------------------------------------------------------------- process check
 
 class FakeKernel32:
-    def __init__(self, handle, exit_code=259):
-        self.handle, self.exit_code, self.closed = handle, exit_code, []
+    def __init__(self, handle, exit_code=259, signaled=False):
+        self.handle, self.exit_code, self.signaled, self.closed = handle, exit_code, signaled, []
 
     def OpenProcess(self, access, inherit, pid):
-        assert access == winproc.PROCESS_QUERY_LIMITED_INFORMATION
+        assert access == winproc.PROCESS_QUERY_LIMITED_INFORMATION | winproc.SYNCHRONIZE
         return self.handle
+
+    def WaitForSingleObject(self, handle, ms):
+        assert ms == 0
+        return 0 if self.signaled else winproc.WAIT_TIMEOUT
 
     def GetExitCodeProcess(self, handle, ptr):
         ptr._obj.value = self.exit_code

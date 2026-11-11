@@ -36,6 +36,7 @@ from .. import subproc
 from ..contracts import CaptureError, CaptureSource, FrameSink
 from ._loopback_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
 from ._loopback_worker import KIND_LIST, KIND_STATUS
+from ._worker_path import worker_pythonpath
 from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, read_frame
 
 log = logging.getLogger(__name__)
@@ -51,6 +52,13 @@ LIST_TIMEOUT_S = 15.0
 STOP_TIMEOUT_S = 5.0
 
 StatusCallback = Callable[[str, str, dict], None]
+
+# The macOS tap names the System Audio Recording permission here. Windows documents
+# no permission for process loopback; the microphone privacy switch is the one
+# setting that could plausibly silence it (UNVERIFIED until a Windows run, README).
+PRIVACY_PANE = "Settings > Privacy & security > Microphone"
+NO_AUDIO_TEXT = ("Windows is giving Hermeneus silence instead of audio. Open " + PRIVACY_PANE + ", turn on "
+                 "Let desktop apps access your microphone, then start translation again.")
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
@@ -91,6 +99,21 @@ def windows_build() -> Optional[int]:
         return int(sys.getwindowsversion().build)  # type: ignore[attr-defined]
     except (AttributeError, ValueError):
         return None
+
+
+def own_ancestry(own_pid: Optional[int] = None) -> set[int]:
+    """This process and its parents. A pid: source naming one of them would include Hermeneus in INCLUDE mode.
+
+    psutil is imported here only, on Windows; without it the answer is this pid alone.
+    """
+    pid = os.getpid() if own_pid is None else own_pid
+    found = {pid}
+    try:
+        import psutil  # noqa: PLC0415
+        found.update(p.pid for p in psutil.Process(pid).parents())
+    except Exception:
+        pass
+    return found
 
 
 def worker_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
@@ -236,7 +259,7 @@ class ProcessLoopbackBackend:
                 raise CaptureError(f"{sid} is not a valid process id.") from None
             if pid <= 0:
                 raise CaptureError(f"{sid} is not a valid process id.")
-            return {"mode": "pid", "pid": pid}
+            return {"mode": "pid", "pid": pid, "own_pid": self._own_pid}
         raise CaptureError(f"Unknown process loopback source {sid}.")
 
     def _list_apps(self) -> list[dict]:
@@ -307,7 +330,7 @@ class ProcessLoopbackBackend:
                 run.error = _message(payload) or "The capture worker reported an error."
                 run.ready.set()
             elif kind == KIND_STATUS:
-                self._handle_status(payload)
+                self._handle_status(payload, run)
             elif kind == KIND_STATS:
                 try:
                     run.final_stats = json.loads(payload)
@@ -321,18 +344,30 @@ class ProcessLoopbackBackend:
             self.failure = f"Capture from {run.source.label} stopped unexpectedly."
             log.error("%s %s", self.failure, " ".join(run.stderr_tail))
 
-    def _handle_status(self, payload: bytes) -> None:
+    def _handle_status(self, payload: bytes, run: Optional[_Run] = None) -> None:
+        """Same outcome as the macOS tap (process_tap ``_handle_status``): no-audio and stalled end the
+        session through ``failure`` with a fixed text; every other note goes to ``status_message``."""
         try:
             msg = json.loads(payload)
             code, text, details = str(msg["code"]), str(msg.get("message", "")), dict(msg.get("details") or {})
         except (ValueError, KeyError, TypeError):
             return
+        label = run.source.label if run is not None else "the audio source"
+        if code == STATUS_NO_AUDIO:
+            text = NO_AUDIO_TEXT
+        elif code == STATUS_STALLED:
+            text = f"Capture from {label} stopped receiving audio. Stop and start translation again."
         self.last_status = (code, text)
         if code in (STATUS_NO_AUDIO, STATUS_STALLED):
+            self.failure = text
             self.status_message = text
+            log.error("%s", text)
         elif code == STATUS_RECOVERED:
             self.status_message = ""
-        log.warning("process loopback: %s: %s", code, text)
+            log.info("process loopback: %s", text)
+        else:
+            self.status_message = text
+            log.info("process loopback: %s: %s", code, text)
         if self.on_status is not None:
             try:
                 self.on_status(code, text, details)

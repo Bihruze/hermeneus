@@ -13,7 +13,8 @@ fake with the same methods:
 
 One pump thread reads packets as their event fires, downmixes to mono,
 resamples with ``virtual_device.PolyphaseResampler`` and hands engine PCM to
-``on_pcm``. Once per ``refresh_interval`` the same thread:
+``on_pcm``. It does nothing else, so a slow process or session listing can
+never delay a read. A separate tick thread, once per ``refresh_interval``:
 
 * follows the app: when the root process of ``app:<exe>`` changes (the app
   was restarted), the stream is rebuilt on the new root;
@@ -74,7 +75,7 @@ class LoopbackSpec:
 
     mode "system": every process except the tree rooted at ``exclude_pid`` (Hermeneus).
     mode "app": the process tree of the oldest running ``exe`` that is not an ancestor of ``own_pid``.
-    mode "pid": the process tree rooted at ``pid``.
+    mode "pid": the process tree rooted at ``pid``, refused when that tree holds ``own_pid``.
     """
 
     mode: str
@@ -108,6 +109,10 @@ class LoopbackStats:
     rebuilds: int = 0
     stream_errors: int = 0
     timestamp_source: str = ""     # "qpc" or "arrival"
+    timestamp_errors: int = 0      # packets flagged AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR (arrival time used)
+    tick_ns_max: int = 0           # longest periodic tick (process and session reads, any rebuild)
+    tick_ns_total: int = 0
+    ticks: int = 0
     sample_rate: int = 0
     channels: int = 0
     sample_format: str = ""
@@ -171,6 +176,10 @@ def resolve_target(hal, spec: LoopbackSpec) -> tuple[int, bool]:
     if spec.mode == "pid":
         if not any(p.pid == spec.pid for p in procs):
             raise LoopbackSetupError(f"Process {spec.pid} is not running.")
+        if spec.own_pid and spec.own_pid in process_tree(procs, spec.pid):
+            # INCLUDE takes the whole tree, so this would capture Hermeneus's own spoken translation.
+            raise LoopbackSetupError(f"Process {spec.pid} is Hermeneus or one of its parent processes; capturing "
+                                     "it would capture Hermeneus's own speech. Use --source system instead.")
         return spec.pid, True
     roots = app_roots(procs, spec.exe, spec.own_pid)
     if not roots:
@@ -211,8 +220,12 @@ class LoopbackCapture:
         self._target = 0
         self._stopping = threading.Event()
         self._pump: Optional[threading.Thread] = None
+        self._ticker: Optional[threading.Thread] = None
+        # Held while the pump reads and converts, and while a rebuild swaps the stream.
+        # The tick thread reads processes and sessions without it.
+        self._lock = threading.RLock()
         self.stats = LoopbackStats()
-        # watchdog state, touched only by the pump thread (and by tick() in tests)
+        # watchdog state, touched only by the tick thread (and by tick() in tests); the pump writes _window_peak
         self._window_peak = 0.0
         self._heard_ever = False
         self._silent_since: Optional[float] = None
@@ -234,11 +247,19 @@ class LoopbackCapture:
             self.close()
             raise LoopbackSetupError(f"Windows refused the process loopback capture: {exc}") from exc
         if start_pump:
-            self._pump = threading.Thread(target=self._run, name="hermeneus-loopback-pump", daemon=True)
+            self._pump = threading.Thread(target=self._with_com, args=(self._pump_loop,),
+                                          name="hermeneus-loopback-pump", daemon=True)
+            self._ticker = threading.Thread(target=self._with_com, args=(self._tick_loop,),
+                                            name="hermeneus-loopback-tick", daemon=True)
             self._pump.start()
+            self._ticker.start()
 
     def _build(self, target: int, include: bool) -> None:
         stream = self._hal.open_loopback(target, include)
+        if self._stopping.is_set():
+            # close() ran while the activation was in flight: never start a stream after teardown.
+            self.stats.teardown_failures.extend(stream.close())
+            raise LoopbackSetupError("capture is stopping")
         try:
             if stream.sample_format not in ("float32", "int16") or stream.channels < 1 or stream.sample_rate <= 0:
                 raise LoopbackSetupError("The loopback stream reported a format this backend does not read.")
@@ -255,7 +276,8 @@ class LoopbackCapture:
         self.stats.target_pid = target
 
     def _release(self) -> list[str]:
-        stream, self._stream = self._stream, None
+        with self._lock:
+            stream, self._stream = self._stream, None
         if stream is None:
             return []
         try:
@@ -266,35 +288,42 @@ class LoopbackCapture:
     def close(self) -> list[str]:
         """Stop the pump and release the stream. Safe to call more than once; never raises."""
         self._stopping.set()
-        pump = self._pump
-        if pump is not None and pump is not threading.current_thread():
-            pump.join(timeout=2.0)
-        self._pump = None
+        for t in (self._pump, self._ticker):
+            if t is not None and t is not threading.current_thread():
+                t.join(timeout=2.0)
+        self._pump = self._ticker = None
         failures = self._release()
         self.stats.teardown_failures.extend(failures)
         return failures
 
     # ------------------------------------------------------------------ pump
 
-    def _run(self) -> None:
+    def _with_com(self, body: Callable[[], None]) -> None:
         enter = getattr(self._hal, "thread_enter", None)
         if enter is not None:
             enter()
         try:
-            self._loop()
+            body()
         finally:
             leave = getattr(self._hal, "thread_leave", None)
             if leave is not None:
                 leave()
 
-    def _loop(self) -> None:
-        next_tick = self._clock() + self._refresh_interval
+    def _pump_loop(self) -> None:
         while not self._stopping.is_set():
             self.pump_once()
-            now = self._clock()
-            if now >= next_tick:
-                next_tick = now + self._refresh_interval
-                self.tick(now)
+
+    def _tick_loop(self) -> None:
+        while not self._stopping.wait(self._refresh_interval):
+            t0 = time.perf_counter_ns()
+            try:
+                self.tick()
+            except Exception:
+                log.exception("process loopback: periodic check failed")
+            dt = time.perf_counter_ns() - t0
+            self.stats.ticks += 1
+            self.stats.tick_ns_total += dt
+            self.stats.tick_ns_max = max(self.stats.tick_ns_max, dt)
 
     def pump_once(self) -> None:
         stream = self._stream
@@ -302,19 +331,22 @@ class LoopbackCapture:
             self._stopping.wait(WAIT_S)
             return
         stream.wait(WAIT_S)
-        try:
-            packets = stream.read()
-        except Exception as exc:
-            self.stats.stream_errors += 1
-            log.warning("process loopback: %s; the stream will be reopened", exc)
-            self.stats.teardown_failures.extend(self._release())
-            if self._broken_since is None:
-                self._broken_since = self._clock()
-            return
-        now_ns = self._clock_ns()
-        qpc_now = self._hal.qpc_now_100ns() if packets else 0
-        for p in packets:
-            self._convert(p, now_ns, qpc_now)
+        with self._lock:
+            if self._stream is not stream:
+                return  # rebuilt while waiting
+            try:
+                packets = stream.read()
+            except Exception as exc:
+                self.stats.stream_errors += 1
+                log.warning("process loopback: %s; the stream will be reopened", exc)
+                self.stats.teardown_failures.extend(self._release())
+                if self._broken_since is None:
+                    self._broken_since = self._clock()
+                return
+            now_ns = self._clock_ns()
+            qpc_now = self._hal.qpc_now_100ns() if packets else 0
+            for p in packets:
+                self._convert(p, now_ns, qpc_now)
 
     def _convert(self, p, now_ns: int, qpc_now: int) -> None:
         stream, resampler = self._stream, self._resampler
@@ -343,7 +375,10 @@ class LoopbackCapture:
         stats.frames_in += int(mono.shape[0])
         # Age of the first frame from the performance counter the packet carries;
         # the block duration when that value is missing or implausible.
-        age_ns = (qpc_now - p.qpc_100ns) * 100 if p.qpc_100ns and qpc_now else -1
+        timestamp_error = bool(getattr(p, "timestamp_error", False))
+        if timestamp_error:
+            stats.timestamp_errors += 1
+        age_ns = (qpc_now - p.qpc_100ns) * 100 if p.qpc_100ns and qpc_now and not timestamp_error else -1
         if 0 <= age_ns < 1_000_000_000:
             if not stats.timestamp_source:
                 stats.timestamp_source = "qpc"
@@ -381,13 +416,20 @@ class LoopbackCapture:
                 log.exception("status callback failed")
 
     def rebuild(self, reason: str) -> bool:
-        self.stats.teardown_failures.extend(self._release())
         try:
-            target, include = resolve_target(self._hal, self._spec)
-            self._build(target, include)
+            target, include = resolve_target(self._hal, self._spec)  # process list read outside the lock
         except Exception as exc:
             log.warning("process loopback: rebuild after %s failed: %s", reason, exc)
+            with self._lock:
+                self.stats.teardown_failures.extend(self._release())
             return False
+        with self._lock:
+            self.stats.teardown_failures.extend(self._release())
+            try:
+                self._build(target, include)
+            except Exception as exc:
+                log.warning("process loopback: rebuild after %s failed: %s", reason, exc)
+                return False
         self.stats.rebuilds += 1
         return True
 

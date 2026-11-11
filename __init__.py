@@ -17,14 +17,15 @@ def register(ctx) -> None:
     """Called once by the Hermes plugin loader."""
     from . import glue
     from .commands import SLASH_USAGE, Plugin, cli_handler, setup_cli
+    from .hermeneus_engine.platform_words import this_machine
 
     plugin = Plugin(ctx, owner="hermes")
     ctx.register_auxiliary_task(glue.AUX_TASK, display_name=glue.AUX_DISPLAY_NAME,
                                 description=glue.AUX_DESCRIPTION)
     ctx.register_command(SLASH_COMMAND, plugin.slash,
-                         description="Live translation of audio playing on this Mac",
+                         description=f"Live translation of audio playing on {this_machine()}",
                          args_hint="start|set|stop|status|voices|overlay")
-    ctx.register_cli_command(CLI_COMMAND, help="live translation of audio playing on this Mac",
+    ctx.register_cli_command(CLI_COMMAND, help=f"live translation of audio playing on {this_machine()}",
                              setup_fn=setup_cli, handler_fn=cli_handler(plugin),
                              description=SLASH_USAGE)
     ctx.on_unload(plugin.unload)

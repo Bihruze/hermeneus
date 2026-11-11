@@ -21,6 +21,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PROBE = r"""
 import asyncio, ctypes, json, shutil, signal, socket, subprocess, sys, tempfile
 import numpy, sounddevice
+baseline = set(sys.modules)
 sys.path.insert(0, {root!r})
 sys.platform = {platform!r}
 import builtins
@@ -46,7 +47,7 @@ d = tempfile.mkdtemp()
 runtime.lock_holder(__import__("pathlib").Path(d))
 if sys.platform == "darwin":
     doctor._macos(lambda: ("15.1", "", ""))
-print(json.dumps({{"backends": names, "available": avail, "modules": sorted(sys.modules), "asked": sorted(asked)}}))
+print(json.dumps({{"backends": names, "available": avail, "modules": sorted(set(sys.modules) - baseline), "asked": sorted(asked)}}))
 """
 
 MACOS_ONLY = ("CoreAudio", "objc", "Foundation", "AppKit", "Cocoa",
@@ -70,19 +71,22 @@ def loaded(modules, forbidden):
     return sorted(m for m in modules for f in forbidden if m == f or m.startswith(f + "."))
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="the simulation runs on a non-Windows host")
-def test_simulated_windows_loads_no_macos_module():
+# Both cases run on every host. On a Windows host the win32 case is the real platform and
+# the darwin case is the simulation; on a Mac it is the other way round. Only modules loaded
+# after the probe's baseline count, and the host's own standard library (fcntl on macOS,
+# msvcrt and _winapi on Windows) is checked through what Hermeneus asks for instead.
+
+def test_windows_loads_no_macos_module():
     result = probe("win32")
     assert result["backends"] == ["virtual-device", "process-loopback"]
-    assert result["available"]["process-loopback"] is False  # not a real Windows: no build number
+    if sys.platform != "win32":
+        assert result["available"]["process-loopback"] is False  # simulated: no Windows build number
     assert loaded(result["modules"], MACOS_ONLY) == []
-    # fcntl is loaded by the standard library itself on this host; Hermeneus must not ask for it.
-    assert "fcntl" not in result["asked"]
+    assert not {"fcntl", "termios", "pwd", "objc", "AppKit", "CoreAudio"} & set(result["asked"])
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="needs a Mac")
 def test_macos_loads_no_windows_module():
     result = probe("darwin")
     assert result["backends"] == ["virtual-device", "process-tap"]
     assert loaded(result["modules"], WINDOWS_ONLY) == []
-    assert "msvcrt" not in result["asked"]
+    assert not {"msvcrt", "winreg", "_winapi", "comtypes", "pycaw", "psutil"} & set(result["asked"])
