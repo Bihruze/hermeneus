@@ -23,11 +23,11 @@ Hermeneus captures the sound an app plays, so it does not depend on the site or 
 
 | App or platform | Status |
 | --- | --- |
-| YouTube | Tested with three YouTube videos (news, a talk show, a late-night monologue) downloaded and played by a local player app. Not yet tested on the YouTube page in a browser. |
+| YouTube | Tested on a live YouTube news stream (Al Jazeera English) in Google Chrome, on an earlier build before the current subtitle display. Also tested with three YouTube videos (news, a talk show, a late-night monologue) downloaded and played by a local player app. |
 | Twitch | Not yet tested. |
 | Discord | Not yet tested. |
 | X Spaces | Not yet tested. |
-| Any app that plays audio | Tested with a local player app through the process tap (the YouTube videos above), and with synthetic speech through a virtual audio device. Google Chrome was captured only with a test tone. |
+| Any app that plays audio | Tested with Google Chrome (the YouTube stream above), with a local player app through the process tap (the YouTube videos above), and with synthetic speech through a virtual audio device. |
 
 ### Devices
 
@@ -397,7 +397,7 @@ The [plugin LLM access guide](https://hermes-agent.nousresearch.com/docs/develop
 
 | Provider | Model | Result |
 | --- | --- | --- |
-| `anthropic` | `claude-haiku-5-5` | Translated live English news into Turkish on Hermes v0.23.1. Needs Hermes's optional `anthropic` feature: `hermes pm install --extra anthropic`. |
+| `anthropic` | `claude-haiku-5-5` | Translated English news into Turkish on Hermes v0.23.1, in the test runs of 2026-11-11: a recorded Al Jazeera English clip and synthetic news-style speech. Needs Hermes's optional `anthropic` feature: `hermes pm install --extra anthropic`. |
 | `nous` | `anthropic/claude-haiku-5.5` | The call reached Nous Portal and returned `insufficient_credits_for_paid_model` on an account without credits. Translation with credits was not tested. |
 
 Other providers go through the same Hermes route and are untested.
