@@ -22,15 +22,19 @@ from __future__ import annotations
 import collections
 import json
 import subprocess
+import sys
 import time
 from dataclasses import dataclass
-from typing import Callable, Iterable, Optional, Sequence
+from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
 from ..contracts import ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, ENGINE_SAMPLE_WIDTH, FeedbackRiskError, FrameSink, OutputDevice
-from .coreaudio_devices import CoreAudioDevice, CoreAudioUnavailable, list_coreaudio_devices
+
+if TYPE_CHECKING:
+    from .coreaudio_devices import CoreAudioDevice
 
 BACKEND_VIRTUAL_DEVICE = "virtual-device"
 BACKEND_PROCESS_TAP = "process-tap"
+BACKEND_PROCESS_LOOPBACK = "process-loopback"  # Windows; same rule as the process tap
 
 SYSTEM_PROFILER = "/usr/sbin/system_profiler"
 
@@ -198,14 +202,20 @@ def load_inventory() -> AudioInventory:
     notes: list[str] = []
     sp = None
     try:
+        if sys.platform != "darwin":
+            raise FileNotFoundError(SYSTEM_PROFILER)
         sp = run_system_profiler()
     except (OSError, subprocess.SubprocessError, ValueError) as exc:
         notes.append(f"system_profiler unavailable: {type(exc).__name__}")
     ca = None
-    try:
-        ca = list_coreaudio_devices()
-    except (CoreAudioUnavailable, OSError) as exc:
-        notes.append(f"CoreAudio query unavailable: {exc}")
+    if sys.platform == "darwin":  # the CoreAudio reader is macOS only; Windows uses sounddevice names
+        from .coreaudio_devices import CoreAudioUnavailable, list_coreaudio_devices
+        try:
+            ca = list_coreaudio_devices()
+        except (CoreAudioUnavailable, OSError) as exc:
+            notes.append(f"CoreAudio query unavailable: {exc}")
+    else:
+        notes.append("CoreAudio query unavailable: not macOS")
     sdl = None
     try:
         import sounddevice as sd  # noqa: PLC0415  (optional at import time)
@@ -285,7 +295,7 @@ def check_feedback_risk(output_device_name: str, capture_device_name: Optional[s
         warnings.append(f"'{out.name}' is a virtual device. You will not hear spoken output unless "
                         "another app plays that device to your speakers or headphones.")
 
-    if capture_backend == BACKEND_PROCESS_TAP:
+    if capture_backend in (BACKEND_PROCESS_TAP, BACKEND_PROCESS_LOOPBACK):
         if not own_process_excluded:
             return verdict(True, CODE_OWN_PROCESS_CAPTURED,
                            "The app capture includes this process, so spoken translation would be "

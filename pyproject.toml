@@ -9,12 +9,20 @@ license = "MIT"
 # sounddevice==0.5.6, numpy==2.5.4), so installing the plugin never moves a
 # core pin (catalog rule 10). pyobjc: the process-tap capture backend
 # (macOS 14.2+), measured with 13.0 in the W02 spike; Hermes core does not pin it.
+# comtypes, pycaw and psutil: the process-loopback capture backend (Windows build
+# 20348+, preview). All three ship wheels on PyPI (comtypes and pycaw pure
+# Python py3-none-any, psutil win_amd64 and win_arm64); psutil's range contains
+# the psutil==7.2.2 Hermes v0.23.1 pins; comtypes 1.4.8 is the floor pycaw itself
+# requires; Hermes core pins neither comtypes nor pycaw.
 dependencies = [
   "websockets>=15.0.1,<16",
   "sounddevice>=0.5.6,<0.6",
   "numpy>=2.5.4,<3",
   "pyobjc-framework-CoreAudio>=13.0,<14; sys_platform == 'darwin'",
   "pyobjc-framework-Cocoa>=13.0,<14; sys_platform == 'darwin'",
+  "comtypes>=1.4.8,<2; sys_platform == 'win32'",
+  "pycaw>=20240210,<20270101; sys_platform == 'win32'",
+  "psutil>=5.9,<8; sys_platform == 'win32'",
 ]
 
 [project.optional-dependencies]

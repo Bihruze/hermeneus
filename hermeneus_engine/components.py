@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -23,6 +24,7 @@ SECRET_NAME = "ELEVENLABS_API_KEY"
 REGISTRY: dict[str, tuple[str, str]] = {
     "capture.virtual-device": (".capture.virtual_device", "VirtualDeviceBackend"),
     "capture.process-tap": (".capture.process_tap", "ProcessTapBackend"),
+    "capture.process-loopback": (".capture.process_loopback", "ProcessLoopbackBackend"),
     "capture.multi_output": (".capture.virtual_device", "detect_multi_output_setup"),
     # W02 seam: starts and stops a tap once while another process plays a test
     # sound, and reports whether real non-zero audio arrived. The lead sets the
@@ -39,8 +41,14 @@ REGISTRY: dict[str, tuple[str, str]] = {
     "routing.safe_outputs": (".tts.routing", "safe_output_devices"),
 }
 
-# Backends in the order the doctor and the source picker try them.
-CAPTURE_BACKENDS = ("capture.virtual-device", "capture.process-tap")
+# Backends in the order the doctor and the source picker try them. Each
+# platform loads only its own driverless backend, so no macOS module is
+# imported on Windows and the reverse.
+CAPTURE_BACKENDS = (("capture.virtual-device", "capture.process-loopback") if sys.platform == "win32"
+                    else ("capture.virtual-device", "capture.process-tap"))
+# Backends that capture processes rather than a device; spoken translation is
+# safe on any output when they leave out this process.
+PROCESS_BACKENDS = ("process-tap", "process-loopback")
 
 CaptureErrorCallback = Callable[[CaptureError], None]
 
@@ -130,7 +138,7 @@ def own_process_excluded(source: CaptureSource) -> bool:
     runs here), so its own speech is not captured. A ``pid:`` source excludes
     nothing; it is safe only when it names another process.
     """
-    if source.backend != "process-tap":
+    if source.backend not in PROCESS_BACKENDS:
         return True
     if source.source_id.startswith("pid:"):
         return source.source_id[4:] != str(os.getpid())

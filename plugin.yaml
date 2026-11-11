@@ -4,6 +4,9 @@ description: "Live translation for Hermes. Captures audio playing on your Mac, t
 author: Bihruze
 kind: standalone
 license: MIT
+# Hermes v0.23.1 reads this field as metadata only; the catalog entry's
+# platforms gate installs. Windows is a preview (README, Windows) until it runs
+# on a Windows machine.
 platforms:
   - macos
 requires_hermes: ">=0.23.1"
@@ -22,10 +25,10 @@ config_schema:
     description: "Language code to translate into, for example tr or de. The --to flag overrides it."
   capture_backend:
     type: str
-    choices: [auto, process-tap, virtual-device]
+    choices: [auto, process-tap, process-loopback, virtual-device]
     default: auto
     label: "Capture"
-    description: "auto uses a Core Audio process tap on macOS 14.2 and later, otherwise a virtual device such as BlackHole."
+    description: "auto uses a Core Audio process tap on macOS 14.2 and later (process-loopback, WASAPI process loopback, on Windows build 20348 and later, preview), otherwise a virtual device such as BlackHole or VB-CABLE."
   source:
     type: str
     default: ""
