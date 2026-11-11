@@ -155,18 +155,20 @@ def theme_css(tokens: Mapping[str, Any]) -> str:
 
     Without a palette from Desktop, light is the default and dark follows
     prefers-color-scheme. With one, Desktop's own light or dark is the default.
-    ``?theme=light|dark`` sets ``data-theme`` on the root and forces that mode.
+    ``?theme=light|dark`` sets ``data-theme`` on the root and forces that mode; ``?theme=banner`` (or the
+    ``overlay_style`` setting banner) forces the banner colours.
     """
     common, light, dark = tokens["common"], tokens["light"], tokens["dark"]
+    banner = _block(':root[data-theme="banner"]', tokens["banner"]) if tokens.get("banner") else ""
     if tokens.get("follow_system", True):
         return (_block(":root", {**common, **light})
                 + "@media (prefers-color-scheme: dark) {\n"
                 + _block(':root:not([data-theme="light"])', dark)
                 + "}\n"
-                + _block(':root[data-theme="dark"]', dark))
+                + _block(':root[data-theme="dark"]', dark) + banner)
     return (_block(":root", {**common, **tokens["default"]})
             + _block(':root[data-theme="light"]', light)
-            + _block(':root[data-theme="dark"]', dark))
+            + _block(':root[data-theme="dark"]', dark) + banner)
 
 
 # Text sizes relative to the translation. The native strip uses the same two numbers
@@ -206,7 +208,7 @@ def theme_tokens(theme_file: Optional[Path] = None) -> dict:
               "--label-scale": f"{LABEL_SCALE}em", "--original-scale": f"{ORIGINAL_SCALE}em",
               "--original-order": "-1"}
     out = {"common": common, "light": _scheme_vars(light), "dark": _scheme_vars(dark),
-           "follow_system": sent is None}
+           "banner": _scheme_vars(tokens.BANNER), "follow_system": sent is None}
     out["default"] = _scheme_vars(sent) if sent is not None else out["light"]
     # The overlay words in the pane's language (overlay/model.py Strings); English until a pane sent them.
     from dataclasses import asdict as _asdict

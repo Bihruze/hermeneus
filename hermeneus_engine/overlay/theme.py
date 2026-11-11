@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
 
-from ..overlay_tokens import FALLBACK, Palette, Rgba, WEIGHT_LABEL, WEIGHT_TEXT, palette_from_json  # noqa: F401
+from ..overlay_tokens import BANNER, FALLBACK, Palette, Rgba, WEIGHT_LABEL, WEIGHT_TEXT, palette_from_json  # noqa: F401
 
 
 def load(path: Path) -> Optional[Palette]:
@@ -21,8 +21,11 @@ def load(path: Path) -> Optional[Palette]:
         return None
 
 
-def palette(dark: bool, sent: Optional[Palette] = None) -> Palette:
-    """The sent palette (its own light or dark, which is Desktop's), else nous for the system appearance."""
+def palette(dark: bool, sent: Optional[Palette] = None, style: str = "theme") -> Palette:
+    """With ``overlay_style`` banner, the banner palette. Otherwise the sent palette (its own light or dark,
+    which is Desktop's), else nous for the system appearance."""
+    if style == "banner":
+        return BANNER
     return sent if sent is not None else FALLBACK[dark]
 
 

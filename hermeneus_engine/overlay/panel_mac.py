@@ -291,7 +291,7 @@ class MacPanel:
             self._appearance_changed()
 
     def palette(self) -> theme.Palette:
-        return theme.palette(system_is_dark(self.strip_view), self.sent)
+        return theme.palette(system_is_dark(self.strip_view), self.sent, self.settings.style)
 
     def motion(self) -> bool:
         return (not reduce_motion()) if self._motion is None else self._motion
@@ -316,11 +316,11 @@ class MacPanel:
         return self.displays()[0]
 
     def _font_for(self, kind: str, settings: OverlaySettings):
-        key = (kind, settings.text_size)
+        stack = self.palette().font
+        key = (kind, settings.text_size, stack)
         font = self._fonts.get(key)
         if font is None:
             size = settings.text_size
-            stack = self.palette().font
             if kind in (LABEL, MARK):
                 font = resolve_font(stack, round(size * LABEL_SCALE), theme.WEIGHT_LABEL)
             elif kind == "original":
@@ -445,6 +445,13 @@ class MacPanel:
             NSMakeRect(0.5, 0.5, bounds.size.width - 1, bounds.size.height - 1), p.radius_px, p.radius_px)
         _color(p.surface.with_alpha(p.surface.a * self.settings.background_alpha)).setFill()
         path.fill()
+        if self.settings.opacity > 0 and p.glow is not None:
+            # The banner's soft blue edge: a wider translucent stroke just inside the hairline. No blur.
+            inner = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
+                NSMakeRect(2.0, 2.0, bounds.size.width - 4, bounds.size.height - 4), p.radius_px, p.radius_px)
+            _color(p.glow.with_alpha(p.glow.a * self.settings.background_alpha)).setStroke()
+            inner.setLineWidth_(3.0)
+            inner.stroke()
         if self.settings.opacity > 0:
             _color(p.stroke).setStroke()
             path.setLineWidth_(1.0)
