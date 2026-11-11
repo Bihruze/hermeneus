@@ -499,3 +499,29 @@ def test_service_applies_settings_live_and_reports_armed(data_dir):
         assert json.loads(control.settings_file(data_dir).read_text())["text_size"] == 40
     finally:
         os.close(fd)
+
+
+def test_overlay_process_gets_no_secret_of_the_hermes_process(tmp_path):
+    # Before: child_env copied os.environ, so ELEVENLABS_API_KEY and every provider key reached the child (A2 S1).
+    parent = {"PATH": "/usr/bin", "HOME": "/Users/x", "LANG": "tr_TR.UTF-8", "ELEVENLABS_API_KEY": "sk-fake",
+              "OPENROUTER_API_KEY": "or-fake", "GITHUB_TOKEN": "ghp-fake", "HERMES_CLIENT_SECRET": "s",
+              "PYTHONHOME": "/x", "HERMES_HOME": "/h"}
+    env = control.child_env(parent, [str(tmp_path), "", "/does/not/exist"])
+    assert set(env) <= {"PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE", "PYTHONPATH", "PYTHONUNBUFFERED"}
+    assert not any(k.endswith(("_KEY", "_TOKEN", "_SECRET")) for k in env)
+    assert "sk-fake" not in repr(env) and "ghp-fake" not in repr(env)
+    paths = env["PYTHONPATH"].split(os.pathsep)
+    assert paths[0] == str(control.plugin_root()) and str(tmp_path) in paths and "/does/not/exist" not in paths
+
+
+def test_show_spawns_the_child_with_the_allowlisted_env(data_dir, monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-fake")
+    monkeypatch.setenv("SOME_PROVIDER_TOKEN", "tok-fake")
+    seen = {}
+
+    def popen(cmd, **kw):
+        seen.update(kw["env"])
+        return FakeChild(data_dir, b"ready\n")
+
+    control.show(data_dir, ovs.OverlaySettings(), session_running=True, popen=popen, **OK)
+    assert "ELEVENLABS_API_KEY" not in seen and "SOME_PROVIDER_TOKEN" not in seen and "PYTHONPATH" in seen

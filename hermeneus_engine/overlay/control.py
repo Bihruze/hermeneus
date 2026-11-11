@@ -167,13 +167,12 @@ def child_command(data_dir: Path) -> list[str]:
     return [sys.executable, "-m", "hermeneus_engine.overlay", "--data-dir", str(data_dir)]
 
 
-def child_env() -> dict:
-    """The parent's environment, with the parent's import path so the child finds PyObjC where Hermes does."""
-    env = dict(os.environ)
-    paths = [str(plugin_root())] + [p for p in sys.path if p and os.path.isdir(p)]
-    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
-    env.pop("PYTHONHOME", None)
-    return env
+def child_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
+    """The overlay process's environment: the capture worker's allowlist (PATH, HOME, TMPDIR and the
+    locale), so no API key, token or secret of the Hermes process reaches it, plus PYTHONPATH with
+    the parent's ``sys.path`` so PyObjC imports where Hermes put it."""
+    from ..capture.process_tap import worker_env
+    return worker_env(parent, path)
 
 
 def status(data_dir: Path) -> dict:
