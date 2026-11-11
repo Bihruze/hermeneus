@@ -151,7 +151,7 @@ hermes hermeneus overlay-page on   # subtitles on a 127.0.0.1 page for OBS (off 
 
 `doctor`, `devices`, `status`, `set`, `voices`, `stop`, `overlay` and `overlay-page` also take `--json`. `doctor` also takes `--no-audio-check` and `--test-model` (see [First run](#first-run)). `voices` also takes `--refresh`.
 
-`run` prints one translated line per segment, prefixed with the speaker label Scribe gave it, for example `[s1:speaker_0] ...`. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
+`run` prints one translated line per segment, prefixed with the speaker's number in order of first appearance, for example `[Speaker 1] ...`, the same numbering the pane uses. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
 
 When a session is already running (started from Desktop or by a slash command), `run` attaches to it and prints its lines. Its start flags are ignored. Ctrl+C then detaches and the session keeps running; `hermes hermeneus stop` ends it.
 
@@ -171,6 +171,12 @@ Without `--source`, Hermeneus captures all system audio except its own output on
 | `--source NAME` | Another audio source, as `hermes hermeneus devices` lists it. |
 
 Spoken translation needs an output device. Pass `--device` together with `--mode both`, `--mode voice` or `--speak on` when none is set yet.
+
+### Spoken translation output
+
+`hermes hermeneus devices`, `GET /devices` and the pane's **Output device** picker list only the outputs that are safe and audible. Hermeneus leaves out every output that would feed the speech back into the capture source, and it also leaves out virtual devices such as BlackHole and VB-Cable, because a person who picks one from the list hears nothing (`hermeneus_engine/tts/routing.py`, `safe_output_devices`).
+
+A virtual device is still accepted when you name it, for example `--device "BlackHole 2ch"` or `output_device: BlackHole 2ch`. Use that to send the spoken translation into another app, such as OBS or a call app that reads BlackHole as its microphone. You hear the speech only if that app plays the device to your speakers or headphones. The feedback check still applies: on the fallback, a session that captures BlackHole 2ch refuses to speak into BlackHole 2ch. With the process tap any output is safe, because Hermeneus leaves its own process out of the capture.
 
 ### Voices
 
