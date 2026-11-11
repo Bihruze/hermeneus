@@ -18,6 +18,7 @@ This release is tested on macOS with real audio. Windows support is a preview: i
 
 - macOS 14.2 or later for the process tap. macOS 13 runs only with the virtual device fallback.
 - Hermes 0.23.1 or later (`requires_hermes: ">=0.23.1"` in `plugin.yaml`).
+- Python 3.12 or later. Hermes itself allows 3.11, but the plugin needs numpy 2.5.4 (the version Hermes v0.23.1 pins in its `voice` extra), and numpy 2.5.4 declares `Requires-Python >=3.12`, so it does not install on 3.11.
 - An ElevenLabs account and API key. Create one at https://elevenlabs.io/app/settings/api-keys.
 - A model configured in Hermes. A small, fast model for the `live_translate` auxiliary task keeps subtitles close to the speech (see [Configuration](#configuration)).
 - Hermes Desktop, only if you want the subtitle pane.
