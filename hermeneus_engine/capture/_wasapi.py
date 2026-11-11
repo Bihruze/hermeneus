@@ -355,7 +355,7 @@ class WasapiHAL:
         prop = _PropVariant()
         prop.vt = VT_BLOB
         prop.data.blob.cbSize = ctypes.sizeof(params)
-        prop.data.blob.pBlobData = ctypes.cast(byref(params), c_void_p)
+        prop.data.blob.pBlobData = ctypes.addressof(params)
         handler = self._handler_cls()
         handler_ptr = handler.QueryInterface(self._IHandler)
         operation = POINTER(self._IOp)()

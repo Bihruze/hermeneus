@@ -540,3 +540,16 @@ def test_worker_env_is_minimal_and_keeps_systemroot():
     assert env["SYSTEMROOT"] == r"C:\Windows" and env["PATH"] == r"C:\Python" and env["TEMP"] == r"C:\t"
     assert "ELEVENLABS_API_KEY" not in env and "OPENROUTER_API_KEY" not in env
     assert env["PYTHONUNBUFFERED"] == "1" and env["PYTHONPATH"] == str(process_loopback._PACKAGE_ROOT)
+
+
+@pytest.mark.skipif(__import__("ctypes").sizeof(__import__("ctypes").c_void_p) != 8, reason="64-bit layout")
+def test_activation_structures_match_the_windows_x64_layout():
+    import ctypes
+    from hermeneus_engine.capture import _wasapi as w
+    # PROPVARIANT is 24 bytes on 64-bit Windows with the BLOB {ULONG cbSize; BYTE *pBlobData} at offset 8.
+    assert ctypes.sizeof(w._PropVariant) == 24 and w._PropVariant.data.offset == 8
+    assert w._Blob.cbSize.offset == 0 and w._Blob.pBlobData.offset == 8
+    # AUDIOCLIENT_ACTIVATION_PARAMS: ActivationType, then {TargetProcessId, ProcessLoopbackMode}.
+    params = w._LoopbackParams(w.AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, 1234,
+                               w.PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE)
+    assert bytes(params).hex() == "01000000" "d2040000" "01000000"
