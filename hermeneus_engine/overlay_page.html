@@ -445,11 +445,17 @@ html, body {
     el.textContent = '\u2026' + tokens.parts.slice(lo).join(tokens.joiner)
   }
 
-  // Lines is a row limit (fitRows). Measuring happens before the browser paints, so a line
-  // that does not fit is never drawn whole first.
+  // Lines is a row limit (fitRows). Every candidate line is shown with its full text before
+  // anything is measured, because a line the previous update hid measures 0 high. The show,
+  // measure, hide and cut steps run in one task, before the browser paints, so no line is
+  // drawn in a state it does not end in.
   function fit(views) {
     if (views.length === 0) return
     var list = views.map(function (view) { return { node: nodes[view.id], tokens: tokensOf(view.text), view: view } })
+    for (var k = 0; k < list.length; k++) {
+      list[k].node.root.hidden = false
+      setText(list[k].node.text, list[k].view.text)
+    }
     var result = fitRows(list.map(function (item) { return item.tokens.parts.length }), settings.max_lines,
       function (i, cut) {
         var item = list[i]
