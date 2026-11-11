@@ -427,7 +427,8 @@ class FlashSpeaker:
             raise
         except Exception as exc:
             dropped_by_error = True
-            log.warning("spoken output connection dropped: %s", self._redact(f"{type(exc).__name__}: {exc}"))
+            if not self._closing:  # a close in progress ends the stream on purpose
+                log.warning("spoken output connection dropped: %s", self._redact(f"{type(exc).__name__}: {exc}"))
         if ws is not self._ws or self._closing:
             return
         # The socket ended on its own: inactivity timeout, server close or network drop.
