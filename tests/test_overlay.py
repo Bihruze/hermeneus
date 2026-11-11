@@ -16,7 +16,7 @@ from hermeneus_engine.overlay import control
 from hermeneus_engine.overlay.app import OverlayApp
 from hermeneus_engine.overlay.follower import follow
 from hermeneus_engine.overlay.model import (FAILED, LABEL, PENDING, TRANSLATED, OverlayModel, Run, build_view,
-                                            compose, fit_tail, wrap)
+                                            compose, fit_head, layout, wrap)
 from hermeneus_engine.overlay.placement import Display, Positions, Rect, Spot, frame_for, spot_for
 from hermeneus_engine.overlay.service import OverlayService
 
@@ -140,10 +140,32 @@ def test_build_view_names_the_speaker_again_when_the_label_rolls_off():
     assert all(sum(chars(r.text, r) for r in ln) <= 9 + 1 for ln in view.lines)
 
 
-def test_fit_tail_keeps_the_end_of_the_original():
-    assert fit_tail("short", 20, chars, Run("", PENDING)) == "short"
-    out = fit_tail("the quick brown fox jumps over", 12, chars, Run("", PENDING))
-    assert out.startswith("…") and out.endswith("over") and len(out) <= 12
+def test_the_original_is_cut_at_its_end_never_its_front():
+    assert fit_head("short", 20, chars, Run("", PENDING)) == "short"
+    out = fit_head("the quick brown fox jumps over", 12, chars, Run("", PENDING))
+    assert out == "the quick\u2026" and len(out) <= 12
+
+
+def test_each_speaker_turn_starts_its_own_row():
+    # Before: "Speaker 1 Merhaba. Speaker 2 Nasılsın?" shared one row (A3 F4).
+    m = OverlayModel()
+    m.apply(line(1, "a", "translated", "Hi.", "Merhaba.", "s1:speaker_0"), 0)
+    m.apply(line(2, "b", "translated", "How are you?", "Nasılsın?", "s1:speaker_1"), 0)
+    m.apply(line(3, "c", "translated", "Fine.", "İyiyim.", "s1:speaker_0"), 0)
+    view = build_view(m, 0, width=200, measure=chars, max_lines=3, show_speaker=True, show_original=False)
+    assert [[r.text.strip() for r in ln] for ln in view.lines] == [
+        ["Speaker 1", "Merhaba."], ["Speaker 2", "Nasılsın?"], ["Speaker 1", "İyiyim."]]
+    view = build_view(m, 0, width=200, measure=chars, max_lines=2, show_speaker=False, show_original=False)
+    assert ["".join(r.text for r in ln) for ln in view.lines] == ["Nasılsın?", "İyiyim."]
+
+
+def test_same_speaker_lines_share_a_row_and_older_turns_leave_whole():
+    runs = [Run("Speaker 1", LABEL, 1), Run("aa bb", TRANSLATED, 1), Run("cc", TRANSLATED, 1),
+            Run("Speaker 2", LABEL, 2), Run("dd ee ff gg", TRANSLATED, 2)]
+    rows = layout(runs, 14, chars, 2, True)
+    assert ["".join(r.text for r in row) for row in rows] == ["Speaker 2 dd", "ee ff gg"]
+    rows = layout(runs, 40, chars, 2, True)
+    assert ["".join(r.text for r in row) for row in rows] == ["Speaker 1 aa bb cc", "Speaker 2 dd ee ff gg"]
 
 
 # -- placement -----------------------------------------------------------------------

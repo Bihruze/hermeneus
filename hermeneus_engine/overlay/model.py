@@ -251,22 +251,39 @@ def wrap(runs: list[Run], width: float, measure: Measure, max_lines: int) -> tup
     return tuple(_merge(line) for line in kept)
 
 
-def fit_tail(text: str, width: float, measure: Measure, run: Run) -> str:
-    """``text`` on one line; when too wide, an ellipsis and as much of its end as fits."""
+def fit_head(text: str, width: float, measure: Measure, run: Run) -> str:
+    """``text`` on one line; when too wide, its start up to a word boundary and an ellipsis.
+
+    The original is cut at its end, never at its front, so the heard sentence
+    always reads from its first word.
+    """
     text = " ".join(text.split())
     if not text or measure(text, run) <= width:
         return text
     lo, hi = 0, len(text)
-    while lo < hi:  # smallest cut whose tail fits
-        mid = (lo + hi) // 2
-        if measure("…" + text[mid:].lstrip(), run) <= width:
-            hi = mid
+    while lo < hi:  # the longest head that fits with the ellipsis
+        mid = (lo + hi + 1) // 2
+        if measure(text[:mid].rstrip() + "\u2026", run) <= width:
+            lo = mid
         else:
-            lo = mid + 1
-    tail = text[lo:]
-    if lo > 0 and " " in tail and not text[lo - 1].isspace():
-        tail = tail.split(" ", 1)[1]
-    return "…" + tail.lstrip()
+            hi = mid - 1
+    head = text[:lo]
+    if lo < len(text) and not text[lo].isspace() and " " in head:
+        head = head.rsplit(" ", 1)[0]
+    return head.rstrip(" ,;:") + "\u2026"
+
+
+def _turns(runs: list[Run]) -> list[list[Run]]:
+    """Runs grouped per speaker turn. Each turn starts a row of its own, as film subtitles do."""
+    turns: list[list[Run]] = []
+    for run in runs:
+        previous = turns[-1][-1] if turns else None
+        new_turn = (previous is None or run.kind == LABEL
+                    or (previous.kind != LABEL and previous.speaker != run.speaker))
+        if new_turn:
+            turns.append([])
+        turns[-1].append(run)
+    return turns
 
 
 def _segments(runs: list[Run]) -> list[list[Run]]:
@@ -282,29 +299,22 @@ def _segments(runs: list[Run]) -> list[list[Run]]:
     return groups
 
 
-def _drop_whole_segments(runs: list[Run], width: float, measure: Measure, max_lines: int,
-                         show_speaker: bool) -> list[Run]:
-    """Older lines leave whole, oldest first, until the rest fits in ``max_lines``.
+def _rows(turn: list[Run], width: float, measure: Measure) -> int:
+    return len(wrap(turn, width, measure, 99))
 
-    Only the newest line is ever cut mid-sentence, when it alone is longer
-    than ``max_lines``; that is the roll ``wrap`` does.
-    """
-    groups = _segments(runs)
-    while len(groups) > 1 and len(wrap([r for g in groups for r in g], width, measure, 99)) > max_lines:
+
+def _fit_turn(turn: list[Run], width: float, measure: Measure, max_lines: int,
+              show_speaker: bool) -> tuple[tuple[Run, ...], ...]:
+    """One speaker turn in at most ``max_lines`` rows: older lines of the turn leave whole, then the
+    newest rolls. A speaker label that rolls off is shown again at the top."""
+    groups = _segments(turn)
+    while len(groups) > 1 and _rows([r for g in groups for r in g], width, measure) > max_lines:
         groups.pop(0)
         first = groups[0]
         if show_speaker and first[0].kind != LABEL and first[0].speaker is not None:
             groups[0] = [Run(speaker_label(first[0].speaker), LABEL, first[0].speaker)] + first
-    return [r for g in groups for r in g]
-
-
-def build_view(model: OverlayModel, now: float, *, width: float, measure: Measure, max_lines: int,
-               show_speaker: bool, show_original: bool, original_measure: Optional[Measure] = None) -> View:
-    runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original)
-    runs = _drop_whole_segments(runs, width, measure, max_lines, show_speaker)
-    lines = wrap(runs, width, measure, max_lines) if runs else ()
+    lines = wrap([r for g in groups for r in g], width, measure, max_lines)
     if show_speaker and lines and lines[0][0].kind != LABEL and lines[0][0].speaker is not None:
-        # The speaker's label rolled off the top: name the speaker again at the start of what shows.
         # Words leave from the front until the label and the rest fit in max_lines.
         number = lines[0][0].speaker
         label = Run(speaker_label(number), LABEL, number)
@@ -316,6 +326,25 @@ def build_view(model: OverlayModel, now: float, *, width: float, measure: Measur
             _, _, tail = rest[0].text.lstrip().partition(" ")
             rest = ([Run(tail, rest[0].kind, rest[0].speaker)] if tail.strip() else []) + rest[1:]
         lines = lines[-max_lines:]
+    return lines
+
+
+def layout(runs: list[Run], width: float, measure: Measure, max_lines: int,
+           show_speaker: bool) -> tuple[tuple[Run, ...], ...]:
+    """The rows to show: whole older turns leave first, each turn on its own rows, newest at the bottom."""
+    turns = _turns(runs)
+    while len(turns) > 1 and sum(_rows(t, width, measure) for t in turns) > max_lines:
+        turns.pop(0)
+    rows: list[tuple[Run, ...]] = []
+    for turn in turns:
+        rows.extend(_fit_turn(turn, width, measure, max_lines, show_speaker))
+    return tuple(rows[-max_lines:])
+
+
+def build_view(model: OverlayModel, now: float, *, width: float, measure: Measure, max_lines: int,
+               show_speaker: bool, show_original: bool, original_measure: Optional[Measure] = None) -> View:
+    runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original)
+    lines = layout(runs, width, measure, max_lines, show_speaker) if runs else ()
     if original:
-        original = fit_tail(original, width, original_measure or measure, Run(original, PENDING))
+        original = fit_head(original, width, original_measure or measure, Run(original, PENDING))
     return View(lines, original, notice)
