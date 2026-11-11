@@ -13,7 +13,7 @@ import sys
 from typing import Any, Callable, Optional, TextIO
 
 from . import glue
-from .hermeneus_engine import components, doctor, overlay_page, stop_signals
+from .hermeneus_engine import components, doctor, overlay_page, overlay_settings, stop_signals
 from .hermeneus_engine.platform_words import the_machine, this_machine
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
@@ -600,21 +600,30 @@ class SpeakerNumbers:
             self._numbers[to_id] = self._numbers[from_id]
 
 
-def _format_line(event: dict, speakers: Optional[SpeakerNumbers] = None) -> Optional[str]:
+def _format_line(event: dict, speakers: Optional[SpeakerNumbers] = None, show_original: bool = False) -> Optional[str]:
+    """A finished line in the target language. A line that was not translated prints a marker, and its
+    original only with the ``overlay_show_original`` setting (the same rule as the overlays)."""
     line = event.get("line") or {}
     state = line.get("state")
+    translation = str(line.get("translation") or "").strip()
+    original = str(line.get("original") or "").strip()
+    if state == "translated" and not translation and not original:
+        return None  # Scribe dropped the words: nothing to print
     label = (speakers or SpeakerNumbers()).label(line.get("speaker_id"))
     prefix = f"[{label}] " if label else ""
-    if state == "translated":
-        return f"{prefix}{line.get('translation', '')}"
-    if state == "failed":
-        return f"{prefix}{line.get('original', '')}  (not translated: {line.get('error', '')})"
+    if state == "translated" and translation:
+        return f"{prefix}{translation}"
+    if state in ("translated", "failed"):
+        error = str(line.get("error") or "").strip()
+        why = f"(not translated: {error})" if error else "(not translated)"
+        return f"{prefix}{original}  {why}" if show_original and original else f"{prefix}{why}"
     return None
 
 
 class _Printer:
-    def __init__(self, as_json: bool, out: TextIO, err: TextIO) -> None:
+    def __init__(self, as_json: bool, out: TextIO, err: TextIO, show_original: bool = False) -> None:
         self.as_json = as_json
+        self.show_original = show_original
         self.out = out
         self.err = err
         self.last_state = ""
@@ -637,7 +646,7 @@ class _Printer:
                 print(f"-- {describe_status(body)}", file=self.err, flush=True)
         elif kind == "line":
             line_id = (event.get("line") or {}).get("line_id")
-            text = _format_line(event, self.speakers)
+            text = _format_line(event, self.speakers, self.show_original)
             if text and line_id not in self.printed:
                 self.printed[line_id] = None
                 if len(self.printed) > 5000:
@@ -649,7 +658,8 @@ class _Printer:
 
 async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys.stdout,
                   err: TextIO = sys.stderr, install_signals: bool = True) -> int:
-    printer = _Printer(bool(args.json), out, err)
+    printer = _Printer(bool(args.json), out, err,
+                       show_original=overlay_settings.from_settings(plugin.settings()).show_original)
     data_dir = plugin.controller.data_dir
     loop = asyncio.get_running_loop()
     stop = asyncio.Event()

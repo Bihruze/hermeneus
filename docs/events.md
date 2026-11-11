@@ -107,7 +107,7 @@ Nothing is written to disk. The owner keeps the last 200 lines in memory.
 | `POST /settings` | change the running session. Body: any of `{"mode": "subtitles\|both\|voice", "speak": bool, "target_language", "voice_id", "output_device", "source": {"backend", "source_id"} or a name}`. Answers at once with `{"type": "set", "ok": true, "accepted": {...}, "applying": [...], "status": {...}}`: `accepted` holds what is in effect already (target language, mode when speech stays on or turns off), `applying` what runs in the background (speech on, a new voice, a new output device, a new source). Errors: 400 unknown field or source, 409 no session or the change is refused (the body's `session` holds the status). |
 | `GET /voices?refresh=` | the voices on the ElevenLabs account: `{"voices": [{"voice_id", "name", "category", "flash_languages": [...], "is_default"}], "default_voice_id", "fetched_at"}`, from `GET https://api.elevenlabs.io/v2/voices`, cached 60 s. `flash_languages` are the account's verified languages for `eleven_flash_v2_5`. Error: 502 with a plain `detail`. |
 | `GET /devices?backend=&source_id=` | `{"sources": [{backend, source_id, label, detail}], "outputs": [{device_id, label}], "unavailable": [...], "outputs_note": ""}`. `outputs` are the devices that are safe for spoken translation with the named source, or with every listed source when none is named. |
-| `GET /overlay` | `{"visible": bool, "pid": <int or null>, "armed": bool, "settings": {"text_size", "max_lines", "show_original", "opacity", "show_speaker"}}`. `visible`: the native subtitle overlay is open. `armed`: the `overlay` setting opens it with the next session. |
+| `GET /overlay` | `{"visible": bool, "pid": <int or null>, "armed": bool, "settings": {"text_size", "max_lines", "show_original", "opacity", "show_speaker", "style", "pace", "reading_cps"}}`. `visible`: the native subtitle overlay is open. `armed`: the `overlay` setting opens it with the next session. |
 | `POST /overlay` | body `{"visible": bool}`. Opens or closes the overlay and answers `GET /overlay` plus `message`. Errors: 400 the body is not that shape, 409 the overlay cannot open (no session running, not macOS, no desktop session, PyObjC missing, or the request is not from this machine). |
 | `POST /overlay/apply` | Hands the current `overlay_*` settings to an open overlay, which redraws without closing. Answers `GET /overlay`. |
 | `POST /overlay/theme` | body `{"mode": "light"\|"dark", "name", "colors": {"surface", "text", "text_secondary", "text_tertiary", "stroke", "speakers": [...]}, "radius_px", "font"}`, CSS colours as `getComputedStyle` writes them. Stored as `overlay/theme.json` for both overlays (`hermeneus_engine/overlay_tokens.py`). 400 names the first field it cannot read. |
@@ -148,7 +148,8 @@ With the overlay page on, the session owner serves `http://127.0.0.1:<port>/<tok
 and `GET /<token>/events`, a Server-Sent Events stream. Each SSE `data:` line
 is one event from the list above, cut down to what the page draws: `hello`
 and `status` keep only `state`, `line` keeps `line_id`, `state`, `original`,
-`translation` and `speaker_id`; `relabel` and `reset` are unchanged. Line,
+`translation`, `speaker_id` and `target_language` (for the reading speed of the
+page's display queue); `relabel` and `reset` are unchanged. Line,
 relabel and status events carry their `seq` as the SSE `id`, so a reconnect
 resumes from `Last-Event-ID`. A first connection gets every stored line
 (`after` 0). The stream reads the session through `Controller.subscribe`. When the

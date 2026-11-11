@@ -72,7 +72,30 @@ html, body {
   font-size: var(--label-scale);
   font-weight: var(--label-weight);
   margin-inline-end: 0.5em;
+  /* Compact: the number in a thin pill of the speaker's colour. */
+  display: inline-block;
+  min-width: 1em;
+  padding: 0 0.3em;
+  border: 1.5px solid currentColor;
+  border-radius: 1em;
+  text-align: center;
+  line-height: 1.25;
+  vertical-align: 0.15em;
 }
+#pending {
+  color: var(--text-tertiary, var(--text-secondary));
+  font-size: 0.6em;
+  letter-spacing: 0.15em;
+  line-height: 1;
+}
+/* Under 50% background the video shows through: light text with a thin dark edge in every theme, as TV
+   subtitles are (the native strip's theme.see_through). */
+:root[data-see-through] .line {
+  color: #e6edf3;
+  text-shadow: -1px 0 #000, 1px 0 #000, 0 -1px #000, 0 1px #000, 0 0 0.12em #000, 0 0 0.3em rgba(0, 0, 0, 0.8);
+}
+:root[data-see-through] .line::before { background: #161b22; }
+:root[data-see-through] .original, :root[data-see-through] .failed .text { color: rgba(230, 237, 243, 0.8); }
 .speaker[data-slot="1"] { color: var(--speaker-1); }
 .speaker[data-slot="2"] { color: var(--speaker-2); }
 .speaker[data-slot="3"] { color: var(--speaker-3); }
@@ -101,8 +124,20 @@ html, body {
   'use strict'
 
   // Limits and defaults mirror hermeneus_engine/overlay_settings.py.
-  var LIMITS = { text_size: [14, 64], max_lines: [1, 3], opacity: [0, 100] }
-  var DEFAULTS = { text_size: 26, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto' }
+  var LIMITS = { text_size: [14, 64], max_lines: [1, 3], opacity: [0, 100], reading_cps: [0, 30] }
+  var DEFAULTS = { text_size: 26, max_lines: 2, show_original: false, opacity: 90, show_speaker: true, theme: 'auto',
+    pace: 'read', reading_cps: 0 }
+  var PACES = ['read', 'live']
+  // The display queue, as on the native strip (hermeneus_engine/overlay/pace.py): a line goes up when its
+  // translation is ready, in speech order, and stays its reading time (characters / cps, at least MIN_S)
+  // before the next one. "live" shortens that, down to half, while more than LIVE_BACKLOG_S waits.
+  var READING_CPS = { tr: 17, en: 20, zh: 9, ja: 4, ko: 12 }
+  var DEFAULT_CPS = 17
+  var MIN_S = 1.0
+  var HOLD_S = 7.0
+  var ORDER_WAIT_S = 6.0
+  var LIVE_BACKLOG_S = 3.0
+  var LIVE_MAX_SPEEDUP = 2.0
   // banner: the opt-in overlay_style colours (overlay_tokens.BANNER); the server setting picks it as the default.
   var THEMES = ['auto', 'light', 'dark', 'banner']
   var LINE_STATES = ['partial', 'committed', 'translated', 'failed']
@@ -148,12 +183,20 @@ html, body {
       show_original: toBool(pick('show_original'), DEFAULTS.show_original),
       opacity: toInt(pick('opacity'), DEFAULTS.opacity, LIMITS.opacity),
       show_speaker: toBool(pick('show_speaker'), DEFAULTS.show_speaker),
-      theme: THEMES.indexOf(theme) === -1 ? 'auto' : theme
+      theme: THEMES.indexOf(theme) === -1 ? 'auto' : theme,
+      pace: PACES.indexOf(String(pick('pace') || '').toLowerCase()) === -1 ? DEFAULTS.pace : String(pick('pace')).toLowerCase(),
+      reading_cps: readingCpsSetting(pick('reading_cps'))
     }
   }
 
+  function readingCpsSetting(value) {
+    var n = toInt(value, DEFAULTS.reading_cps, LIMITS.reading_cps)
+    return n === 0 ? 0 : Math.max(5, n)
+  }
   function createState() {
-    return { seq: null, lines: [], speakers: {}, speakerCount: 0, status: null }
+    // seen: when a line first arrived; ready: when it became final; shown: when it went on screen.
+    return { seq: null, lines: [], speakers: {}, speakerCount: 0, status: null,
+      seen: {}, ready: {}, shown: {}, freeAt: 0, lastShown: null, clearedAt: -Infinity, activeAt: 0 }
   }
 
   function text(value) {
@@ -169,7 +212,7 @@ html, body {
     return Object.assign({}, state, { speakers: speakers, speakerCount: state.speakerCount + 1 })
   }
 
-  function applyLine(state, raw) {
+  function applyLine(state, raw, now) {
     if (!raw || typeof raw !== 'object' || typeof raw.line_id !== 'string' || LINE_STATES.indexOf(raw.state) === -1) {
       return state
     }
@@ -178,7 +221,8 @@ html, body {
       state: raw.state,
       original: text(raw.original),
       translation: text(raw.translation),
-      speaker_id: typeof raw.speaker_id === 'string' && raw.speaker_id !== '' ? raw.speaker_id : null
+      speaker_id: typeof raw.speaker_id === 'string' && raw.speaker_id !== '' ? raw.speaker_id : null,
+      target_language: typeof raw.target_language === 'string' ? raw.target_language : ''
     }
     var lines = state.lines.slice()
     var index = -1
@@ -188,7 +232,11 @@ html, body {
     if (index === -1) lines.push(line)
     else lines[index] = line
     if (lines.length > KEEP) lines = lines.slice(lines.length - KEEP)
-    return Object.assign({}, withSpeaker(state, line.speaker_id), { lines: lines })
+    var seen = state.seen
+    var ready = state.ready
+    if (!has(seen, line.line_id)) { seen = Object.assign({}, seen); seen[line.line_id] = now }
+    if (isFinal(line) && !has(ready, line.line_id)) { ready = Object.assign({}, ready); ready[line.line_id] = now }
+    return Object.assign({}, withSpeaker(state, line.speaker_id), { lines: lines, seen: seen, ready: ready, activeAt: now })
   }
 
   function applyRelabel(state, from, to) {
@@ -205,13 +253,18 @@ html, body {
   }
 
   function clearLines(state) {
-    return Object.assign({}, state, { lines: [] })
+    return Object.assign({}, state, { lines: [], seen: {}, ready: {}, shown: {}, freeAt: 0, lastShown: null,
+      clearedAt: -Infinity })
+  }
+  function isFinal(line) {
+    return line.state === 'translated' || line.state === 'failed'
   }
 
   /** One event from the stream (docs/events.md). An event whose seq is not above the
    *  last applied one is a duplicate. hello sets the state only; reset drops the lines. */
-  function applyEvent(state, event) {
+  function applyEvent(state, event, now) {
     if (!event || typeof event !== 'object') return state
+    now = typeof now === 'number' ? now : 0
     var seq = Number.isInteger(event.seq) ? event.seq : null
     if (event.type === 'hello') {
       var session = event.session
@@ -221,7 +274,7 @@ html, body {
     if (event.type === 'lost') return clearLines(state)
     if (seq !== null && state.seq !== null && seq <= state.seq) return state
     var next = state
-    if (event.type === 'line') next = applyLine(state, event.line)
+    if (event.type === 'line') next = applyLine(state, event.line, now)
     else if (event.type === 'relabel') next = applyRelabel(state, event.from, event.to)
     else if (event.type === 'status' && typeof event.state === 'string') {
       // A new run has new line and speaker ids, so the list and the numbering start again.
@@ -245,32 +298,125 @@ html, body {
     return out
   }
 
-  /** What the page draws: the newest lines that have words, at most max_lines. One rule with the
-   *  native strip (overlay/model.py segment): a "translated" line with no translation shows as
-   *  failed, its original with the marker. */
+  function readingCps(language, override) {
+    if (override) return Math.max(5, Math.min(30, override))
+    var base = String(language || '').toLowerCase().replace('_', '-').split('-')[0]
+    return has(READING_CPS, base) ? READING_CPS[base] : DEFAULT_CPS
+  }
+  function readingTime(value, cps) {
+    var n = String(value).trim().replace(/\s+/g, ' ').length
+    return Math.max(MIN_S, (n || 8) / cps)
+  }
+  /** The words a line puts on screen: its translation; for a line that was not translated, its
+   *  original only when the user asked for originals (the marker says the rest). */
+  function shownText(line, settings) {
+    if (line.state === 'translated' && line.translation.trim() !== '') return line.translation
+    return settings.show_original ? line.original : ''
+  }
+  /** Lines waiting for their turn on screen, in speech order. A line still being translated holds
+   *  the ones after it for at most ORDER_WAIT_S; partial lines (words still being spoken) never enter. */
+  function waiting(state, now) {
+    var out = []
+    var blocked = false
+    for (var i = 0; i < state.lines.length; i++) {
+      var line = state.lines[i]
+      if (line.state === 'partial') continue
+      if (!isFinal(line)) {
+        if (now - (has(state.seen, line.line_id) ? state.seen[line.line_id] : now) < ORDER_WAIT_S) blocked = true
+        continue
+      }
+      if (has(state.shown, line.line_id) || blocked) continue
+      if (line.state === 'translated' && line.translation === '' && line.original === '') continue
+      out.push(line)
+    }
+    return out
+  }
+  /** Put every line whose turn has come on screen; clear the page HOLD_S after the last one went up and
+   *  the last line event arrived (no clearing while words are still coming in). */
+  function advance(state, now, settings) {
+    var shown = state.shown
+    var freeAt = state.freeAt
+    var lastShown = state.lastShown
+    var changed = false
+    for (;;) {
+      var queue = waiting(Object.assign({}, state, { shown: shown }), now)
+      if (queue.length === 0) break
+      var line = queue[0]
+      var start = Math.max(has(state.ready, line.line_id) ? state.ready[line.line_id] : now, freeAt)
+      if (start > now + 1e-9) break
+      if (now - start > 0.5) start = now // the page slept: no burst of stale lines
+      var cps = readingCps(line.target_language, settings.reading_cps)
+      var dwell = readingTime(shownText(line, settings), cps)
+      if (settings.pace === 'live') {
+        var backlog = 0
+        for (var k = 0; k < queue.length; k++) {
+          backlog += readingTime(shownText(queue[k], settings), readingCps(queue[k].target_language, settings.reading_cps))
+        }
+        if (backlog > LIVE_BACKLOG_S) dwell = Math.max(MIN_S, dwell / LIVE_MAX_SPEEDUP, dwell * LIVE_BACKLOG_S / backlog)
+      }
+      if (!changed) shown = Object.assign({}, shown)
+      shown[line.line_id] = start
+      freeAt = start + dwell
+      lastShown = start
+      changed = true
+    }
+    var clearedAt = state.clearedAt
+    if (lastShown !== null && clearedAt < lastShown && waiting(Object.assign({}, state, { shown: shown }), now).length === 0 &&
+        now > Math.max(lastShown, state.activeAt) + HOLD_S && now > freeAt) {
+      clearedAt = now
+      changed = true
+    }
+    if (!changed) return state
+    return Object.assign({}, state, { shown: shown, freeAt: freeAt, lastShown: lastShown, clearedAt: clearedAt })
+  }
+  /** Every final line on screen at once, ignoring time (tests and a first look at a stream). */
+  function settle(state) {
+    var shown = Object.assign({}, state.shown)
+    var lastShown = state.lastShown
+    for (var i = 0; i < state.lines.length; i++) {
+      if (isFinal(state.lines[i]) && !has(shown, state.lines[i].line_id)) { shown[state.lines[i].line_id] = 0; lastShown = 0 }
+    }
+    return Object.assign({}, state, { shown: shown, lastShown: lastShown, clearedAt: -Infinity })
+  }
+  /** Speech was heard whose translation is not on screen yet: the page shows three small dots. */
+  function pendingIndicator(state) {
+    if (state.status !== null && RUNNING.indexOf(state.status) === -1) return false
+    return state.lines.some(function (line) {
+      return line.state === 'committed' || (line.state === 'partial' && line.original !== '')
+    })
+  }
+  /** What the page draws: the lines the queue put up (target language only unless show_original), newest
+   *  last; fit() then keeps them to max_lines rendered rows. One rule with the native strip (overlay/pace.py):
+   *  a line that was not translated shows its marker, and its original only with show_original. */
   function visibleLines(state, settings, words) {
     words = words || WORDS
     if (state.status !== null && RUNNING.indexOf(state.status) === -1) return []
     var shown = state.lines.filter(function (line) {
-      return (line.state === 'translated' && line.translation !== '') || line.original !== ''
+      return has(state.shown, line.line_id) && state.shown[line.line_id] >= state.clearedAt && isFinal(line) &&
+        !(line.state === 'translated' && line.translation === '' && line.original === '')
     })
-    return shown.slice(-settings.max_lines).map(function (line) {
+    var kept = shown.slice(-settings.max_lines)
+    return kept.map(function (line, index) {
       var translated = line.state === 'translated' && line.translation !== ''
       var number = line.speaker_id !== null && has(state.speakers, line.speaker_id) ? state.speakers[line.speaker_id] : null
-      var failed = line.state === 'failed' || (line.state === 'translated' && !translated)
+      // Only a new turn carries the label (the line before it, shown or gone, had another speaker).
+      var before = shown[shown.length - kept.length + index - 1]
+      if (before && before.speaker_id === line.speaker_id) number = number === null ? null : -number
+      var failed = !translated
       return {
         id: line.line_id,
-        text: translated ? line.translation : line.original,
-        pending: line.state === 'partial' || line.state === 'committed',
+        text: shownText(line, settings),
+        pending: false,
         failed: failed,
         marker: failed ? words.not_translated : '',
         original: settings.show_original && translated && line.original !== '' ? line.original : '',
-        speaker: settings.show_speaker && number !== null ? words.speaker.replace('{n}', String(number)) : '',
-        slot: number === null ? 0 : ((number - 1) % SPEAKER_SLOTS) + 1
+        // Compact: the speaker's number in a pill of the speaker's colour (the full words are its title).
+        speaker: settings.show_speaker && number !== null && number > 0 ? String(number) : '',
+        speakerTitle: settings.show_speaker && number !== null ? words.speaker.replace('{n}', String(Math.abs(number))) : '',
+        slot: number === null ? 0 : ((Math.abs(number) - 1) % SPEAKER_SLOTS) + 1
       }
     })
   }
-
   /** Tokens a line can lose from its front when it rolls: words, or characters for text
    *  written without spaces. */
   function tokensOf(value) {
@@ -344,6 +490,10 @@ html, body {
     applyEvent: applyEvent,
     applyWords: applyWords,
     visibleLines: visibleLines,
+    advance: advance,
+    settle: settle,
+    pendingIndicator: pendingIndicator,
+    readingCps: readingCps,
     tokensOf: tokensOf,
     fitRows: fitRows
   }
@@ -364,6 +514,10 @@ html, body {
   docStyle.setProperty('--text-size', settings.text_size + 'px')
   docStyle.setProperty('--box-opacity', String(settings.opacity / 100))
   if (settings.theme !== 'auto') document.documentElement.setAttribute('data-theme', settings.theme)
+  if (settings.opacity < 50) document.documentElement.setAttribute('data-see-through', '')
+  function clock() {
+    return (root.performance && root.performance.now ? root.performance.now() : Date.now()) / 1000
+  }
 
   var container = document.getElementById('subtitles')
   var nodes = {}
@@ -406,6 +560,7 @@ html, body {
       node.original.hidden = view.original === ''
       setText(node.speaker, view.speaker)
       node.speaker.hidden = view.speaker === ''
+      if (view.speakerTitle) node.speaker.title = view.speakerTitle
       node.speaker.setAttribute('data-slot', String(view.slot))
       setText(node.marker, view.marker)
       node.marker.hidden = view.marker === ''
@@ -421,8 +576,16 @@ html, body {
         delete nodes[id]
       }
     })
+    var dots = pendingIndicator(state)
+    pendingEl.hidden = !dots
+    container.appendChild(pendingEl)
     fit(views)
   }
+  var pendingEl = document.createElement('div')
+  pendingEl.id = 'pending'
+  pendingEl.setAttribute('aria-hidden', 'true')
+  pendingEl.textContent = '\u2022\u2022\u2022'
+  pendingEl.hidden = true
 
   function rowsIn(el) {
     var lineHeight = parseFloat(root.getComputedStyle(el).lineHeight)
@@ -460,7 +623,7 @@ html, body {
     var result = fitRows(list.map(function (item) { return item.tokens.parts.length }), settings.max_lines,
       function (i, cut) {
         var item = list[i]
-        if (cut > 0) item.node.text.textContent = item.tokens.parts.slice(cut).join(item.tokens.joiner)
+        if (cut > 0) item.node.text.textContent = '\u2026' + item.tokens.parts.slice(cut).join(item.tokens.joiner)
         var rows = rowsIn(item.node.main)
         if (cut > 0) item.node.text.textContent = item.view.text
         return rows
@@ -468,7 +631,8 @@ html, body {
     for (var i = 0; i < list.length; i++) list[i].node.root.hidden = i < result.first
     var newest = list[list.length - 1]
     if (result.cut > 0) {
-      newest.node.text.textContent = newest.tokens.parts.slice(result.cut).join(newest.tokens.joiner)
+      // The line starts mid-sentence on screen: an ellipsis says so.
+      newest.node.text.textContent = '\u2026' + newest.tokens.parts.slice(result.cut).join(newest.tokens.joiner)
       // The translation rolled: show the end of the original, as the native strip does.
       if (newest.view.original !== '') fitTail(newest.node.original, newest.view.original)
     }
@@ -500,12 +664,21 @@ html, body {
       render()
       return
     }
-    var next = applyEvent(state, event)
+    var next = applyEvent(state, event, clock())
+    next = advance(next, clock(), settings)
     if (next !== state) {
       state = next
       render()
     }
   }
+  // The queue puts the next line up within 100 ms of its time and clears the page after its hold.
+  setInterval(function () {
+    var next = advance(state, clock(), settings)
+    if (next !== state) {
+      state = next
+      render()
+    }
+  }, 100)
 
   // The width decides the wrapping, so the row limit is applied again when it changes.
   root.addEventListener('resize', function () { render() })

@@ -1,10 +1,15 @@
 """The macOS overlay window: non-activating NSPanels drawn with the Hermes token table.
 
 The strip is a borderless ``NSPanel`` with ``NSWindowStyleMaskNonactivatingPanel``
-that ignores the mouse, so every click goes to the app underneath. Two small
+that ignores the mouse, so every click goes to the app underneath. Small
 child panels take the mouse: the grip at the left edge moves the strip (right
-click opens a menu: width presets, reset position, hide) and the handle at the
-right edge resizes its width. All float at ``NSFloatingWindowLevel`` on every
+click opens a menu: width presets, reset position, hide), the handle at the
+right edge resizes its width, and the history tab above the strip's right end
+opens the history (click, or scroll over it). While the history is open the
+strip itself takes the mouse: scrolling over it moves through earlier rows, a
+click on it or on the "Back to live" tab above it returns to live, and so does
+eight seconds without a scroll (``app.HISTORY_IDLE_S``). Then it ignores the
+mouse again. All float at ``NSFloatingWindowLevel`` on every
 Space and next to full-screen windows (``CanJoinAllSpaces | FullScreenAuxiliary``),
 the same choices Hermes Desktop makes for its own pet overlay window
 (apps/desktop/electron/main.ts, the pet overlay ``BrowserWindow``:
@@ -69,8 +74,9 @@ from AppKit import (
 from Foundation import NSObject
 
 from ..overlay_settings import OverlaySettings
+from ..overlay_tokens import STRIP_RADIUS_PX
 from . import theme
-from .model import FAILED, LABEL, MARK, PENDING, Run, View
+from .model import FAILED, LABEL, MARK, PENDING, Run, Strings, View
 from .placement import MIN_WIDTH_PT, WIDTH_PRESETS, Display, Rect, display_key
 
 PAD_X = 20.0  # text inset from the strip's sides; the grip and the resize handle sit inside them
@@ -82,6 +88,10 @@ ORIGINAL_SCALE = 0.58
 LABEL_SCALE = 0.62
 ORIGINAL_GAP = 2.0
 FADE_S = 0.15
+TAB_H = 22.0  # the history and "back to live" tabs above the strip's top edge
+TAB_GAP = 3.0
+LABEL_PAD = 4.0  # the speaker number's pill reaches this far beyond its digits
+DOT_R = 2.2  # the "translation coming" dots
 LEVEL = NSFloatingWindowLevel
 BEHAVIOUR = (NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
              | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle)
@@ -149,7 +159,18 @@ class HermeneusOverlayOwnedView(NSView):
 
 
 class HermeneusOverlayStripView(HermeneusOverlayOwnedView):
-    """The surface: a rounded fill and the token hairline."""
+    """The surface: a rounded fill and the token hairline. Takes the mouse only while the history is open."""
+
+    def acceptsFirstMouse_(self, _event):
+        return True
+
+    def scrollWheel_(self, event):
+        if self.owner is not None:
+            self.owner._scrolled(event)
+
+    def mouseDown_(self, _event):
+        if self.owner is not None:
+            self.owner.on_live()
 
     def viewDidChangeEffectiveAppearance(self):
         if self.owner is not None:
@@ -197,6 +218,29 @@ class HermeneusOverlayHandleView(HermeneusOverlayOwnedView):
     def drawRect_(self, _rect):
         if self.owner is not None:
             self.owner._draw_handle(self)
+
+
+class HermeneusOverlayTabView(HermeneusOverlayOwnedView):
+    """The history tab (``role`` "history": click or scroll to look back) and the "back to live" tab."""
+
+    def acceptsFirstMouse_(self, _event):
+        return True
+
+    def mouseDown_(self, _event):
+        if self.owner is None:
+            return
+        if self.role == "live":
+            self.owner.on_live()
+        else:
+            self.owner.on_scroll(1 if not self.owner.view.history else max(1, len(self.owner.view.lines) - 1))
+
+    def scrollWheel_(self, event):
+        if self.owner is not None:
+            self.owner._scrolled(event)
+
+    def drawRect_(self, _rect):
+        if self.owner is not None:
+            self.owner._draw_tab(self)
 
 
 class HermeneusOverlayMenuTarget(NSObject):
@@ -248,8 +292,13 @@ class MacPanel:
                  on_width: Callable[[float], None] = lambda w: None,
                  on_reset: Callable[[], None] = lambda: None,
                  on_hide: Callable[[], None] = lambda: None,
+                 on_scroll: Callable[[int], None] = lambda rows: None,
+                 on_live: Callable[[], None] = lambda: None,
                  appearance: Optional[str] = None, motion: Optional[bool] = None, halo: bool = True) -> None:
         self.on_moved, self.on_width, self.on_reset, self.on_hide = on_moved, on_width, on_reset, on_hide
+        self.on_scroll, self.on_live = on_scroll, on_live
+        self.strings = Strings()
+        self._wheel = 0.0  # scroll distance not yet a whole row
         self.view = View()
         self.settings = OverlaySettings()
         self.sent: Optional[theme.Palette] = None
@@ -266,18 +315,27 @@ class MacPanel:
         self.strip.setContentView_(self.strip_view)
         self.grip, self.grip_view = self._handle("move")
         self.sizer, self.sizer_view = self._handle("resize")
+        self.history_tab, self.history_view = self._tab("history")
+        self.live_tab, self.live_view = self._tab("live")
         self._menu_target = HermeneusOverlayMenuTarget.alloc().initWithOwner_(self)
         self._fade: Optional[NSImageView] = None
         if appearance is not None:  # renders for review pick an appearance; normal runs follow the system
             from AppKit import NSAppearance
             look = NSAppearance.appearanceNamed_(appearance)
-            for window in (self.strip, self.grip, self.sizer):
+            for window in (self.strip, self.grip, self.sizer, self.history_tab, self.live_tab):
                 window.setAppearance_(look)
 
     def _handle(self, role: str):
         panel = _make_panel(NSMakeRect(0, 0, HANDLE_W, 30), mouse=True)
         panel.setHasShadow_(False)
         view = _view(HermeneusOverlayHandleView, NSMakeRect(0, 0, HANDLE_W, 30), self, role=role, start=None)
+        panel.setContentView_(view)
+        return panel, view
+
+    def _tab(self, role: str):
+        panel = _make_panel(NSMakeRect(0, 0, TAB_H, TAB_H), mouse=True)
+        panel.setHasShadow_(False)
+        view = _view(HermeneusOverlayTabView, NSMakeRect(0, 0, TAB_H, TAB_H), self, role=role)
         panel.setContentView_(view)
         return panel, view
 
@@ -291,7 +349,8 @@ class MacPanel:
             self._appearance_changed()
 
     def palette(self) -> theme.Palette:
-        return theme.palette(system_is_dark(self.strip_view), self.sent, self.settings.style)
+        p = theme.palette(system_is_dark(self.strip_view), self.sent, self.settings.style)
+        return theme.see_through(p, self.settings.opacity)
 
     def motion(self) -> bool:
         return (not reduce_motion()) if self._motion is None else self._motion
@@ -333,7 +392,11 @@ class MacPanel:
     def measure(self, text: str, run: Run, settings: OverlaySettings) -> float:
         attrs = {NSFontAttributeName: self._font_for(run.kind, settings)}
         width = NSAttributedString.alloc().initWithString_attributes_(text, attrs).size().width
-        return width + (6.0 if run.kind in (LABEL, MARK) and text.strip() else 0.0)
+        if run.kind == LABEL and text.strip():
+            # Drawn as thin space, number, thin space and two spaces (``_run_text``).
+            return NSAttributedString.alloc().initWithString_attributes_(
+                "\u2009" + text.strip() + "\u2009  ", attrs).size().width
+        return width + (6.0 if run.kind == MARK and text.strip() else 0.0)
 
     def measure_original(self, text: str, settings: OverlaySettings) -> float:
         attrs = {NSFontAttributeName: self._font_for("original", settings)}
@@ -373,16 +436,33 @@ class MacPanel:
         y = frame.y + (frame.h - h) / 2
         self.grip.setFrame_display_(NSMakeRect(frame.x + HANDLE_INSET, y, HANDLE_W, h), True)
         self.sizer.setFrame_display_(NSMakeRect(frame.x + frame.w - HANDLE_INSET - HANDLE_W, y, HANDLE_W, h), True)
+        top = frame.y + frame.h + TAB_GAP
+        self.history_tab.setFrame_display_(NSMakeRect(frame.x + frame.w - 8 - 30, top, 30, TAB_H), True)
+        live_w = self._tab_text_width(self.strings.back_to_live) + 24
+        self.live_tab.setFrame_display_(NSMakeRect(frame.x + (frame.w - live_w) / 2, top, live_w, TAB_H), True)
+
+    def _tab_text_width(self, text: str) -> float:
+        attrs = {NSFontAttributeName: self._font_for(LABEL, self.settings)}
+        return NSAttributedString.alloc().initWithString_attributes_(text, attrs).size().width
+
+    def set_strings(self, strings: Strings) -> None:
+        self.strings = strings
+        self._place_handles()
+        self.live_view.setNeedsDisplay_(True)
 
     def render(self, view: View, settings: OverlaySettings) -> None:
-        if self.strip.isVisible() and self.motion() and not self.view.empty and view != self.view:
+        # A roll or a new line cross-fades; text added at the end of the bottom row does too, briefly.
+        if self.strip.isVisible() and self.motion() and not self.view.empty and view.lines != self.view.lines:
             self._cross_fade()
         self.view, self.settings = view, settings
         self.strip_view.setNeedsDisplay_(True)
         self.text_view.setNeedsDisplay_(True)
-        for handle in (self.grip_view, self.sizer_view):
+        for handle in (self.grip_view, self.sizer_view, self.history_view, self.live_view):
             handle.setNeedsDisplay_(True)
         self.strip.invalidateShadow()
+        # The strip takes the mouse only while the history is open (scroll through it, click for live).
+        self.strip.setIgnoresMouseEvents_(not view.history)
+        self._sync_tabs(self.strip.isVisible())
 
     def _cross_fade(self) -> None:
         """Lay a picture of the old text over the new and fade it out: a smooth swap and roll."""
@@ -417,15 +497,39 @@ class MacPanel:
         if visible:
             self.strip.orderFrontRegardless()  # never makeKeyAndOrderFront: no focus change
             for handle in handles:
-                if handle.parentWindow() is None:
-                    self.strip.addChildWindow_ordered_(handle, 1)  # NSWindowAbove
-                handle.orderFrontRegardless()
+                self._show_child(handle, True)
         else:
             for handle in handles:
-                if handle.parentWindow() is not None:
-                    self.strip.removeChildWindow_(handle)
-                handle.orderOut_(None)
+                self._show_child(handle, False)
             self.strip.orderOut_(None)
+        self._sync_tabs(visible)
+
+    def _show_child(self, child, show: bool) -> None:
+        if show:
+            if child.parentWindow() is None:
+                self.strip.addChildWindow_ordered_(child, 1)  # NSWindowAbove
+            child.orderFrontRegardless()
+        else:
+            if child.parentWindow() is not None:
+                self.strip.removeChildWindow_(child)
+            child.orderOut_(None)
+
+    def _sync_tabs(self, visible: bool) -> None:
+        """The history tab while there is something to look back at; "back to live" while looking back."""
+        self._show_child(self.history_tab, visible and (self.view.older or self.view.history))
+        self._show_child(self.live_tab, visible and self.view.history)
+
+    def _scrolled(self, event) -> None:
+        """Wheel or trackpad: whole rows back (up) or forward (down), as a text view scrolls."""
+        delta = float(event.scrollingDeltaY())
+        if not event.hasPreciseScrollingDeltas():
+            delta *= self._line_h(self._font_for(PENDING, self.settings)) / 3.0  # a wheel notch is about a third of a row
+        self._wheel += delta
+        row = self._line_h(self._font_for(PENDING, self.settings))
+        rows = int(self._wheel / row)
+        if rows:
+            self._wheel -= rows * row
+            self.on_scroll(rows)
 
     def close(self) -> None:
         self.set_visible(False)
@@ -433,7 +537,7 @@ class MacPanel:
     # -- drawing ----------------------------------------------------------------------
 
     def _appearance_changed(self) -> None:
-        for name in ("strip_view", "text_view", "grip_view", "sizer_view"):
+        for name in ("strip_view", "text_view", "grip_view", "sizer_view", "history_view", "live_view"):
             view = getattr(self, name, None)
             if view is not None:
                 view.setNeedsDisplay_(True)
@@ -442,13 +546,14 @@ class MacPanel:
         p = self.palette()
         bounds = view.bounds()
         path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-            NSMakeRect(0.5, 0.5, bounds.size.width - 1, bounds.size.height - 1), p.radius_px, p.radius_px)
+            NSMakeRect(0.5, 0.5, bounds.size.width - 1, bounds.size.height - 1), STRIP_RADIUS_PX, STRIP_RADIUS_PX)
         _color(p.surface.with_alpha(p.surface.a * self.settings.background_alpha)).setFill()
         path.fill()
         if self.settings.opacity > 0 and p.glow is not None:
             # The banner's soft blue edge: a wider translucent stroke just inside the hairline. No blur.
             inner = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(
-                NSMakeRect(2.0, 2.0, bounds.size.width - 4, bounds.size.height - 4), p.radius_px, p.radius_px)
+                NSMakeRect(2.0, 2.0, bounds.size.width - 4, bounds.size.height - 4), STRIP_RADIUS_PX - 1.5,
+                STRIP_RADIUS_PX - 1.5)
             _color(p.glow.with_alpha(p.glow.a * self.settings.background_alpha)).setStroke()
             inner.setLineWidth_(3.0)
             inner.stroke()
@@ -476,12 +581,20 @@ class MacPanel:
         if not lines and self.view.notice:
             lines = ((Run(self.view.notice, "notice"),),)
         y = PAD_Y
-        for line in reversed(lines):
+        bottom_w = 0.0
+        for index, line in enumerate(reversed(lines)):
             text = NSMutableAttributedString.alloc().init()
             for run in line:
                 text.appendAttributedString_(self._run_text(run, p, s, shadow))
-            self._draw_legible(text, p, (PAD_X, y + (line_h - (main.ascender() - main.descender())) / 2 - main.descender()))
+            point = (PAD_X, y + (line_h - (main.ascender() - main.descender())) / 2 - main.descender())
+            if line and line[0].kind == LABEL:
+                self._draw_label_pill(line[0], p, s, point)
+            self._draw_legible(text, p, point)
+            if index == 0:
+                bottom_w = text.size().width if line else 0.0
             y += line_h
+        if self.view.pending and not self.view.history:
+            self._draw_pending(view, p, main, bottom_w, bool(lines))
         if self.view.original:
             font = self._font_for("original", s)
             ink = theme.ink(p.text_secondary, p.surface, theme.text_edge(s.opacity))
@@ -489,6 +602,62 @@ class MacPanel:
                      NSShadowAttributeName: self._shadow(p, font.pointSize())}
             text = NSAttributedString.alloc().initWithString_attributes_(self.view.original, attrs)
             self._draw_legible(text, p, (PAD_X, y + ORIGINAL_GAP - font.descender()))
+
+    def _draw_label_pill(self, run: Run, p: theme.Palette, s: OverlaySettings, point) -> None:
+        """The compact speaker label: the speaker's number in a thin pill of the speaker's colour."""
+        font = self._font_for(LABEL, s)
+        width = NSAttributedString.alloc().initWithString_attributes_("\u2009" + run.text + "\u2009",
+                                                                     {NSFontAttributeName: font}).size().width
+        baseline = point[1] + (-self._font_for(PENDING, s).descender())
+        h = font.capHeight() + 2 * LABEL_PAD
+        rect = NSMakeRect(point[0] - LABEL_PAD / 2, baseline - LABEL_PAD - 0.5, width + LABEL_PAD, h)
+        pill = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, h / 2, h / 2)
+        color = p.speaker(run.speaker or 1)
+        _color(color.with_alpha(0.18)).setFill()
+        pill.fill()
+        _color(color).setStroke()
+        pill.setLineWidth_(1.2)
+        pill.stroke()
+
+    def _draw_pending(self, view, p: theme.Palette, main, bottom_w: float, has_rows: bool) -> None:
+        """Three small dots after the bottom row: speech was heard and its translation is on its way."""
+        line_h = self._line_h(main)
+        x = PAD_X + bottom_w + DOT_R * 4 if has_rows else PAD_X
+        x = min(x, view.bounds().size.width - PAD_X - DOT_R * 10)
+        cy = PAD_Y + line_h / 2 - main.descender() * 0.0 - line_h * 0.12
+        _color(theme.ink(p.text_tertiary, p.surface, theme.text_edge(self.settings.opacity))).setFill()
+        for i in range(3):
+            NSBezierPath.bezierPathWithOvalInRect_(
+                NSMakeRect(x + i * DOT_R * 3.2, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
+
+    def _draw_tab(self, view) -> None:
+        """A small rounded tab in the strip's colours: an upward chevron (history) or "back to live"."""
+        p = self.palette()
+        bounds = view.bounds()
+        rect = NSMakeRect(0.5, 0.5, bounds.size.width - 1, bounds.size.height - 1)
+        path = NSBezierPath.bezierPathWithRoundedRect_xRadius_yRadius_(rect, rect.size.height / 2, rect.size.height / 2)
+        _color(p.surface.with_alpha(max(0.9, self.settings.background_alpha))).setFill()
+        path.fill()
+        _color(p.stroke).setStroke()
+        path.setLineWidth_(1.0)
+        path.stroke()
+        w, h = bounds.size.width, bounds.size.height
+        if view.role == "history":
+            chevron = NSBezierPath.bezierPath()
+            chevron.moveToPoint_((w / 2 - 5, h / 2 - 2.5))
+            chevron.lineToPoint_((w / 2, h / 2 + 2.5))
+            chevron.lineToPoint_((w / 2 + 5, h / 2 - 2.5))
+            chevron.setLineWidth_(1.6)
+            chevron.setLineCapStyle_(1)
+            chevron.setLineJoinStyle_(1)
+            _color(p.text_secondary).setStroke()
+            chevron.stroke()
+            return
+        font = self._font_for(LABEL, self.settings)
+        text = NSAttributedString.alloc().initWithString_attributes_(
+            self.strings.back_to_live, {NSFontAttributeName: font, NSForegroundColorAttributeName: _color(p.text)})
+        size = text.size()
+        text.drawAtPoint_(((w - size.width) / 2, (h - size.height) / 2))
 
     def _draw_legible(self, text, p: theme.Palette, point) -> None:
         """Text over video. Under 50% background a thin outline in the surface colour goes strictly behind
@@ -509,7 +678,7 @@ class MacPanel:
         font = self._font_for(run.kind, s)
         if run.kind == LABEL:
             color = p.speaker(run.speaker or 1)
-            text = run.text + "  "
+            text = "\u2009" + run.text + "\u2009  "  # thin spaces inside the pill, then the gap to the text
         elif run.kind == MARK:
             color = p.failed_color  # --ui-red, the colour the pane gives a failed line's caption
             text = run.text + "  "

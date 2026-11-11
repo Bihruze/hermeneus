@@ -22,21 +22,30 @@ KEY_SHOW_ORIGINAL = "overlay_show_original"
 KEY_OPACITY = "overlay_opacity"
 KEY_SHOW_SPEAKER = "overlay_show_speaker"
 KEY_STYLE = "overlay_style"
+KEY_PACE = "overlay_pace"
+KEY_READING_CPS = "overlay_reading_cps"
 
 TEXT_SIZE_MIN, TEXT_SIZE_MAX = 14, 64
 MAX_LINES_MIN, MAX_LINES_MAX = 1, 3
 OPACITY_MIN, OPACITY_MAX = 0, 100
-# "theme" follows Hermes Desktop (overlay_tokens.FALLBACK or what the pane sent); "banner" is overlay_tokens.BANNER.
+# "banner" (the default, owner decision W28) is overlay_tokens.BANNER; "theme" follows Hermes Desktop
+# (overlay_tokens.FALLBACK or what the pane sent).
 STYLES = ("theme", "banner")
+# "read": every line keeps its reading time, the strip may fall behind fast speech. "live": while more than 3 s
+# of reading waits, lines go up faster (down to half the reading time); nothing is dropped (overlay/pace.py).
+PACES = ("read", "live")
+READING_CPS_MIN, READING_CPS_MAX = 0, 30  # 0: the target language's reading speed (pace.READING_CPS)
 
 DEFAULTS: dict[str, Any] = {
     KEY_AUTO: False,
     KEY_TEXT_SIZE: 26,
     KEY_MAX_LINES: 2,
-    KEY_SHOW_ORIGINAL: True,
-    KEY_OPACITY: 80,
+    KEY_SHOW_ORIGINAL: False,
+    KEY_OPACITY: 90,
     KEY_SHOW_SPEAKER: True,
-    KEY_STYLE: "theme",
+    KEY_STYLE: "banner",
+    KEY_PACE: "read",
+    KEY_READING_CPS: 0,
 }
 
 
@@ -49,6 +58,8 @@ class OverlaySettings:
     opacity: int = DEFAULTS[KEY_OPACITY]
     show_speaker: bool = DEFAULTS[KEY_SHOW_SPEAKER]
     style: str = DEFAULTS[KEY_STYLE]
+    pace: str = DEFAULTS[KEY_PACE]
+    reading_cps: int = DEFAULTS[KEY_READING_CPS]
 
     @property
     def background_alpha(self) -> float:
@@ -76,6 +87,8 @@ _FIELD_TO_KEY = {
     "opacity": KEY_OPACITY,
     "show_speaker": KEY_SHOW_SPEAKER,
     "style": KEY_STYLE,
+    "pace": KEY_PACE,
+    "reading_cps": KEY_READING_CPS,
 }
 
 
@@ -120,4 +133,12 @@ def from_settings(settings: Mapping[str, Any]) -> OverlaySettings:
         opacity=_int(get(KEY_OPACITY), DEFAULTS[KEY_OPACITY], OPACITY_MIN, OPACITY_MAX),
         show_speaker=_bool(get(KEY_SHOW_SPEAKER), DEFAULTS[KEY_SHOW_SPEAKER]),
         style=_choice(get(KEY_STYLE), DEFAULTS[KEY_STYLE], STYLES),
+        pace=_choice(get(KEY_PACE), DEFAULTS[KEY_PACE], PACES),
+        reading_cps=_reading_cps(get(KEY_READING_CPS)),
     )
+
+
+def _reading_cps(value: Any) -> int:
+    """0 (by language) or a speed from 5 to 30 characters per second."""
+    number = _int(value, DEFAULTS[KEY_READING_CPS], READING_CPS_MIN, READING_CPS_MAX)
+    return 0 if number == 0 else max(5, number)

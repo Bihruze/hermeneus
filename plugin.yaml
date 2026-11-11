@@ -92,22 +92,33 @@ config_schema:
     description: "Lines of translation the overlay shows before older text rolls off (1 to 3)."
   overlay_show_original:
     type: bool
-    default: true
-    label: "Overlay shows the original"
-    description: "Show the heard sentence in small text under its translation."
+    default: false
+    label: "Subtitles show the original"
+    description: "Also show the heard sentence: in small text with its translation in the overlay and on the overlay page, as the original of a line that was not translated, and while a line is still being spoken in the pane. Off: only the translation is shown."
   overlay_opacity:
     type: int
-    default: 80
+    default: 90
     label: "Overlay background opacity"
     description: "Background opacity of the overlay in percent (0 to 100). The text stays fully opaque."
   overlay_show_speaker:
     type: bool
     default: true
-    label: "Overlay speaker names"
-    description: "Show Speaker 1, Speaker 2 and their colours in the overlay."
+    label: "Overlay speaker numbers"
+    description: "Mark a new speaker with a small number in the speaker's colour at the start of the turn's first row."
   overlay_style:
     type: str
     choices: [theme, banner]
-    default: theme
+    default: banner
     label: "Overlay style"
-    description: "theme follows the Hermes Desktop theme. banner uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text."
+    description: "banner (default) uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. theme follows the Hermes Desktop theme."
+  overlay_pace:
+    type: str
+    choices: [read, live]
+    default: read
+    label: "Subtitle pace"
+    description: "read (read everything): every line stays up for its reading time, so the subtitles may fall behind fast speech. live (follow live): when more than 3 s of text is waiting, lines go up faster, down to half their reading time. No text is ever dropped; scroll back in the overlay to read it again."
+  overlay_reading_cps:
+    type: int
+    default: 0
+    label: "Reading speed"
+    description: "Characters per second a subtitle line is given (5 to 30). 0 uses the subtitle language: Turkish 17, English 20, most others 17."

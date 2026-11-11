@@ -149,6 +149,8 @@ hermes hermeneus overlay-page on   # subtitles on a 127.0.0.1 page for OBS (off 
 | `--voice VOICE_ID` | ElevenLabs voice id for spoken translation. |
 | `--json` | Print every event as one JSON line. |
 
+`run` prints each line once, when its translation is final, in the subtitle language only. A line that was not translated prints `(not translated: <reason>)`, with the heard words in front only when `overlay_show_original` is on. `run --json` prints the raw events.
+
 `doctor`, `devices`, `status`, `set`, `voices`, `stop`, `overlay` and `overlay-page` also take `--json`. `doctor` also takes `--no-audio-check` and `--test-model` (see [First run](#first-run)). `voices` also takes `--refresh`.
 
 `run` prints one translated line per segment, prefixed with the speaker's number in order of first appearance, for example `[Speaker 1] ...`, the same numbering the pane uses. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
@@ -191,11 +193,11 @@ hermes hermeneus overlay-page                   # show the page address while a 
 hermes hermeneus overlay-page off
 ```
 
-With the page on, the process that runs the session serves live subtitles at `http://127.0.0.1:47821/<token>/` while the session runs. The command, `run` and the doctor print the full address. Add it in OBS as a Browser source, or open it in a browser on this Mac for a second screen. The page background is transparent. It shows the newest lines, each as soon as it is heard and then replaced in place by its translation.
+With the page on, the process that runs the session serves live subtitles at `http://127.0.0.1:47821/<token>/` while the session runs. The command, `run` and the doctor print the full address. Add it in OBS as a Browser source, or open it in a browser on this Mac for a second screen. The page background is transparent. It shows the newest translated lines through the same display queue as the overlay ([Subtitle pace](#subtitle-pace)), three small dots while speech is being translated, and no source-language text unless `overlay_show_original` is on.
 
-The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity`, `overlay_show_speaker` and `overlay_style`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1) and `theme` (`light`, `dark`, `auto` or `banner`). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
+The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity`, `overlay_show_speaker`, `overlay_style`, `overlay_pace` and `overlay_reading_cps`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1), `theme` (`light`, `dark`, `auto` or `banner`), `pace` (`read` or `live`) and `reading_cps` (0, or 5 to 30). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
 
-`max_lines` counts rows on screen, as on the native overlay. Older lines leave first; a sentence longer than the limit rolls, so its newest words stay visible and its first words leave. The original stays on one row: its end when the translation rolled, otherwise its start.
+`max_lines` counts rows on screen, as on the native overlay. Older lines leave first; a sentence longer than the limit rolls, so its newest words stay visible and its first words leave, and the row then starts with "…". The original, when shown, stays on one row: its end when the translation rolled, otherwise its start.
 
 The page draws with the same token table as the native overlay (`hermeneus_engine/overlay_tokens.py`). Once the Desktop pane has sent the active Desktop theme, the page uses it in Desktop's own light or dark mode, and an open page changes within about two seconds when the theme changes. Before that it uses the default Nous theme and follows the system appearance. `theme=light` or `theme=dark` forces a mode.
 
@@ -241,16 +243,40 @@ The pane talks to the Hermes gateway through the plugin's backend routes under `
 
 ### Subtitle overlay
 
-The overlay is a strip near the bottom of the screen that floats above every other app, so the subtitles stay in view while you watch a video in Chrome or another app, including a full-screen video. It shows the current translation in large text and, above it, the sentence that was heard in small text. A line still being spoken appears at once in a lighter colour and its translation takes its place when it arrives. Each speaker turn starts a row of its own. Text that does not fit in the line limit rolls upwards, and older turns leave first. The strip grows and shrinks with its rows, and changes cross-fade in 150 ms unless macOS is set to reduce motion.
+The overlay is a strip near the bottom of the screen that floats above every other app, so the subtitles stay in view while you watch a video in Chrome or another app, including a full-screen video. It shows the translation only, in large text. A sentence appears when its translation is ready; while speech is still being translated, three small dots show after the last line, never the words in the source language. With `overlay_show_original` on, the heard sentence is shown too, in small text above its translation. Text rolls up: new text enters at the bottom and older rows move up and out, at a pace you can read (see [Subtitle pace](#subtitle-pace)). Each speaker turn starts a row of its own. The strip grows and shrinks with its rows, keeps its last lines up for 7 seconds after the speech stops, and changes cross-fade in 150 ms unless macOS is set to reduce motion.
 
 - Open it with `hermes hermeneus overlay show`, `/translate overlay show`, the overlay button in the pane's controls row or the one next to the status bar item. While no session runs, those two buttons arm the overlay instead: they turn on the `overlay` setting and it opens with the next session.
 - It closes by itself when the session stops, and with `overlay hide`, the same buttons, or **Hide overlay** in its menu.
-- It never takes keyboard focus and clicks pass through it to the app underneath. Only two small handles take the mouse: drag the grip at the left edge to move the strip, drag the handle at the right edge to change its width, right-click the grip for width presets, **Reset position** and **Hide overlay**. Position and width are remembered for each display.
+- It never takes keyboard focus and clicks pass through it to the app underneath. Only its own small controls take the mouse: drag the grip at the left edge to move the strip, drag the handle at the right edge to change its width, right-click the grip for width presets, **Reset position** and **Hide overlay**. Position and width are remembered for each display.
+- To read back, click the small up arrow tab above the strip's right end, or scroll over it with a mouse wheel or trackpad. The strip grows to 6 rows of history, a **Back to live** tab appears above it, and while the history is open the strip itself takes the mouse: scroll over it to move through earlier rows, click it or **Back to live** to return. It returns to live by itself after 8 seconds without a scroll, and then clicks pass through again. New text keeps arriving underneath while you read back; nothing is lost. The Desktop pane keeps the whole session with its own scroll.
 - It draws with the Hermes Desktop theme you use. The pane reads the theme's colours, radius and font on its own element and sends them to the backend, and both the overlay and the 127.0.0.1 page use them, in Desktop's light or dark. Until Desktop has sent a theme, the overlay uses the default Nous values and the system appearance.
-- `overlay_style: banner` swaps the theme for the Hermeneus banner colours (deep navy, a periwinkle edge, warm white text, speaker colours tuned to the navy) on both the overlay and the page. The default, `theme`, follows Desktop as above.
-- Text keeps a soft halo in the background colour, and below 50% background opacity a thin outline drawn behind opaque letters as well, so it stays readable on bright or dark video with no background at all.
-- The look popover next to the pane's overlay button sets text size, lines, background opacity, the original line and speaker names. These are the `overlay_*` settings below; a change there or in Settings reaches an open overlay without closing it.
+- The default style, `overlay_style: banner`, uses the Hermeneus banner colours (deep navy, a periwinkle edge, warm white text, speaker colours tuned to the navy) on both the overlay and the page. `theme` follows Desktop as above. The strip has 6 px corners in both styles, and every speaker colour is at least 4.5:1 (WCAG AA) against the strip in both styles and in light and dark: a theme colour that is fainter is darkened or lightened until it is.
+- The background is 90% opaque by default, so a news ticker or captions in the video do not show through the letters. Text keeps a soft halo in the background colour. Below 50% background opacity the text is always light with a thin dark outline, whatever the theme, as TV subtitles are.
+- A new speaker is marked with a small number in the speaker's colour at the start of the turn's first row (`overlay_show_speaker`), so the label does not take room from the text.
+- The look popover next to the pane's overlay button sets text size, lines, background opacity, the original line, speaker numbers and the pace. These are the `overlay_*` settings below; a change there or in Settings reaches an open overlay without closing it.
 - The overlay opens only on the Mac where the request comes from: a slash command from a chat platform such as Telegram, or a Desktop connected to a remote backend, is refused with a message.
+
+### Subtitle pace
+
+The overlay and the overlay page put text up through a display queue that follows professional subtitle practice. It changes when text is shown, not how fast it is produced.
+
+| Rule | Value | Source |
+|---|---|---|
+| Reading speed | Turkish 17, English 20, most other languages 17 characters per second; `overlay_reading_cps` overrides it (5 to 30) | Netflix Timed Text Style Guides (Turkish I.17, English I.14) |
+| Minimum time on screen | 1 s per unit | between Netflix (5/6 s) and DCMP (1.33 s); BBC gives 1.2 s for 4 words |
+| Unit | a sentence when it fits the strip's rows (at most 84 characters, a two-line subtitle), otherwise phrases cut after punctuation, before a conjunction or after a Turkish postposition, never inside a word | Netflix and BBC line-break rules |
+| Rows | 2 by default (`overlay_max_lines`, 1 to 3), rolling up | BBC live subtitles: two scrolling lines; CEA-608 roll-up: 2 to 4 rows |
+| Hold | the last lines stay 7 s after they had their reading time | Netflix: 7 s at most per subtitle |
+| Mid-sentence | a top row that starts inside a sentence begins with "…" | Netflix: an ellipsis marks a subtitle that starts mid-sentence |
+
+Each unit stays its reading time (characters divided by the reading speed, at least the minimum) before the next one enters, in the order the sentences were spoken. A unit enters whole: when it does not fit the rest of the bottom row it starts a new row. No text is dropped or shortened.
+
+When speech is faster than reading speed, `overlay_pace` decides:
+
+- `read` (read everything, the default): every unit keeps its full reading time, so the subtitles may fall behind fast speech and catch up in pauses.
+- `live` (follow live): while more than 3 s of reading waits, units go up faster, down to half their reading time and never under the minimum. Scroll back to read what went by.
+
+Measured by replaying news timing through the queue (20 news sentences into Turkish, 3 rounds, a 0.25 s pause between sentences, translation ready 1.5 s after each sentence ends): at 160 words per minute `read` adds at most 3.0 s, at 200 at most 14.9 s and at 230 at most 42.7 s over four minutes of continuous speech; `live` adds at most 1.6 s, 1.6 s and 2.3 s.
 
 ## Configuration
 
@@ -275,10 +301,12 @@ Command flags override the settings for one session.
 | `overlay` | Subtitle overlay | bool | `false` | | Open the floating subtitle overlay with every session. It floats above other apps on this Mac and never takes keyboard focus. |
 | `overlay_text_size` | Overlay text size | int | `26` | | Translation text size in the overlay, in points (14 to 64). |
 | `overlay_max_lines` | Overlay lines | int | `2` | | Lines of translation the overlay shows before older text rolls off (1 to 3). |
-| `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
-| `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
-| `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
-| `overlay_style` | Overlay style | str | `theme` | theme, banner | theme follows the Hermes Desktop theme. banner uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. |
+| `overlay_show_original` | Subtitles show the original | bool | `false` | | Also show the heard sentence: in small text with its translation in the overlay and on the overlay page, as the original of a line that was not translated, and while a line is still being spoken in the pane. Off: only the translation is shown. |
+| `overlay_opacity` | Overlay background opacity | int | `90` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
+| `overlay_show_speaker` | Overlay speaker numbers | bool | `true` | | Mark a new speaker with a small number in the speaker's colour at the start of the turn's first row. |
+| `overlay_style` | Overlay style | str | `banner` | theme, banner | banner (default) uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. theme follows the Hermes Desktop theme. |
+| `overlay_pace` | Subtitle pace | str | `read` | read, live | read (read everything): every line stays up for its reading time, so the subtitles may fall behind fast speech. live (follow live): when more than 3 s of text is waiting, lines go up faster, down to half their reading time. No text is ever dropped; scroll back in the overlay to read it again. |
+| `overlay_reading_cps` | Reading speed | int | `0` | | Characters per second a subtitle line is given (5 to 30). 0 uses the subtitle language: Turkish 17, English 20, most others 17. |
 | `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
@@ -481,7 +509,7 @@ Status: implemented and reviewed against documentation, not yet run on a Windows
 
 ### Adding a Windows popup later
 
-The overlay's logic is platform neutral (`hermeneus_engine/overlay/app.py`, `model.py`, `placement.py`). A window backend implements the `Panel` protocol in `overlay/app.py`: `displays()`, `main_display()`, `measure(text, run, settings)`, `measure_original(text, settings)`, `strip_height(settings)`, `text_inset()`, `set_frame(frame)`, `render(view, settings)` and `set_visible(visible)`. A Windows panel would need a topmost, borderless, click-through-optional layered window (`WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`) that does not take focus, per-monitor DPI awareness, text measurement with DirectWrite or GDI, a message loop in the overlay subprocess, and `overlay/control.py` changes for Windows (it uses `fcntl`, `select` on a pipe and SIGTERM today). It is not built: it could not be tested without a Windows machine, and whether to add it is the owner's decision.
+The overlay's logic is platform neutral (`hermeneus_engine/overlay/app.py`, `model.py`, `placement.py`). A window backend implements the `Panel` protocol in `overlay/app.py`: `displays()`, `main_display()`, `measure(text, run, settings)`, `measure_original(text, settings)`, `strip_height(settings)`, `text_inset()`, `set_frame(frame)`, `render(view, settings)` and `set_visible(visible)`, and it calls `OverlayApp.scroll(rows, now)` and `back_to_live(now)` from its history controls. The display queue and the roll-up rows are platform neutral too (`overlay/pace.py`). A Windows panel would need a topmost, borderless, click-through-optional layered window (`WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE`) that does not take focus, per-monitor DPI awareness, text measurement with DirectWrite or GDI, a message loop in the overlay subprocess, and `overlay/control.py` changes for Windows (it uses `fcntl`, `select` on a pipe and SIGTERM today). It is not built: it could not be tested without a Windows machine, and whether to add it is the owner's decision.
 
 ### Assumptions only a Windows run can confirm
 

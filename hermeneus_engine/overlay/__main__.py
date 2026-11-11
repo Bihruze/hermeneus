@@ -36,7 +36,7 @@ from .follower import follow
 from .model import Strings
 from .placement import Positions
 
-TICK_S = 0.25
+TICK_S = 0.1  # the display queue puts a line up within this of its time
 
 
 def _take_lock(data_dir: Path):
@@ -76,6 +76,7 @@ def _apply_theme(data_dir: Path, panel, overlay, state: dict) -> None:
     sent = theme.load(path) if mtime else None
     panel.set_palette(sent)
     overlay.strings = Strings(**dict(sent.strings)) if sent is not None else Strings()
+    panel.set_strings(overlay.strings)
     overlay.repaint()
 
 
@@ -114,7 +115,9 @@ def main(argv=None) -> int:
     panel = panel_mac.MacPanel(on_moved=lambda frame: overlay.moved(frame),
                                on_width=lambda w: overlay.set_width(w),
                                on_reset=lambda: overlay.reset_position(),
-                               on_hide=quit_soon)
+                               on_hide=quit_soon,
+                               on_scroll=lambda rows: overlay.scroll(rows, time.monotonic()),
+                               on_live=lambda: overlay.back_to_live(time.monotonic()))
     overlay = OverlayApp(panel, Positions(control.positions_file(data_dir)), settings)
     _apply_theme(data_dir, panel, overlay, state)
     overlay.place()
@@ -160,7 +163,7 @@ def main(argv=None) -> int:
         if mtime != state["mtime"]:
             state["mtime"] = mtime
             overlay.apply_settings(new)
-        overlay.refresh(time.monotonic())  # clears the strip once a line has been up long enough
+        overlay.refresh(time.monotonic())  # the next queued line goes up, or the strip clears after its hold
 
     timer_target = HermeneusOverlayTicker.alloc().initWithCallback_(tick)
     NSTimer.scheduledTimerWithTimeInterval_target_selector_userInfo_repeats_(TICK_S, timer_target, "tick:", None, True)

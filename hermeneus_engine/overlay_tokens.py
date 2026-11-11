@@ -91,6 +91,28 @@ def contrast(a: Rgba, b: Rgba) -> float:
     return (la + 0.05) / (lb + 0.05)
 
 
+AA = 4.5  # WCAG 2 AA for text: every overlay speaker colour meets it on its surface (owner decision, W28)
+STRIP_RADIUS_PX = 6.0  # the overlay strip's corners in every style (owner decision, W28)
+
+
+def legible(color: Rgba, surface: Rgba, ratio: float = AA) -> Rgba:
+    """``color`` as it is when it reaches ``ratio`` against the opaque ``surface``; otherwise mixed towards
+    black (light surface) or white (dark surface) in small steps until it does, so the hue stays."""
+    ground = surface.with_alpha(1.0)
+    solid = color.over(ground) if color.a < 1 else color
+    if contrast(solid, ground) >= ratio:
+        return color
+    toward = Rgba(0, 0, 0, 1) if ground.luminance() > 0.18 else Rgba(1, 1, 1, 1)
+    for step in range(1, 21):
+        t = step / 20
+        mixed = Rgba(round((solid.r * (1 - t) + toward.r * t) * 255) / 255,
+                     round((solid.g * (1 - t) + toward.g * t) * 255) / 255,
+                     round((solid.b * (1 - t) + toward.b * t) * 255) / 255, 1.0)
+        if contrast(mixed, ground) >= ratio:
+            return mixed
+    return toward
+
+
 def _mix(a: Rgba, pa: float, b: Rgba) -> Rgba:
     """CSS ``color-mix(in srgb, a pa, b)``: premultiplied, as browsers compute it."""
     pb = 1 - pa
@@ -125,7 +147,11 @@ class Palette:
         return self.failed if self.failed is not None else _RED[self.dark]
 
     def speaker(self, number: int) -> Rgba:
-        return self.speakers[(number - 1) % len(self.speakers)]
+        """Speaker ``number``'s colour, raised to AA on this surface when the theme's own is too faint."""
+        return legible(self.speakers[(number - 1) % len(self.speakers)], self.surface)
+
+    def legible_speakers(self) -> tuple[Rgba, ...]:
+        return tuple(legible(c, self.surface) for c in self.speakers)
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -242,7 +268,7 @@ def palette_from_payload(payload: Any) -> Palette:
                    strings=parse_strings(payload.get("strings")), **parsed)
 
 
-STRING_KEYS = ("speaker", "not_translated", "waiting", "reconnecting")
+STRING_KEYS = ("speaker", "not_translated", "waiting", "reconnecting", "back_to_live")
 _CONTROL = re.compile(r"[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
@@ -289,9 +315,9 @@ def palette_from_json(raw: str) -> Optional[Palette]:
 def css_vars(p: Palette) -> dict:
     """The palette as the 127.0.0.1 page's CSS variables."""
     out = {"--surface": p.surface.css(), "--text-primary": p.text.css(), "--text-secondary": p.text_secondary.css(),
-           "--text-tertiary": p.text_tertiary.css(), "--stroke": p.stroke.css(), "--radius": f"{p.radius_px}px",
+           "--text-tertiary": p.text_tertiary.css(), "--stroke": p.stroke.css(), "--radius": f"{STRIP_RADIUS_PX:g}px",
            "--font-sans": p.font, "--failed": p.failed_color.css()}
-    for i, color in enumerate(p.speakers[:6], start=1):
+    for i, color in enumerate(p.legible_speakers()[:6], start=1):
         out[f"--speaker-{i}"] = color.css()
     return out
 

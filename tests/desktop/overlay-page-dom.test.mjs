@@ -96,10 +96,18 @@ function loadPage(settings) {
   const container = new El('main')
   const settingsBlock = { textContent: JSON.stringify(settings) }
   let source = null
+  let tick = null
+  let now = 0
   const context = {
     URLSearchParams,
     setTimeout,
     clearTimeout,
+    // A fake clock: each event arrives 8 s after the one before, so the display queue has given the
+    // previous line its reading time and every step is on screen (the timing has its own tests).
+    performance: { now: () => now * 1000 },
+    setInterval: fn => {
+      tick = fn
+    },
     location: { search: '' },
     addEventListener() {},
     getComputedStyle: () => ({ lineHeight: `${LINE_HEIGHT}px` }),
@@ -115,9 +123,13 @@ function loadPage(settings) {
   vm.createContext(context)
   vm.runInContext(script, context)
   return {
-    send: event => source.onmessage({ data: JSON.stringify(event) }),
+    send: event => {
+      now += 8
+      source.onmessage({ data: JSON.stringify(event) })
+      tick()
+    },
     snapshot: () =>
-      container.children.map(el => {
+      container.children.filter(el => el.className === 'line').map(el => {
         const main = el.children.find(c => c.className === 'main')
         const text = main.children.find(c => c.className === 'text').textContent
         return { text, hidden: el.hidden, rows: el.hidden ? 0 : main.getBoundingClientRect().height / LINE_HEIGHT }
@@ -161,8 +173,9 @@ for (const maxLines of [1, 2, 3]) {
 
   test(`Lines ${maxLines}: no line is hidden and shown again between consecutive updates`, () => {
     const snaps = run(maxLines)
-    for (let i = 2; i < snaps.length; i++) {
-      // From step 2 on the same two lines are candidates; each keeps its visibility.
+    for (let i = 3; i < snaps.length; i++) {
+      // From step 3 on the same two lines are candidates (a partial line is not shown: target language
+      // only); each keeps its visibility.
       assert.deepEqual(snaps[i].map(s => s.hidden), snaps[i - 1].map(s => s.hidden), `step ${i + 1}`)
     }
   })
@@ -172,8 +185,10 @@ test('Lines 2: the long first line rolls to 2 rows, then leaves whole when the s
   const snaps = run(2)
   assert.equal(snaps[0].length, 1)
   assert.equal(snaps[0][0].rows, 2)
-  assert.ok(A.endsWith(snaps[0][0].text) && snaps[0][0].text !== A)
-  for (const snap of snaps.slice(1)) {
+  assert.ok(snaps[0][0].text.startsWith('\u2026') && A.endsWith(snaps[0][0].text.slice(1)) && snaps[0][0].text !== A)
+  // Step 2 is a partial line: its English never reaches the page, the long line stays as it was.
+  assert.deepEqual(snaps[1], snaps[0])
+  for (const snap of snaps.slice(2)) {
     assert.equal(snap[0].hidden, true)
     assert.equal(snap[1].hidden, false)
     assert.equal(snap[1].rows, 1)
@@ -204,7 +219,7 @@ test('Lines 3: short lines that fit together all stay shown across updates', () 
   const before = page.snapshot()
   page.send(line(5, 'c', 'translated', 'three', 'uc'))
   const after = page.snapshot()
-  assert.deepEqual(before.map(s => s.hidden), [false, false, false])
+  assert.deepEqual(before.map(s => s.hidden), [false, false]) // the partial line is not shown
   assert.deepEqual(after.map(s => s.hidden), [false, false, false])
   assert.equal(after.reduce((n, s) => n + s.rows, 0), 3)
 })

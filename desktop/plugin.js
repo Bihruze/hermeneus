@@ -533,7 +533,7 @@ export function voiceLabel(voices, voiceId, fallback) {
 
 /** Overlay look settings the pane offers (plugin.yaml overlay_* keys, hermeneus_engine/overlay_settings.py). */
 export const OVERLAY_TEXT_SIZES = Object.freeze([20, 26, 34, 44])
-export const OVERLAY_OPACITIES = Object.freeze([0, 40, 80, 100])
+export const OVERLAY_OPACITIES = Object.freeze([0, 40, 80, 90, 100])
 
 /** Theme tokens the overlays draw with (hermeneus_engine/overlay_tokens.py keeps the same table). */
 export const OVERLAY_COLOR_TOKENS = Object.freeze({
@@ -900,6 +900,12 @@ const EN = {
   speaker: n => `Speaker ${n}`,
   translating: 'translating',
   failedLine: error => (error ? `Translation failed: ${error}. Original shown.` : 'Translation failed. Original shown.'),
+  failedLineHidden: error => (error ? `Translation failed: ${error}.` : 'Translation failed.'),
+  notTranslatedLine: 'Not translated',
+  waitingTranslation: 'Translating\u2026',
+  overlayPace: 'Pace',
+  paceRead: 'Read all',
+  paceLive: 'Follow live',
   jumpToLive: 'Jump to live',
   newLines: n => (n === 1 ? '1 new line' : `${n} new lines`),
   smaller: 'Smaller subtitles',
@@ -917,6 +923,7 @@ const EN = {
   overlayNotTranslated: 'Not translated',
   overlayWaiting: 'Waiting for speech',
   overlayReconnecting: 'Reconnecting',
+  overlayBackToLive: 'Back to live',
   overlayLook: 'Overlay look',
   overlayTextSize: 'Text size',
   overlayLines: 'Lines',
@@ -1467,7 +1474,50 @@ function translateYOf(el) {
   return match[1] ? values[13] || 0 : values[5] || 0
 }
 
-const LineRow = memo(function LineRow({ color, enter, line, number, scale, showSpeaker, t }) {
+/** What a row of the pane shows for a line: the translation, or (target language only, the shared
+ *  overlay_show_original setting off) a neutral placeholder while it is being translated and "Not
+ *  translated" when it failed. With originals on, the source words as before. */
+export function lineText(line, showOriginal, t) {
+  const translated = line.state === 'translated'
+  let primaryText = line.original
+  let primaryColor = 'var(--ui-text-secondary)'
+  let caption = null
+  let captionColor = 'var(--ui-text-tertiary)'
+
+  if (translated) {
+    // Translation on top in the primary text colour; the original underneath, smaller and
+    // dimmer, tagged with the language it was heard in.
+    primaryText = line.translation
+    primaryColor = 'var(--ui-text-primary)'
+    caption = [
+      line.source_language
+        ? jsx('span', { style: S.langTag, children: line.source_language.toUpperCase() }, 'tag')
+        : null,
+      jsx('span', { lang: line.source_language ?? undefined, children: line.original }, 'text')
+    ]
+  } else if (line.state === 'partial' || line.state === 'committed') {
+    // Target language only (overlay_show_original off): the live line shows a neutral placeholder,
+    // not the words in the source language, until its translation arrives.
+    if (!showOriginal) primaryText = t('waitingTranslation')
+    primaryColor = 'var(--ui-text-tertiary)'
+    if (line.state === 'committed' && showOriginal) {
+      caption = t('translating')
+      captionColor = 'var(--ui-text-quaternary)'
+    }
+  } else if (line.state === 'failed') {
+    // The original stays available as the secondary line only when originals are on.
+    if (!showOriginal) {
+      primaryText = t('notTranslatedLine')
+      primaryColor = 'var(--ui-text-tertiary)'
+    }
+    caption = showOriginal ? t('failedLine', line.error) : t('failedLineHidden', line.error)
+    captionColor = 'var(--ui-red)'
+  }
+
+  return { primaryText, primaryColor, caption, captionColor }
+}
+
+const LineRow = memo(function LineRow({ color, enter, line, number, scale, showOriginal, showSpeaker, t }) {
   const primaryRef = useRef(null)
   const rowRef = useRef(null)
   const shownState = useRef(line.state)
@@ -1494,31 +1544,7 @@ const LineRow = memo(function LineRow({ color, enter, line, number, scale, showS
     }
   }, [line.state, translated])
 
-  let primaryText = line.original
-  let primaryColor = 'var(--ui-text-secondary)'
-  let caption = null
-  let captionColor = 'var(--ui-text-tertiary)'
-
-  if (translated) {
-    // Translation on top in the primary text colour; the original underneath, smaller and
-    // dimmer, tagged with the language it was heard in.
-    primaryText = line.translation
-    primaryColor = 'var(--ui-text-primary)'
-    caption = [
-      line.source_language
-        ? jsx('span', { style: S.langTag, children: line.source_language.toUpperCase() }, 'tag')
-        : null,
-      jsx('span', { lang: line.source_language ?? undefined, children: line.original }, 'text')
-    ]
-  } else if (line.state === 'partial') {
-    primaryColor = 'var(--ui-text-tertiary)'
-  } else if (line.state === 'committed') {
-    caption = t('translating')
-    captionColor = 'var(--ui-text-quaternary)'
-  } else if (line.state === 'failed') {
-    caption = t('failedLine', line.error)
-    captionColor = 'var(--ui-red)'
-  }
+  const { primaryText, primaryColor, caption, captionColor } = lineText(line, showOriginal, t)
 
   return jsxs('div', {
     ref: rowRef,
@@ -1649,6 +1675,8 @@ function Notice({ ctrl, kind, link, onDoctor, status, t }) {
 }
 
 function SubtitleList({ ctrl, onDoctor, onJumpChange }) {
+  // The pane follows the shared overlay_show_original setting (off: target language only).
+  const showOriginal = useValue(ctrl.overlay).settings?.show_original === true
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
   const link = useValue(ctrl.link)
@@ -1824,6 +1852,7 @@ function SubtitleList({ ctrl, onDoctor, onJumpChange }) {
                         line,
                         number: speakerNumber(state, line.speaker_id),
                         scale: fontScale,
+                        showOriginal,
                         showSpeaker: startsTurn(lines, index),
                         t
                       },
@@ -2100,7 +2129,8 @@ export function overlayStrings(t) {
     speaker: t('speaker', '{n}'),
     not_translated: t('overlayNotTranslated'),
     waiting: t('overlayWaiting'),
-    reconnecting: t('overlayReconnecting')
+    reconnecting: t('overlayReconnecting'),
+    back_to_live: t('overlayBackToLive')
   }
 }
 
@@ -2186,7 +2216,22 @@ function OverlayLook({ ctrl }) {
           pick('max_lines', [1, 2, 3], t('overlayLines')),
           pick('opacity', OVERLAY_OPACITIES, t('overlayOpacity')),
           toggle('show_original', t('overlayOriginal')),
-          toggle('show_speaker', t('overlaySpeaker'))
+          toggle('show_speaker', t('overlaySpeaker')),
+          jsxs('div', {
+            style: S.lookRow,
+            children: [
+              jsx('span', { style: S.lookLabel, children: t('overlayPace') }),
+              jsx(SegmentedControl, {
+                disabled: overlay.busy,
+                onChange: id => void ctrl.setOverlayLook({ overlay_pace: id }),
+                options: [
+                  { id: 'read', label: t('paceRead') },
+                  { id: 'live', label: t('paceLive') }
+                ],
+                value: look.pace === 'live' ? 'live' : 'read'
+              })
+            ]
+          })
         ]
       })
     ]
