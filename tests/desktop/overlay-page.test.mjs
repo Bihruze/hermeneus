@@ -17,7 +17,7 @@ function load() {
   vm.runInContext(scripts[0], context)
   const api = context.HermeneusOverlay
   // Arrays made in the vm context have that context's prototypes; copy views into this one.
-  return { ...api, visibleLines: (state, settings) => JSON.parse(JSON.stringify(api.visibleLines(state, settings))) }
+  return { ...api, visibleLines: (state, settings, words) => JSON.parse(JSON.stringify(api.visibleLines(state, settings, words))) }
 }
 
 const O = load()
@@ -127,4 +127,23 @@ test('a theme event picks the forced mode, then Desktop mode, then the system ap
   const odd = O.themeVars({ ...tokens, common: { 'color': 'red', '--x': 5, '--ok': 'y' } }, 'dark', false)
   assert.deepEqual(plain(odd), { '--ok': 'y', '--surface': 'D' })
   assert.equal(O.themeVars(null, 'auto', false), null)
+})
+
+test('a translated line with no translation shows as failed with the marker, as on the strip', () => {
+  // Before: the page hid it while the native strip showed its original (A3 reaudit2 N7).
+  const s = run([line(1, 'a', 'translated', 'Hello there', ''), line(2, 'b', 'failed', 'Fast talk')])
+  assert.deepEqual(O.visibleLines(s, ALL).map(v => [v.text, v.failed, v.marker, v.original]), [
+    ['Hello there', true, 'Not translated', ''],
+    ['Fast talk', true, 'Not translated', '']
+  ])
+})
+
+test('the page draws the pane\'s localised words', () => {
+  // Before: "Speaker N" and "Not translated" were English only (A3 reaudit2 N8).
+  const words = O.applyWords({ speaker: 'Speaker {n}', not_translated: 'Not translated' },
+    { speaker: 'Konuşmacı {n}', not_translated: 'Çevrilmedi' })
+  const s = run([line(1, 'a', 'failed', 'Fast talk', '', 's1:speaker_0')])
+  assert.deepEqual(O.visibleLines(s, ALL, JSON.parse(JSON.stringify(words))).map(v => [v.speaker, v.marker]), [['Konuşmacı 1', 'Çevrilmedi']])
+  // A template without {n} is not taken.
+  assert.equal(O.applyWords({ speaker: 'Speaker {n}', not_translated: 'x' }, { speaker: 'Konuşmacı' }).speaker, 'Speaker {n}')
 })

@@ -562,4 +562,17 @@ def test_page_marks_a_failed_line_in_the_shared_red():
     assert tokens["dark"]["--failed"] == tok.FALLBACK[True].failed_color.css()
     assert tokens["light"]["--failed"] == tok.FALLBACK[False].failed_color.css()
     html = op.PAGE_FILE.read_text(encoding="utf-8")
-    assert ".failed .text::before" in html and "content: 'Not translated'" in html and "var(--failed)" in html
+    assert ".marker {" in html and "color: var(--failed)" in html
+
+
+def test_page_tokens_carry_the_panes_words(tmp_path):
+    from hermeneus_engine import overlay_page as op, overlay_tokens as tok
+    assert op.theme_tokens(None)["strings"]["not_translated"] == "Not translated"
+    sent = tok.palette_from_payload({"mode": "light", "colors": {
+        "surface": "#ffffff", "text": "#000000", "text_secondary": "#000000bd", "text_tertiary": "#0000008a",
+        "stroke": "#00000020", "speakers": ["#0053fd"]}, "strings": {"not_translated": "Çevrilmedi"}})
+    path = tmp_path / "theme.json"
+    path.write_text(tok.palette_to_json(sent))
+    words = op.theme_tokens(path)["strings"]
+    assert words["not_translated"] == "Çevrilmedi" and words["speaker"] == "Speaker {n}"
+    op.theme_css(op.theme_tokens(path))  # the words never reach the CSS

@@ -76,9 +76,9 @@ html, body {
 .pending .text { color: var(--text-pending); }
 .failed .text { color: var(--text-failed); }
 /* A failed line starts with a marker in --ui-red, as the pane marks it (shared table:
-   hermeneus_engine/overlay_tokens.py, role "failed"; the native strip draws the same words). */
-.failed .text::before {
-  content: 'Not translated';
+   hermeneus_engine/overlay_tokens.py, role "failed"). Its words come from the pane's i18n copy
+   with the theme, the same words the native strip draws (overlay/model.py Strings). */
+.marker {
   color: var(--failed);
   font-size: var(--label-scale);
   font-weight: var(--label-weight);
@@ -226,22 +226,38 @@ html, body {
     return seq === null ? next : Object.assign({}, next, { seq: seq })
   }
 
-  /** What the page draws: the newest lines that have words, at most max_lines. */
-  function visibleLines(state, settings) {
+  /** The words the page draws; the pane's localised copy replaces them (theme event "strings"). */
+  var WORDS = { speaker: 'Speaker {n}', not_translated: 'Not translated' }
+
+  function applyWords(words, strings) {
+    var out = { speaker: words.speaker, not_translated: words.not_translated }
+    if (!strings || typeof strings !== 'object') return out
+    if (typeof strings.speaker === 'string' && strings.speaker.indexOf('{n}') !== -1) out.speaker = strings.speaker
+    if (typeof strings.not_translated === 'string' && strings.not_translated !== '') out.not_translated = strings.not_translated
+    return out
+  }
+
+  /** What the page draws: the newest lines that have words, at most max_lines. One rule with the
+   *  native strip (overlay/model.py segment): a "translated" line with no translation shows as
+   *  failed, its original with the marker. */
+  function visibleLines(state, settings, words) {
+    words = words || WORDS
     if (state.status !== null && RUNNING.indexOf(state.status) === -1) return []
     var shown = state.lines.filter(function (line) {
-      return line.state === 'translated' ? line.translation !== '' : line.original !== ''
+      return (line.state === 'translated' && line.translation !== '') || line.original !== ''
     })
     return shown.slice(-settings.max_lines).map(function (line) {
-      var translated = line.state === 'translated'
+      var translated = line.state === 'translated' && line.translation !== ''
       var number = line.speaker_id !== null && has(state.speakers, line.speaker_id) ? state.speakers[line.speaker_id] : null
+      var failed = line.state === 'failed' || (line.state === 'translated' && !translated)
       return {
         id: line.line_id,
         text: translated ? line.translation : line.original,
         pending: line.state === 'partial' || line.state === 'committed',
-        failed: line.state === 'failed',
+        failed: failed,
+        marker: failed ? words.not_translated : '',
         original: settings.show_original && translated && line.original !== '' ? line.original : '',
-        speaker: settings.show_speaker && number !== null ? 'Speaker ' + number : '',
+        speaker: settings.show_speaker && number !== null ? words.speaker.replace('{n}', String(number)) : '',
         slot: number === null ? 0 : ((number - 1) % SPEAKER_SLOTS) + 1
       }
     })
@@ -276,6 +292,7 @@ html, body {
     resolveSettings: resolveSettings,
     createState: createState,
     applyEvent: applyEvent,
+    applyWords: applyWords,
     visibleLines: visibleLines
   }
 
@@ -312,19 +329,22 @@ html, body {
     var main = document.createElement('span')
     var speaker = document.createElement('span')
     speaker.className = 'speaker'
+    var marker = document.createElement('span')
+    marker.className = 'marker'
     var body = document.createElement('span')
     body.className = 'text'
     main.appendChild(speaker)
+    main.appendChild(marker)
     main.appendChild(body)
     rootEl.appendChild(original)
     rootEl.appendChild(main)
-    return { root: rootEl, original: original, speaker: speaker, text: body }
+    return { root: rootEl, original: original, speaker: speaker, marker: marker, text: body }
   }
 
   // Each line keeps its element while it changes, so a partial is replaced in place by its
   // translation and nothing is torn down and rebuilt.
   function render() {
-    var views = visibleLines(state, settings)
+    var views = visibleLines(state, settings, words)
     var keep = {}
     for (var i = 0; i < views.length; i++) {
       var view = views[i]
@@ -334,6 +354,8 @@ html, body {
       setText(node.speaker, view.speaker)
       node.speaker.hidden = view.speaker === ''
       node.speaker.setAttribute('data-slot', String(view.slot))
+      setText(node.marker, view.marker)
+      node.marker.hidden = view.marker === ''
       setText(node.text, view.text)
       node.root.classList.toggle('pending', view.pending)
       node.root.classList.toggle('failed', view.failed)
@@ -349,6 +371,7 @@ html, body {
   }
 
   var theme = null
+  var words = WORDS
   var darkQuery = root.matchMedia ? root.matchMedia('(prefers-color-scheme: dark)') : null
 
   function applyTheme() {
@@ -369,6 +392,8 @@ html, body {
     if (event && event.type === 'theme') {
       theme = event.tokens
       applyTheme()
+      words = applyWords(words, theme && theme.strings)
+      render()
       return
     }
     var next = applyEvent(state, event)

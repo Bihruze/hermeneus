@@ -208,6 +208,10 @@ def theme_tokens(theme_file: Optional[Path] = None) -> dict:
     out = {"common": common, "light": _scheme_vars(light), "dark": _scheme_vars(dark),
            "follow_system": sent is None}
     out["default"] = _scheme_vars(sent) if sent is not None else out["light"]
+    # The overlay words in the pane's language (overlay/model.py Strings); English until a pane sent them.
+    from dataclasses import asdict as _asdict
+    from .overlay.model import Strings
+    out["strings"] = {**_asdict(Strings()), **(dict(sent.strings) if sent is not None else {})}
     return out
 
 
@@ -490,6 +494,10 @@ class OverlayPageServer:
         stream = self._events(after)
         seen = _mtime(self._theme_file())
         checked = time.monotonic()
+        if seen is not None:  # the pane's theme and words from the first event, not only on a change
+            first = self._theme_event(self._theme_file())
+            if first is not None:
+                writer.write(sse_chunk(first))
         try:
             async for event in stream:
                 slim = slim_event(event)
