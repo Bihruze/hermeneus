@@ -783,3 +783,40 @@ def test_backend_shows_device_and_reattach_notes_without_failing():
         b._handle_status(b._run, json.dumps({"code": code, "message": f"note {code}", "details": {}}).encode())
         assert b.status_message == f"note {code}" and b.failure == ""
     b.stop()
+
+
+# ---------------------------------------------------------------- doctor tone routing
+
+def test_doctor_prefers_a_two_channel_virtual_output():
+    devs = [{"name": "MacBook Air Speakers", "max_output_channels": 2}, {"name": "BlackHole 16ch", "max_output_channels": 16},
+            {"name": "BlackHole 2ch", "max_output_channels": 2}, {"name": "Microphone", "max_output_channels": 0}]
+    assert tap_doctor.virtual_output_device(lambda: devs) == "BlackHole 2ch"
+    assert tap_doctor.virtual_output_device(lambda: devs[:2]) == "BlackHole 16ch"
+    assert tap_doctor.virtual_output_device(lambda: [devs[0], {"name": "VB-Cable", "max_output_channels": 2}]) == "VB-Cable"
+    assert tap_doctor.virtual_output_device(lambda: devs[:1]) is None
+
+
+def test_default_player_uses_the_quiet_tone_without_a_virtual_device(monkeypatch):
+    made = []
+    monkeypatch.setattr(tap_doctor, "TonePlayer", lambda device=None, amplitude=None: made.append((device, amplitude)) or object())
+    monkeypatch.setattr(tap_doctor, "virtual_output_device", lambda: None)
+    tap_doctor.default_player()
+    monkeypatch.setattr(tap_doctor, "virtual_output_device", lambda: "BlackHole 2ch")
+    tap_doctor.default_player()
+    assert made == [(None, tap_doctor.AUDIBLE_AMPLITUDE), ("BlackHole 2ch", tap_doctor.VIRTUAL_AMPLITUDE)]
+    assert 20 * np.log10(tap_doctor.AUDIBLE_AMPLITUDE / np.sqrt(2)) > tap_doctor.MIN_RMS_DBFS + 6
+
+
+def test_doctor_passes_on_the_quiet_tone_and_says_it_may_be_heard():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, sine(440, 4800, amp=tap_doctor.AUDIBLE_AMPLITUDE, start=i * 4800))
+                                            for i in range(10)])
+    assert r.ok and "may have heard it" in r.message and "--no-audio-check" in r.message
+
+
+def test_doctor_run_skips_the_audio_check_on_request():
+    from hermeneus_engine import doctor
+    called = []
+    report = doctor.run(get_secret=lambda n: None, aux_config=None, mac_ver=lambda: ("27.0.1", "", ""),
+                        which=lambda n: None, verify_tap_audio=lambda: called.append(1) or (True, "x"), audio_check=False)
+    perm = [c for c in report.checks if c.name == "permission: system audio recording"]
+    assert called == [] and perm and perm[0].ok is None and "--no-audio-check" in perm[0].detail
