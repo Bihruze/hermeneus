@@ -280,3 +280,10 @@ async def test_source_app_quit():
 def test_source_stalled_keeps_the_watchdog_text():
     text = "Capture from zoom.us stopped receiving audio. Stop and start translation again."
     assert messages.capture_stopped(text, "zoom.us") == text
+
+
+def test_network_lost_spoken_translation():
+    raw = "Could not connect to ElevenLabs for spoken translation: OSError: [Errno 50] Network is down"
+    assert messages.speak_error(raw) == (
+        "Spoken translation: the connection to ElevenLabs was lost, so some sentences are not spoken. "
+        "Check the network connection (subtitles continue).")
