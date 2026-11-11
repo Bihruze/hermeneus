@@ -594,10 +594,17 @@ def test_worker_env_carries_no_secrets():
     parent = {"PATH": "/usr/bin", "HOME": "/Users/x", "TMPDIR": "/tmp/x", "LANG": "en_US.UTF-8",
               "ELEVENLABS_API_KEY": "sk-1", "OPENROUTER_API_KEY": "sk-2", "GITHUB_TOKEN": "t", "HERMES_SECRET": "s",
               "ANTHROPIC_AUTH_TOKEN": "a", "AWS_SECRET_ACCESS_KEY": "k", "PYTHONPATH": "/elsewhere"}
-    env = process_tap.worker_env(parent)
+    env = process_tap.worker_env(parent, path=[])
     assert not [k for k in env if k.endswith(("_KEY", "_TOKEN", "_SECRET")) or "SECRET" in k or "TOKEN" in k]
     assert set(env) <= set(process_tap.WORKER_ENV_ALLOWLIST) | {"PYTHONPATH", "PYTHONUNBUFFERED"}
     assert env["PYTHONPATH"] == str(process_tap._PACKAGE_ROOT) and env["PATH"] == "/usr/bin"
+
+
+def test_worker_path_carries_the_parent_sys_path(tmp_path):
+    deps = tmp_path / "plugin-env" / "site-packages"
+    deps.mkdir(parents=True)
+    env = process_tap.worker_env({}, path=["", str(deps), str(tmp_path / "missing")])
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(process_tap._PACKAGE_ROOT), str(deps)]
 
 
 def test_spawn_worker_passes_the_minimal_env(monkeypatch):
