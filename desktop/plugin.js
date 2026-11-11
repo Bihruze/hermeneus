@@ -579,6 +579,12 @@ const EN = {
   notSpeakable: 'Spoken output is not available for this language',
   output: 'Output device',
   outputPlaceholder: 'Choose an output',
+  // Proposal for Seher (W26): mode and voice pickers, reachable while running.
+  mode: 'Mode',
+  modes: { subtitles: 'Subtitles', both: 'Subtitles and voice', voice: 'Voice only' },
+  voice: 'Voice',
+  voicePlaceholder: 'Default voice',
+  voicesError: error => `Could not list voices: ${error}`,
   start: 'Start',
   stop: 'Stop',
   devicesError: error => `Could not list sources: ${error}`,
@@ -822,29 +828,65 @@ function Controls({ ctrl }) {
 
   const status = state.status
   const running = RUNNING_STATES.has(status?.state)
+  // GET /voices is cached 60 s on the backend; ask only once speech is on or chosen.
+  const wantsVoice = running ? status?.speak === true : prefs.speak
+  const voicesQuery = useQuery({
+    queryKey: [ID, 'voices'],
+    queryFn: () => ctrl.rest('/voices'),
+    enabled: wantsVoice,
+    staleTime: 60000,
+    retry: false
+  })
   const sources = Array.isArray(devices.data?.sources) ? devices.data.sources : []
   const outputs = Array.isArray(devices.data?.outputs) ? devices.data.outputs : []
+  const voices = Array.isArray(voicesQuery.data?.voices) ? voicesQuery.data.voices.filter(v => v && typeof v.voice_id === 'string') : []
   const languages = Array.isArray(status?.languages) ? status.languages.filter(l => l && typeof l.code === 'string') : []
 
   // While a session runs, show what the backend runs; while idle, show the user's choice.
   const target = running ? str(status?.target_language) : prefs.targetLanguage
   const speak = running ? status?.speak === true : prefs.speak
+  const mode = running ? str(status?.mode) || (speak ? 'both' : 'subtitles') : prefs.speak ? prefs.mode === 'voice' ? 'voice' : 'both' : 'subtitles'
   const chosenLanguage = languages.find(l => l.code === target)
   const speakable = chosenLanguage ? chosenLanguage.speakable !== false : true
-  const source = sources.find(s => sourceKey(s) === prefs.source) ?? null
-  const output = outputs.find(o => o && o.device_id === prefs.outputDevice) ?? null
+  const sourceValue = running && status?.source ? sourceKey(status.source) : prefs.source
+  const source = sources.find(s => sourceKey(s) === sourceValue) ?? null
+  const outputValue = running && status?.output_device ? str(status.output_device) : prefs.outputDevice
+  const output = outputs.find(o => o && o.device_id === outputValue) ?? null
+  const voiceValue = running && status?.voice_id ? str(status.voice_id) : prefs.voiceId
+  const applying = running && Array.isArray(status?.applying) ? status.applying : []
 
   const canStart =
     !action.busy && source !== null && target !== '' && (!prefs.speak || (speakable && output !== null))
 
+  // Each control saves the choice; while running it also changes the session (POST /settings).
+  const choose = (patch, change) => {
+    ctrl.setPrefs(patch)
+
+    if (running && change) {
+      void ctrl.settings(change)
+    }
+  }
+
+  const onMode = value => {
+    const on = value !== 'subtitles'
+    const patch = on ? { speak: true, mode: value } : { speak: false }
+    const change = on
+      ? { mode: value, ...(output ? { output_device: output.device_id } : {}), ...(voiceValue ? { voice_id: voiceValue } : {}) }
+      : { mode: 'subtitles' }
+    choose(patch, change)
+  }
+
   const onStart = () => {
     const current = ctrl.prefs.get()
+    const speakNow = current.speak && speakable
 
     void ctrl.start({
       source: { backend: source.backend, source_id: source.source_id },
       target_language: current.targetLanguage,
-      speak: current.speak && speakable,
-      output_device: current.speak && speakable ? output.device_id : null
+      speak: speakNow,
+      mode: speakNow ? (current.mode === 'voice' ? 'voice' : 'both') : 'subtitles',
+      output_device: speakNow ? output.device_id : null,
+      ...(speakNow && current.voiceId ? { voice_id: current.voiceId } : {})
     })
   }
 
@@ -857,12 +899,15 @@ function Controls({ ctrl }) {
             style: S.field,
             children: [
               jsx(Picker, {
-                disabled: running || sources.length === 0,
+                disabled: sources.length === 0 || applying.includes('source'),
                 label: t('source'),
-                onChange: value => ctrl.setPrefs({ source: value }),
+                onChange: value => {
+                  const picked = sources.find(s => sourceKey(s) === value)
+                  choose({ source: value }, picked ? { source: { backend: picked.backend, source_id: picked.source_id } } : null)
+                },
                 options: sources.map(s => ({ value: sourceKey(s), label: str(s.label) || sourceKey(s) })),
                 placeholder: t('sourcePlaceholder'),
-                value: source ? prefs.source : ''
+                value: source ? sourceValue : ''
               }),
               jsx(Tip, {
                 label: t('refreshSources'),
@@ -879,9 +924,8 @@ function Controls({ ctrl }) {
           }),
           languages.length > 0
             ? jsx(Picker, {
-                disabled: running,
                 label: t('target'),
-                onChange: value => ctrl.setPrefs({ targetLanguage: value }),
+                onChange: value => choose({ targetLanguage: value }, { target_language: value }),
                 options: languages.map(l => ({ value: l.code, label: typeof l.name === 'string' ? l.name : l.code })),
                 placeholder: t('targetPlaceholder'),
                 value: target
@@ -894,22 +938,38 @@ function Controls({ ctrl }) {
               jsx(Switch, {
                 'aria-label': t('speak'),
                 checked: speak && speakable,
-                disabled: running || !speakable,
-                onCheckedChange: on => ctrl.setPrefs({ speak: on }),
+                disabled: !speakable || applying.includes('speak') || (running && !speak && output === null),
+                onCheckedChange: on => onMode(on ? (prefs.mode === 'voice' ? 'voice' : 'both') : 'subtitles'),
                 size: 'xs'
               }),
               t('speak')
             ]
           }),
           jsx(Picker, {
-            disabled: running || !prefs.speak || !speakable || outputs.length === 0,
+            disabled: !speakable,
+            label: t('mode'),
+            onChange: onMode,
+            options: ['subtitles', 'both', 'voice'].map(m => ({ value: m, label: t(`modes.${m}`) })),
+            placeholder: t('mode'),
+            value: mode
+          }),
+          jsx(Picker, {
+            disabled: !speak || !speakable || outputs.length === 0 || applying.includes('output_device'),
             label: t('output'),
-            onChange: value => ctrl.setPrefs({ outputDevice: value }),
+            onChange: value => choose({ outputDevice: value }, speak ? { output_device: value } : null),
             options: outputs
               .filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
               .map(o => ({ value: o.device_id, label: str(o.label) || o.device_id })),
             placeholder: t('outputPlaceholder'),
-            value: output ? prefs.outputDevice : ''
+            value: output ? outputValue : ''
+          }),
+          jsx(Picker, {
+            disabled: !speak || !speakable || voices.length === 0 || applying.includes('voice_id'),
+            label: t('voice'),
+            onChange: value => choose({ voiceId: value }, speak ? { voice_id: value } : null),
+            options: voices.map(v => ({ value: v.voice_id, label: str(v.name) || v.voice_id })),
+            placeholder: t('voicePlaceholder'),
+            value: voices.some(v => v.voice_id === voiceValue) ? voiceValue : ''
           }),
           running
             ? jsxs(Button, {
@@ -929,6 +989,9 @@ function Controls({ ctrl }) {
       }),
       devices.isError
         ? jsx('div', { role: 'alert', style: S.alert, children: t('devicesError', errorText(devices.error)) })
+        : null,
+      voicesQuery.isError
+        ? jsx('div', { role: 'alert', style: S.alert, children: t('voicesError', errorText(voicesQuery.error)) })
         : null
     ]
   })
