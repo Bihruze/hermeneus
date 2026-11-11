@@ -7,8 +7,10 @@ block gets the GIL at once. The ``portaudio`` reader opens the private aggregate
 as a PortAudio input and drains it without a Python callback (see
 ``_pa_reader``); it measured worse in the worker (see ``_tap_worker.main``) and
 stays available on request. Either way a converter thread resamples to engine
-format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
-converter thread also:
+format and hands PCM to ``on_pcm``. The converter runs at the macOS
+time-constraint priority (see ``_rt``) and does nothing else, so it never sits
+preempted while holding the GIL the IOProc needs. A separate housekeeping
+thread at normal priority, once per ``refresh_interval``:
 
 * follows the processes the tap should cover (app helpers that start later,
   an excluded process that opens audio later);
@@ -121,6 +123,7 @@ class TapStats:
     format_rebuilds: int = 0
     device_rebuilds: int = 0
     reattaches: int = 0
+    converter_policy: str = ""
     sample_rate: float = 0.0
     tapped_objects: list = field(default_factory=list)
     last_status: str = ""
@@ -199,6 +202,7 @@ class TapCapture:
         self._lock = threading.Lock()
         self._stopping = threading.Event()
         self._converter: Optional[threading.Thread] = None
+        self._housekeeper: Optional[threading.Thread] = None
         self._objects: tuple[int, ...] = ()
         self.tap_id: Optional[int] = None
         self.device_id: Optional[int] = None
@@ -230,6 +234,9 @@ class TapCapture:
                 self._build(objects)
             self._converter = threading.Thread(target=self._convert, name="hermeneus-tap-convert", daemon=True)
             self._converter.start()
+            self._housekeeper = threading.Thread(target=self._housekeep, name="hermeneus-tap-housekeeping",
+                                                 daemon=True)
+            self._housekeeper.start()
         except BaseException:
             self.close()
             raise
@@ -240,6 +247,10 @@ class TapCapture:
         Returns the teardown steps that failed; it never raises.
         """
         self._stopping.set()
+        keeper = self._housekeeper
+        if keeper is not None and keeper is not threading.current_thread():
+            keeper.join(timeout=5.0)  # it may be mid-rebuild; rebuild() checks _stopping before touching the HAL
+        self._housekeeper = None
         with self._lock:
             failures = self._release()
         self._queue.put(None)
@@ -398,24 +409,36 @@ class TapCapture:
 
     # ------------------------------------------------------------------ converter
 
+    def _housekeep(self) -> None:
+        while not self._stopping.wait(self._refresh_interval):
+            try:
+                self.tick()
+            except Exception:
+                log.exception("process tap housekeeping failed")
+
     def _convert(self) -> None:
+        from ._rt import promote_time_constraint
+
+        # One 512-frame buffer at 48 kHz is 10.67 ms; converting it measured p99 0.64 ms at this
+        # priority (W20), so 2 ms of computation per period leaves room without starving others.
+        period_ns = int(512 * 1e9 / (self._rate or 48000))
+        self.stats.converter_policy = promote_time_constraint(period_ns, 2_000_000, period_ns)
         stats = self.stats
         to_ns = self._hal.host_time_to_ns
         resampler: Optional[StreamingResampler] = None
         current = (0, 0)  # (generation, rate) the resampler belongs to
         expected: Optional[float] = None
-        next_tick = self._clock() + self._refresh_interval
         while True:
             try:
-                item = self._queue.get(timeout=self._refresh_interval)
+                item = self._queue.get(timeout=0.5)
             except queue.Empty:
-                item = ()
+                continue
             if item is None:  # queued after the IOProc stopped, so every buffer before it is converted
                 return
             if item:
                 generation, rate, sample_time, stamp, stamp_is_ns, data, channels = item
                 if generation != self._generation:
-                    item = ()  # left over from a tap that was rebuilt
+                    pass  # left over from a tap that was rebuilt
                 else:
                     if (generation, rate) != current:
                         if resampler is None or rate != current[1]:
@@ -441,11 +464,10 @@ class TapCapture:
                     if y.shape[0]:
                         stats.samples_out += int(y.shape[0])
                         base = stamp if stamp_is_ns else to_ns(stamp)
-                        self._on_pcm(float_to_s16le(y), base + int(offset * 1e9 / rate))
-            now = self._clock()
-            if now >= next_tick:
-                next_tick = now + self._refresh_interval
-                self.tick(now)
+                        # First output sample: its input position after the chunk start, less the
+                        # filter's group delay (0.99 ms at 48 kHz).
+                        shift = (offset / rate - resampler.delay_seconds) * 1e9
+                        self._on_pcm(float_to_s16le(y), base + int(round(shift)))
 
     def tick(self, now: Optional[float] = None) -> None:
         """Periodic work: follow processes, notice format changes, run the silence watchdog."""

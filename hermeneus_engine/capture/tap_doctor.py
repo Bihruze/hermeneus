@@ -13,7 +13,6 @@ prompt; the start waits for the answer up to ``timeout_s``.
 from __future__ import annotations
 
 import math
-import subprocess
 import sys
 import threading
 import time
@@ -22,8 +21,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .. import subproc
 from ..contracts import ENGINE_SAMPLE_RATE, CaptureError, CaptureSource
-from .process_tap import PERMISSION_PANE, ProcessTapBackend, permission_message, responsible_app_name, worker_env
+from .process_tap import PERMISSION_PANE, ProcessTapBackend, permission_message, responsible_app_name
 
 TONE_HZ = 440.0
 # Tone level per route. A tap reads the samples a process writes, before the output volume, so
@@ -83,8 +83,8 @@ class TonePlayer:
                  ready_timeout_s: float = 10.0) -> None:
         self.device = device
         args = [sys.executable, "-c", PLAYER_SCRIPT, repr(float(amplitude))] + ([device] if device else [])
-        self._proc = subprocess.Popen(args, stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=worker_env())
+        self._proc = subproc.popen(args, stdin=subproc.PIPE, stdout=subproc.PIPE, stderr=subproc.PIPE, text=True,
+                                   env=subproc.python_env())
         self.pid = self._proc.pid
         line = [""]
         reader = threading.Thread(target=lambda: line.__setitem__(0, self._proc.stdout.readline()), daemon=True)
@@ -232,16 +232,18 @@ def check_process_tap(*, timeout_s: float = 30.0,
         info["tone_device"] = device or "default output"
         heard_note = ("The test tone played on " + device + ", which you do not hear." if device else
                       "A short quiet test tone played on your default output, muted while captured; you may "
-                      "have heard it briefly. Use --no-audio-check to skip this check.")
+                      "have heard it briefly. Without BlackHole or VB-Cable installed, each doctor run plays it. "
+                      "Use --no-audio-check to skip this check.")
         info["worker_stats"] = backend.last_stats
         if info["samples"] == 0:
-            return DoctorResult(False, START_FAILED, "Capture started but delivered no audio at all.", info)
+            return DoctorResult(False, START_FAILED, "Capture started but delivered no audio at all. " + heard_note,
+                                info)
         if info["all_zero"]:
-            return DoctorResult(False, PERMISSION_DENIED, permission_message(app_name()), info)
+            return DoctorResult(False, PERMISSION_DENIED, permission_message(app_name()) + " " + heard_note, info)
         if info["rms_dbfs"] < MIN_RMS_DBFS or info["tone_ratio_db"] < MIN_TONE_RATIO_DB:
             return DoctorResult(False, WRONG_AUDIO,
                                 "Capture delivered audio, but not the test sound. Run doctor again; if it "
-                                f"repeats, check {PERMISSION_PANE}.", info)
+                                f"repeats, check {PERMISSION_PANE}. " + heard_note, info)
         return DoctorResult(True, OK, "System audio capture works. " + heard_note, info)
     except Exception as exc:  # doctor must report, never crash
         return DoctorResult(False, START_FAILED, f"Capture check failed: {exc}")

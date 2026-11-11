@@ -479,8 +479,10 @@ class ResourceSampler:
         return own[0] // 1024, cpu, rss // 1024, count
 
     def _ps_tree(self) -> tuple[int, float, int, int]:
-        proc = subprocess.Popen(["ps", "-A", "-o", "pid=,ppid=,rss=,time="], stdout=subprocess.PIPE,
-                                stderr=subprocess.DEVNULL, text=True)
+        from hermeneus_engine import subproc
+
+        proc = subproc.popen([subproc.PS, "-A", "-o", "pid=,ppid=,rss=,time="], stdout=subproc.PIPE,
+                             stderr=subproc.DEVNULL, text=True)
         out, _ = proc.communicate(timeout=5)
         if proc.returncode:
             raise subprocess.SubprocessError(f"ps exited with {proc.returncode}")

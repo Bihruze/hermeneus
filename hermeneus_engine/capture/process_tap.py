@@ -28,7 +28,6 @@ import json
 import logging
 import os
 import platform
-import subprocess
 import sys
 import threading
 import weakref
@@ -36,6 +35,7 @@ from collections import deque
 from pathlib import Path
 from typing import Callable, Optional
 
+from .. import subproc
 from ..contracts import CaptureError, CaptureSource, FrameSink
 from ._tap_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
 from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, KIND_STATUS, read_frame
@@ -87,40 +87,26 @@ def macos_version() -> Optional[tuple[int, ...]]:
         return None
 
 
-# The worker gets only these variables from the parent. It holds no secrets and
-# needs none: measured, the worker captures with nothing but PYTHONPATH and
-# PYTHONUNBUFFERED set; the rest keep paths, temp files and text encoding
-# behaving as in the parent.
-WORKER_ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+# The worker gets only allowlisted variables and the import path (see ``subproc``). It holds no
+# secrets and needs none: measured, the worker captures with nothing but PYTHONPATH and
+# PYTHONUNBUFFERED set.
+WORKER_ENV_ALLOWLIST = subproc.ENV_ALLOWLIST
 
 
 def worker_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
     """Minimal environment for the capture worker; never carries API keys, tokens or secrets.
 
     PYTHONPATH carries this package and every directory on the parent's ``sys.path``. Hermes
-    puts a plugin's dependencies on ``sys.path`` at runtime, from an environment the bare
-    interpreter does not know (measured: inside Hermes, CoreAudio and numpy import from
-    ``~/.hermes/installs/.../venv/lib/python3.14/site-packages`` while ``python3 -c "import
-    CoreAudio"`` with the same interpreter fails), so the worker needs the same search path.
+    puts a plugin's dependencies on ``sys.path`` at runtime (measured: inside Hermes, CoreAudio
+    imports from ``~/.hermes/installs/.../site-packages`` while the bare interpreter cannot
+    import it), so the worker needs the same search path.
     """
-    parent = os.environ if parent is None else parent
-    path = sys.path if path is None else path
-    env = {k: parent[k] for k in WORKER_ENV_ALLOWLIST if k in parent}
-    dirs = [str(_PACKAGE_ROOT)]
-    for p in path:
-        if p and p not in dirs and os.path.isdir(p):
-            dirs.append(p)
-    env["PYTHONPATH"] = os.pathsep.join(dirs)
-    env["PYTHONUNBUFFERED"] = "1"
-    return env
+    return subproc.python_env(parent, path)
 
 
-def spawn_worker() -> subprocess.Popen:
-    env = worker_env()
-    return subprocess.Popen(
-        [sys.executable, "-m", "hermeneus_engine.capture._tap_worker"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=env, close_fds=True)
+def spawn_worker() -> subproc.Popen:
+    return subproc.python_popen(["-m", "hermeneus_engine.capture._tap_worker"],
+                                stdin=subproc.PIPE, stdout=subproc.PIPE, stderr=subproc.PIPE)
 
 
 class _Run:
@@ -397,7 +383,7 @@ class ProcessTapBackend:
             try:
                 proc.wait(timeout=STOP_TIMEOUT_S)
                 break
-            except subprocess.TimeoutExpired:
+            except subproc.TimeoutExpired:
                 log.warning("capture worker did not exit; escalating")
         for t in (run.reader, run.stderr_reader):
             if t is not None and t is not threading.current_thread():
@@ -438,9 +424,9 @@ def responsible_app_name(pid: Optional[int] = None) -> Optional[str]:
     pid = os.getpid() if pid is None else pid
     for _ in range(32):
         try:
-            out = subprocess.run(["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+            out = subproc.run([subproc.PS, "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
                                  text=True, timeout=2).stdout.strip()
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subproc.SubprocessError):
             return None
         if not out:
             return None
