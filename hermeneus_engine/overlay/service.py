@@ -76,7 +76,7 @@ class OverlayService:
         try:
             await self.show(platform)
         except OverlayUnavailable as exc:
-            return f"The subtitle overlay did not open: {exc}."
+            return f"The subtitle overlay did not open. {exc}"
         return "The subtitle overlay is open."
 
 

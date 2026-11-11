@@ -274,6 +274,8 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
         raise UsageError(f"context_segments setting must be between 0 and {MAX_CONTEXT_SEGMENTS}")
 
     return SessionOptions(source=source, target_language=target, speak=speak,
-                          output_device=device if speak else None, commit_strategy=strategy,
-                          voice_id=voice if speak else None, context_segments=context_segments,
+                          # Kept with speech off too, so speech turned on later uses the configured
+                          # voice and device (A1 E6); status shows them only while speech is on.
+                          output_device=device, commit_strategy=strategy,
+                          voice_id=voice, context_segments=context_segments,
                           subtitles=subtitles)

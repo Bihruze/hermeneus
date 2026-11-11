@@ -37,12 +37,21 @@ _STT_FATAL = {
 }
 
 # Retryable types (stt/scribe.py RETRYABLE_ERRORS and connection errors).
-_STT_RATE = frozenset({"rate_limited", "resource_exhausted", "queue_overflow", "http_429"})
+_STT_RATE = frozenset({"rate_limited", "queue_overflow", "http_429"})
+# "resource_exhausted: The service is currently at capacity." (A1 E2) is the
+# service being full, not this account being limited.
+_STT_CAPACITY = frozenset({"resource_exhausted"})
+
+
+def _capacity(raw: str, error_type: str) -> bool:
+    return error_type in _STT_CAPACITY or "capacity" in (raw or "").lower()
 _STT_NETWORK = frozenset({"connect_failed", "connection_closed", "session_start_timeout", "open_failed"})
 
 
 def stt_reconnecting(raw: str, error_type: str = "") -> str:
     """status.message while the STT client reconnects."""
+    if _capacity(raw, error_type):
+        return "Speech to text: ElevenLabs is at capacity right now; retrying."
     if error_type in _STT_RATE:
         return ("Speech to text: ElevenLabs is rate limiting this account; reconnecting. "
                 "Subtitles resume when it accepts audio again.")
@@ -63,6 +72,9 @@ def stt_failed(raw: str, error_type: str = "") -> str:
     if error_type == "permission" or (error_type in ("auth_error", "error", "invalid_request")
                                       and "permission" in (raw or "").lower()):
         return _STT_FATAL["http_403"]
+    if _capacity(raw, error_type):
+        return ("Speech to text stopped: ElevenLabs stayed at capacity and did not take the stream. "
+                "Start translation again in a minute.")
     if error_type in _STT_RATE:
         return (f"Speech to text stopped: ElevenLabs kept rate limiting this account. Wait a minute or "
                 f"check the plan at {PLAN_PAGE}, then start translation again.")
@@ -72,6 +84,12 @@ def stt_failed(raw: str, error_type: str = "") -> str:
                 f"{detail}. Check the network connection, then start translation again.")
     text = raw or "speech to text failed"
     return f"Speech to text stopped: {text.rstrip('.')}. Start translation again; if it repeats, run {DOCTOR}."
+
+
+def no_audio(source_label: str) -> str:
+    """status.message while the capture delivers no audio or only digital silence."""
+    who = source_label or "the audio source"
+    return f"No audio from {who}. Waiting for sound; if something is playing, check that it is not muted."
 
 
 # -- spoken translation (tts/elevenlabs_flash.py texts) -------------------------------

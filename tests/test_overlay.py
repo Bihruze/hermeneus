@@ -358,7 +358,7 @@ OK = dict(platform="darwin", gui_session=lambda: True, find_spec=lambda n: objec
 
 
 def test_show_needs_a_session_and_waits_for_ready(data_dir):
-    with pytest.raises(control.OverlayUnavailable, match="no translation session"):
+    with pytest.raises(control.OverlayUnavailable, match="No translation session is running"):
         control.show(data_dir, ovs.OverlaySettings(), session_running=False, **OK)
     launched = []
 

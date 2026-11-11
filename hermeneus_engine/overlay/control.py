@@ -110,19 +110,19 @@ def check_available(platform: str = sys.platform, *, gui_session=_gui_session,
                     find_spec=importlib.util.find_spec) -> None:
     """Raise OverlayUnavailable when this machine cannot show the native overlay."""
     if platform != "darwin":
-        raise OverlayUnavailable("the floating subtitle overlay is built for macOS; on this system use the "
-                                 "Desktop pane")
+        raise OverlayUnavailable("The floating subtitle overlay is built for macOS. On this system use the "
+                                 "Desktop pane.")
     if find_spec("AppKit") is None:
         raise OverlayUnavailable("PyObjC Cocoa is not installed in Hermes's Python. Reinstall the plugin with "
-                                 "its dependencies: hermes plugins install hermeneus")
+                                 "its dependencies: hermes plugins install hermeneus.")
     if not gui_session():
-        raise OverlayUnavailable("there is no desktop session for this user here (SSH or a background "
-                                 "service), so no window can open")
+        raise OverlayUnavailable("There is no desktop session for this user here (SSH or a background "
+                                 "service), so no window can open.")
 
 
 def check_platform(platform: Optional[str]) -> None:
     if (platform or "") not in LOCAL_PLATFORMS:
-        raise OverlayUnavailable("the overlay opens on this Mac's screen, so it is not opened from a chat "
+        raise OverlayUnavailable("The overlay opens on this Mac's screen, so it is not opened from a chat "
                                  f"platform ({platform}). Use /translate overlay show in Hermes on the Mac.")
 
 
@@ -188,8 +188,8 @@ def show(data_dir: Path, settings: OverlaySettings, *, session_running: bool,
          popen=subproc.popen, timeout_s: float = READY_TIMEOUT_S, **checks) -> dict:
     """Open the overlay for the running session (or update the open one). Returns ``status``."""
     if not session_running:
-        raise OverlayUnavailable("no translation session is running. Start one first; with the overlay "
-                                 "setting on, the overlay opens with every session")
+        raise OverlayUnavailable("No translation session is running. Start one first; with the overlay "
+                                 "setting on, the overlay opens with every session.")
     check_available(**checks)
     write_settings(data_dir, settings)
     if running_pid(data_dir) is not None:
@@ -229,10 +229,10 @@ def _wait_ready(child, timeout_s: float) -> None:
             child.wait(1.0)
         except subproc.TimeoutExpired:
             child.kill()
-        raise OverlayUnavailable(f"the overlay did not open within {timeout_s:.0f} s; see the overlay log")
+        raise OverlayUnavailable(f"The overlay did not open within {timeout_s:.0f} s; see the overlay log.")
     if code == 0:
-        raise OverlayUnavailable("the overlay closed at once: no session was answering")
-    raise OverlayUnavailable(f"the overlay could not open (exit {code}); see the overlay log")
+        raise OverlayUnavailable("The overlay closed at once: no session was answering.")
+    raise OverlayUnavailable(f"The overlay could not open (exit {code}); see the overlay log.")
 
 
 def hide(data_dir: Path, *, wait_s: float = HIDE_WAIT_S, kill=os.kill) -> dict:
