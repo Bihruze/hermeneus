@@ -853,3 +853,14 @@ def test_doctor_run_skips_the_audio_check_on_request(monkeypatch):
 def test_doctor_failure_messages_also_mention_the_tone():
     r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, np.zeros(4800, dtype=np.float32)) for i in range(10)])
     assert r.code == "permission-denied" and "test tone" in r.message
+
+
+def test_playing_now_follows_each_process_and_not_the_default_device():
+    # IsRunningOutput is a per-process HAL property; measured true for a process that plays to
+    # BlackHole 2ch while the default output is the built-in speakers. Listing never reads devices.
+    hal = FakeHAL()
+    hal.add_process(10, 100, "com.example.Player", playing=True, app=AppInfo("Player", True))
+    hal.add_process(11, 101, "com.example.Idle", playing=False, app=AppInfo("Idle", True))
+    hal.default_out = 51
+    sources = {s.source_id: s.detail for s in make_backend(hal).list_sources()}
+    assert sources["app:com.example.Player"] == "playing now" and sources["app:com.example.Idle"] == ""
