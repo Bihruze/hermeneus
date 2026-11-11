@@ -424,11 +424,6 @@ class ScribeLiveClient:
         if self._close_started is not None:
             self.stats.close_ms[phase] = round((time.monotonic() - self._close_started) * 1000, 1)
 
-    def _close_remaining(self, reserve: float = 0.0) -> float:
-        if self._close_deadline is None:
-            return self._tuning.drain_timeout
-        return max(0.0, self._close_deadline - time.monotonic() - reserve)
-
     async def _force_close(self) -> None:
         """Deadline reached: drop every socket now and report CLOSED."""
         self._close_mark("forced")

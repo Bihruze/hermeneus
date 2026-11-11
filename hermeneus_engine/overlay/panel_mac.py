@@ -313,10 +313,6 @@ class MacPanel:
     def close(self) -> None:
         self.set_visible(False)
 
-    @property
-    def window_ids(self) -> tuple[int, int]:
-        return int(self.strip.windowNumber()), int(self.grip.windowNumber())
-
     # -- drawing ----------------------------------------------------------------------
 
     def _palette(self, view) -> theme.Palette:
