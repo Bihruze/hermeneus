@@ -607,3 +607,26 @@ console.log(JSON.stringify({rows: rowsOf(0, fit.cut), shown: t.parts.slice(fit.c
     out = subprocess.run([node, str(probe)], capture_output=True, text=True, timeout=20, check=True).stdout
     result = json.loads(out)
     assert result == {"rows": 1, "shown": "nine ten"}  # "eight nine ten" is 14 characters, two rows of 12
+
+
+def test_served_page_keeps_the_row_limit_across_updates(tmp_path):
+    """The DOM row-limit tests (tests/desktop/overlay-page-dom.test.mjs), run on the page as served."""
+    import shutil
+    import subprocess
+    from pathlib import Path
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("node is not installed")
+    srv = overlay_page.OverlayPageServer(port=0, events=fake_events, settings=dict)
+    srv.start()
+    try:
+        _, _, body = http(srv.port, f"/{srv.token}/")
+    finally:
+        srv.stop()
+    page = tmp_path / "served.html"
+    page.write_bytes(body)
+    dom_test = Path(__file__).parent / "desktop" / "overlay-page-dom.test.mjs"
+    done = subprocess.run([node, "--test", str(dom_test)], capture_output=True, text=True, timeout=60,
+                          env={**__import__("os").environ, "OVERLAY_PAGE_HTML": str(page)})
+    assert done.returncode == 0, done.stdout[-2000:]
+    assert "fail 0" in done.stdout
