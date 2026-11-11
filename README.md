@@ -219,7 +219,7 @@ In a Hermes session:
 
 `/translate` on its own shows the status. `start` takes the same session flags as `hermes hermeneus run` (`--to`, `--source`, `--speak`, `--device`, `--voice`), and `set` takes the flags of `hermes hermeneus set`. The session runs inside that Hermes process and stops when the process exits or the plugin is unloaded. A missing choice ends the command with a message that names the flag to pass; nothing waits for input.
 
-From a chat platform such as Telegram or Slack, `/translate start` and `/translate set --source` are refused with "Hermeneus captures audio on this Mac, so start it from the Mac (terminal or Hermes Desktop)." A start from chat would turn on capture on the Mac that runs Hermes and send that audio to ElevenLabs while nobody may be at the Mac. To allow it, turn on the `allow_remote_start` setting. `/translate status`, `/translate stop` and the other `set` changes work from anywhere. The overlay is refused from a chat platform either way.
+From a chat platform such as Telegram or Slack, `/translate start` and `/translate set --source` are refused with "Hermeneus captures audio on this Mac, so start it from the Mac (terminal or Hermes Desktop)." (on Windows: "this PC" and "the PC") A start from chat would turn on capture on the Mac that runs Hermes and send that audio to ElevenLabs while nobody may be at the Mac. To allow it, turn on the `allow_remote_start` setting. `/translate status`, `/translate stop` and the other `set` changes work from anywhere. The overlay is refused from a chat platform either way.
 
 ### Desktop pane
 
@@ -275,7 +275,7 @@ Command flags override the settings for one session.
 | `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
 | `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
-| `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this Mac and sends that audio to ElevenLabs while nobody may be at the Mac. Status and stop work from anywhere either way. |
+| `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
 
@@ -504,6 +504,8 @@ From the A4 review (COM and WASAPI), R1 to R19:
 - R20 QueryInterface(IID_IMarshal) on the completion handler returns the free-threaded marshaler's IMarshal (custom routing in `_wasapi.marshal_query`), and activation still completes.
 - R21 Repeated rebuilds (silence, app restart, stream errors) never hang or crash the pump. Only the pump closes a stream it may be waiting on, after its wait returns; WaitForSingleObject's behaviour is undefined when its handle closes during the wait.
 - R22 Worst-case start time when the first format is refused, which costs a second activation.
+- R23 Spoken translation opens the WASAPI entry of the output device at 24 kHz with `WasapiSettings(auto_convert=True)` and plays at the right pitch and speed, whatever the mixer rate is (sounddevice: auto_convert "is in particular required for streams not matching the system mixer sample rate").
+- R24 A tick thread still inside an activation when capture stops keeps running until that activation returns or the worker exits; the stream it gets is closed, never started, and the worker still exits within the parent's 5 s stop window.
 
 From the A5 review (parity and packaging):
 

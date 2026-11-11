@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, TextIO
 
 from . import glue
 from .hermeneus_engine import components, doctor, overlay_page, stop_signals
-from .hermeneus_engine.platform_words import this_machine
+from .hermeneus_engine.platform_words import the_machine, this_machine
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
 from .hermeneus_engine.ipc import SettingsRefused
@@ -29,7 +29,7 @@ from .hermeneus_engine.overlay.service import (OverlayService, OverlayUnavailabl
                                                describe as describe_window)
 from .hermeneus_engine.overlay.control import LOCAL_PLATFORMS
 
-REMOTE_START_REFUSED = ("Hermeneus captures audio on this Mac, so start it from the Mac "
+REMOTE_START_REFUSED = (f"Hermeneus captures audio on {this_machine()}, so start it from {the_machine()} "
                         "(terminal or Hermes Desktop).")
 
 

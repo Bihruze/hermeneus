@@ -11,3 +11,7 @@ import sys
 
 def this_machine(platform: str = "") -> str:
     return "this Mac" if (platform or sys.platform) == "darwin" else "this PC"
+
+
+def the_machine(platform: str = "") -> str:
+    return "the Mac" if (platform or sys.platform) == "darwin" else "the PC"
