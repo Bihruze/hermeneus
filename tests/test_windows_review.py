@@ -17,7 +17,8 @@ import pytest
 from fake_wasapi import FakeWasapi
 from hermeneus_engine import audio_devices, components, doctor_windows, options, platform_words
 from hermeneus_engine._windows import process as winproc
-from hermeneus_engine.capture import _loopback_engine, _wasapi, _worker_path, process_loopback
+from hermeneus_engine import subproc
+from hermeneus_engine.capture import _loopback_engine, _wasapi, process_loopback
 from hermeneus_engine.capture._loopback_engine import LoopbackCapture, LoopbackSetupError, LoopbackSpec
 from hermeneus_engine.capture.process_loopback import ProcessLoopbackBackend
 from hermeneus_engine.contracts import CaptureSource
@@ -48,14 +49,15 @@ def test_w1_worker_pythonpath_carries_the_parent_sys_path(tmp_path):
     deps.mkdir()
     env = process_loopback.worker_env({"SystemRoot": r"C:\Windows"}, path=[str(deps), "", str(tmp_path / "gone")])
     parts = env["PYTHONPATH"].split(os.pathsep)
-    assert parts == [str(process_loopback._PACKAGE_ROOT), str(deps)]
+    assert parts == [str(subproc.PACKAGE_ROOT), str(deps)]
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="compares with the macOS worker's own copy of the rule")
-def test_w1_same_rule_as_the_macos_worker(tmp_path):
+@pytest.mark.skipif(sys.platform != "darwin", reason="compares with the macOS worker")
+def test_w1_same_search_path_as_the_macos_worker(tmp_path):
     from hermeneus_engine.capture import process_tap
     paths = [str(tmp_path), "", str(tmp_path), "/nonexistent-dir"]
-    assert process_tap.worker_env({}, path=paths)["PYTHONPATH"] == _worker_path.worker_pythonpath(paths)
+    assert (process_tap.worker_env({}, path=paths)["PYTHONPATH"]
+            == process_loopback.worker_env({}, path=paths)["PYTHONPATH"])
 
 
 # ---------------------------------------------------------------- W2 one endpoint, several host APIs
