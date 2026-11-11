@@ -594,3 +594,11 @@ def test_theme_payload_strings_are_checked():
         with pytest.raises(tok.ThemeError):
             tok.palette_from_payload({**base, "strings": bad})
     assert tok.palette_from_payload(base).strings == ()
+
+
+
+def test_a_marker_or_label_never_breaks_across_rows():
+    # Before: "Not translated" could end one row and start the next (A3 reaudit2 renders).
+    runs = [Run("aaaa bbbb", FAILED), Run("Not translated", MARK), Run("cc", FAILED)]
+    rows = wrap(runs, 18, chars, 3)
+    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb", "Not translated cc"]

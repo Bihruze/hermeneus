@@ -208,7 +208,8 @@ _TOKEN = re.compile(r"\S+\s*")
 def _tokens(runs: list[Run]) -> list[tuple[str, Run]]:
     out: list[tuple[str, Run]] = []
     for index, run in enumerate(runs):
-        words = _TOKEN.findall(run.text)
+        # A speaker label or the "not translated" marker never breaks across rows.
+        words = [run.text.strip() + " "] if run.kind in (LABEL, MARK) and run.text.strip() else _TOKEN.findall(run.text)
         for i, word in enumerate(words):
             if i == len(words) - 1 and index < len(runs) - 1 and not word.endswith(" "):
                 word += " "
