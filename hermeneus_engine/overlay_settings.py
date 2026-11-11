@@ -36,7 +36,7 @@ DEFAULTS: dict[str, Any] = {
     KEY_SHOW_ORIGINAL: True,
     KEY_OPACITY: 80,
     KEY_SHOW_SPEAKER: True,
-    KEY_STYLE: "theme",
+    KEY_STYLE: "banner",
 }
 
 

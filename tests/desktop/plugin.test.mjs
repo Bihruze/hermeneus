@@ -107,7 +107,7 @@ test('speakers get theme tokens in order of first appearance and wrap around', (
 
   assert.deepEqual(
     ids.map(id => speakerColor(state, id)),
-    [...SPEAKER_TOKENS, SPEAKER_TOKENS[0]].map(token => `var(${token})`)
+    [...SPEAKER_TOKENS, SPEAKER_TOKENS[0]].map(token => plugin.speakerInk(token))
   )
   assert.equal(speakerColor(state, null), null)
   assert.ok(!SPEAKER_TOKENS.includes('--ui-red'))
@@ -247,7 +247,7 @@ test('relabel keeps speaker numbers: the survivor keeps its own, a new id inheri
 
   state = applyEvent(state, { type: 'relabel', seq: 5, from: 's2:speaker_0', to: 's2:speaker_4' })
   assert.equal(speakerNumber(state, 's2:speaker_4'), 3)
-  assert.equal(speakerColor(state, 's2:speaker_4'), `var(${SPEAKER_TOKENS[2]})`)
+  assert.equal(speakerColor(state, 's2:speaker_4'), plugin.speakerInk(SPEAKER_TOKENS[2]))
 
   // The next new speaker still gets the next number.
   state = applyEvent(state, lineEvent(6, line('d', 'partial', { speaker_id: 's3:speaker_0' })))

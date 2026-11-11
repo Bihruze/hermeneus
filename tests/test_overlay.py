@@ -707,11 +707,13 @@ def test_ink_is_opaque_below_50_percent_so_the_outline_never_shows_through_the_l
 
 # -- banner style ----------------------------------------------------------------------
 
-def test_overlay_style_defaults_to_theme_and_accepts_banner_only():
-    assert ovs.from_settings({}).style == "theme"
+def test_overlay_style_defaults_to_banner_and_accepts_theme():
+    # banner is the default since W29 (Seher's decision); theme follows the Hermes Desktop theme.
+    assert ovs.from_settings({}).style == "banner"
     assert ovs.from_settings({"overlay_style": " Banner "}).style == "banner"
-    assert ovs.from_settings({"overlay_style": "neon"}).style == "theme"
-    assert ovs.from_settings({"overlay_style": 3}).style == "theme"
+    assert ovs.from_settings({"overlay_style": " Theme "}).style == "theme"
+    assert ovs.from_settings({"overlay_style": "neon"}).style == "banner"
+    assert ovs.from_settings({"overlay_style": 3}).style == "banner"
     s = ovs.from_settings({"overlay_style": "banner"})
     assert ovs.OverlaySettings.from_json(s.to_json()) == s
 
@@ -751,3 +753,15 @@ def test_banner_text_and_speakers_meet_wcag_aa_on_the_navy_and_stay_apart():
     for i, a in enumerate(colors):
         for b in colors[i + 1:]:
             assert _delta_e(a, b) > 20
+
+
+def test_pane_style_picker_offers_the_settings_choices_with_the_default_first():
+    import re
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "desktop" / "plugin.js").read_text()
+    m = re.search(r"export const OVERLAY_STYLES = Object\.freeze\(\[([^\]]*)\]\)", source)
+    offered = [s.strip().strip("'") for s in m.group(1).split(",")]
+    assert set(offered) == set(ovs.STYLES)
+    assert offered[0] == ovs.DEFAULTS[ovs.KEY_STYLE] == "banner"
+    # The pane writes it through the same settings route as the other look controls.
+    assert "setOverlayLook({ overlay_style: id })" in source

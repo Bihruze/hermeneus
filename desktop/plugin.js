@@ -303,7 +303,19 @@ export function speakerColor(state, speakerId) {
     return null
   }
 
-  return `var(${SPEAKER_TOKENS[(state.speakers[speakerId] - 1) % SPEAKER_TOKENS.length]})`
+  return speakerInk(SPEAKER_TOKENS[(state.speakers[speakerId] - 1) % SPEAKER_TOKENS.length])
+}
+
+/** Share of the speaker token in the pane's speaker colour; the rest is --ui-text-primary.
+ *  The raw tokens miss WCAG AA (4.5:1) on the pane in the default theme: light purple 2.65:1,
+ *  yellow 3.06:1, orange 3.16:1, green 4.16:1, cyan 4.30:1; dark blue 3.33:1 (measured,
+ *  tests/desktop/contrast.test.mjs). Mixing toward the primary text colour keeps each hue and
+ *  follows every theme; at 60% the weakest is 4.75:1. */
+export const SPEAKER_INK_PERCENT = 60
+
+/** The pane's colour for a speaker token: readable on the pane background, still that token's hue. */
+export function speakerInk(token) {
+  return `color-mix(in srgb, var(${token}) ${SPEAKER_INK_PERCENT}%, var(--ui-text-primary))`
 }
 
 /** The speaker's number in order of first appearance (1-based), or null for no speaker. */
@@ -642,6 +654,8 @@ export function voiceLabel(voices, voiceId, fallback) {
 /** Overlay look settings the pane offers (plugin.yaml overlay_* keys, hermeneus_engine/overlay_settings.py). */
 export const OVERLAY_TEXT_SIZES = Object.freeze([20, 26, 34, 44])
 export const OVERLAY_OPACITIES = Object.freeze([0, 40, 80, 100])
+/** overlay_style choices (hermeneus_engine/overlay_settings.py STYLES); banner is the default. */
+export const OVERLAY_STYLES = Object.freeze(['banner', 'theme'])
 
 /** Theme tokens the overlays draw with (hermeneus_engine/overlay_tokens.py keeps the same table). */
 export const OVERLAY_COLOR_TOKENS = Object.freeze({
@@ -1057,7 +1071,8 @@ const EN = {
   heard: lang => `heard: ${lang}`,
   subtitlesIn: lang => `subtitles: ${lang}`,
   offline: 'Hermeneus backend unreachable',
-  offlineHint: 'Enable hermeneus under plugins.enabled in config.yaml and restart the gateway.',
+  offlineHint:
+    'Turn on Hermeneus in Capabilities > Plugins (its Agent switch), then press Try again. If it stays unreachable, quit and reopen Hermes so it loads the plugin.',
   source: 'Source',
   sourcePlaceholder: 'Choose a source',
   refreshSources: 'Refresh sources and devices',
@@ -1124,6 +1139,8 @@ const EN = {
   overlayOriginal: 'Show the original',
   overlaySpeaker: 'Speaker names',
   overlayOpacity: 'Background',
+  overlayStyle: 'Style',
+  overlayStyles: { banner: 'Banner', theme: 'Hermes theme' },
   percent: n => `${n}%`,
   on: 'On',
   off: 'Off',
@@ -2695,6 +2712,18 @@ function OverlayLook({ ctrl }) {
           pick('text_size', OVERLAY_TEXT_SIZES, t('overlayTextSize')),
           pick('max_lines', [1, 2, 3], t('overlayLines')),
           pick('opacity', OVERLAY_OPACITIES, t('overlayOpacity')),
+          jsxs('div', {
+            style: S.lookRow,
+            children: [
+              jsx('span', { style: S.lookLabel, children: t('overlayStyle') }),
+              jsx(SegmentedControl, {
+                disabled: overlay.busy,
+                onChange: id => void ctrl.setOverlayLook({ overlay_style: id }),
+                options: OVERLAY_STYLES.map(id => ({ id, label: t(`overlayStyles.${id}`) })),
+                value: OVERLAY_STYLES.includes(look.style) ? look.style : OVERLAY_STYLES[0]
+              })
+            ]
+          }),
           toggle('show_original', t('overlayOriginal')),
           toggle('show_speaker', t('overlaySpeaker'))
         ]

@@ -642,4 +642,5 @@ def test_banner_style_reaches_the_page_as_its_own_scheme():
     assert ':root[data-theme="banner"]' in css
     assert css.index(':root[data-theme="banner"]') > css.index("prefers-color-scheme")  # wins over the system dark
     assert overlay_page.page_settings({"overlay_style": "banner"})["style"] == "banner"
-    assert overlay_page.page_settings({})["style"] == "theme"
+    assert overlay_page.page_settings({})["style"] == "banner"
+    assert overlay_page.page_settings({"overlay_style": "theme"})["style"] == "theme"
