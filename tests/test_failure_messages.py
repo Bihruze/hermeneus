@@ -287,3 +287,12 @@ def test_network_lost_spoken_translation():
     assert messages.speak_error(raw) == (
         "Spoken translation: the connection to ElevenLabs was lost, so some sentences are not spoken. "
         "Check the network connection (subtitles continue).")
+
+
+def test_reconnecting_message_keeps_attempt_progress():
+    from hermeneus_engine import messages
+    text = messages.stt_reconnecting("Could not reach ElevenLabs: refused (attempt 4, next in 8 s)", "connect_failed")
+    assert text == ("Speech to text: the connection to ElevenLabs was lost; reconnecting (attempt 4, next in 8 s). "
+                    "Check the network connection if this does not clear.")
+    assert messages.stt_reconnecting("Connection dropped", "connection_closed").startswith(
+        "Speech to text: the connection to ElevenLabs was lost; reconnecting. ")
