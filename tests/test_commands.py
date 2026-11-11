@@ -393,3 +393,15 @@ def test_allow_remote_start_is_declared_off_by_default():
     entry = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text().split("  allow_remote_start:\n", 1)[1]
     assert entry.startswith("    type: bool\n    default: false\n")
     assert pkg.glue.SETTING_DEFAULTS["allow_remote_start"] is False
+
+
+def test_model_preflight_unavailable_is_logged_and_shown_in_doctor(monkeypatch, caplog):
+    glue = pkg.glue
+    monkeypatch.setitem(sys.modules, "providers", None)  # the import raises ImportError
+    monkeypatch.setattr(glue, "_aux_provider", lambda: "anthropic")
+    with caplog.at_level("WARNING", logger="hermeneus.glue"):
+        glue.model_preflight()  # start is not blocked
+    assert "model preflight unavailable" in caplog.text
+    checks = [c for c in pkg.commands.model_checks(False) if c.name == "translation model feature"]
+    assert checks and checks[0].ok is None and checks[0].state == "warn"
+    assert checks[0].detail.startswith("model preflight unavailable")

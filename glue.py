@@ -9,6 +9,7 @@ Imports are lazy so the engine and the tests run without Hermes.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 from typing import Any, Optional, Sequence
@@ -17,6 +18,8 @@ from .hermeneus_engine import overlay_page, overlay_settings
 from .hermeneus_engine.components import HermesServices
 from .hermeneus_engine.contracts import ChatMessage, TranslationError
 from .hermeneus_engine.messages import MODEL_FIX
+
+log = logging.getLogger("hermeneus.glue")
 
 PLUGIN_NAME = "hermeneus"
 AUX_TASK = "live_translate"
@@ -169,12 +172,29 @@ def missing_model_extra(provider: str) -> Optional[str]:
         return None
     try:
         from providers import get_provider_profile
-    except Exception:
+    except Exception as exc:
+        log.warning("model preflight unavailable: Hermes' providers module could not be imported (%s: %s)",
+                    type(exc).__name__, exc)
         return None
     profile = get_provider_profile(provider)
     needed = _API_MODE_EXTRAS.get(getattr(profile, "api_mode", "") or "")
     if needed and not _importable(needed[1]):
         return needed[0]
+    return None
+
+
+def model_preflight_unavailable(provider: str) -> Optional[str]:
+    """Why the missing-extra check cannot run for ``provider``, or None when it can.
+
+    ``missing_model_extra`` answers None both for "nothing missing" and for "could not check";
+    the doctor uses this to tell the two apart.
+    """
+    if not provider or provider == "auto":
+        return None
+    try:
+        from providers import get_provider_profile  # noqa: F401
+    except Exception as exc:
+        return f"Hermes' providers module could not be imported ({type(exc).__name__}: {exc})"
     return None
 
 

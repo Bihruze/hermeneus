@@ -72,11 +72,26 @@ async def lines(after: Optional[int] = Query(None, ge=0)) -> dict:
     return await plugin.controller.lines(after)
 
 
+# Headers a reverse proxy adds (RFC 7239 ``Forwarded`` and the de facto X-Forwarded-*/X-Real-IP).
+_PROXY_HEADERS = ("forwarded", "x-forwarded-for", "x-forwarded-host", "x-real-ip")
+
+
 def _surface(request: Request) -> str:
     """``desktop`` for a Desktop on this machine, ``remote`` otherwise: the overlay opens only on the Mac
-    whose screen the request comes from."""
+    whose screen the request comes from.
+
+    Hermes v0.23.1 has no per-request local/remote flag for plugin routes. Its own peer address is
+    ``request.client.host`` (hermes_cli/dashboard_auth/request_utils.py:20-27), which uvicorn rewrites
+    from forwarding headers only for trusted proxies under the auth gate (hermes_cli/web_server.py:1083,
+    web-dashboard.md "trusted_proxies"). A proxy on this machine in front of an ungated dashboard still
+    shows a loopback peer, so a loopback request that carries proxy headers counts as remote.
+    """
     host = request.client.host if request.client else ""
-    return "desktop" if host in ("127.0.0.1", "::1", "localhost") else "remote"
+    if host not in ("127.0.0.1", "::1", "localhost"):
+        return "remote"
+    if any(h in request.headers for h in _PROXY_HEADERS):
+        return "remote"
+    return "desktop"
 
 
 @router.post("/start")

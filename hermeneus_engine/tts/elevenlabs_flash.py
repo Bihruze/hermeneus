@@ -36,6 +36,7 @@ import urllib.parse
 from dataclasses import dataclass
 from typing import Any, Awaitable, Callable, Optional, Sequence
 
+from ..redaction import KeyRedactor
 from .playback import PcmSink, Utterance
 from .voices import DEFAULT_VOICE_ID, DEFAULT_VOICE_NAME, unavailable_message
 
@@ -197,7 +198,7 @@ class FlashSpeaker:
         self._ids = itertools.count(1)
         self._closing = False
         self._closed = False
-        self._last_key: str = ""
+        self._keys = KeyRedactor()
         self.voice_id = config.voice_id
         self.status_message = ""     # read by the session and shown with its status
         self._voice_failed = ""
@@ -309,9 +310,7 @@ class FlashSpeaker:
         return f"{self.config.base_url.rstrip('/')}/v1/text-to-speech/{voice}/multi-stream-input?{q}"
 
     def _redact(self, text: str) -> str:
-        if self._last_key and self._last_key in text:
-            text = text.replace(self._last_key, "[redacted]")
-        return text
+        return self._keys.redact(text)
 
     def _ws_open(self) -> bool:
         ws = self._ws
@@ -332,7 +331,7 @@ class FlashSpeaker:
         key = self._key_provider()
         if not key:
             raise TtsError("No ElevenLabs API key is configured for spoken translation.")
-        self._last_key = key
+        self._keys.remember(key)
         t0 = self._clock()
         try:
             ws = await asyncio.wait_for(

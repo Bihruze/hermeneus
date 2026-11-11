@@ -241,9 +241,6 @@ class PlaybackQueue:
             total += utt.total_samples - utt.played_samples
         return total / self.sample_rate
 
-    def queued_count(self) -> int:
-        return len(self._pending) + (1 if self._current is not None else 0)
-
     def drain_events(self) -> list[PlaybackEvent]:
         out = []
         while True:

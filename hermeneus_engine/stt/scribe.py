@@ -61,11 +61,11 @@ from ..contracts import (
     SttStatus,
     Word,
 )
+from ..redaction import KeyRedactor
 
 log = logging.getLogger("hermeneus.stt.scribe")
 
 SECRET_NAME = "ELEVENLABS_API_KEY"
-_REDACTED = "[redacted]"
 
 # Error message types that retrying with the same key and settings cannot fix.
 # input_error and chunk_size_exceeded mean this client sent something the
@@ -341,7 +341,7 @@ class ScribeLiveClient:
         self._next_number = 1
         self._next_segment = 0
         self._last_text = ""
-        self._keys: list[str] = []
+        self._keys = KeyRedactor()
         self._state: Optional[SttState] = None
         self._accepting = False
         self._closing = False
@@ -423,11 +423,6 @@ class ScribeLiveClient:
     def _close_mark(self, phase: str) -> None:
         if self._close_started is not None:
             self.stats.close_ms[phase] = round((time.monotonic() - self._close_started) * 1000, 1)
-
-    def _close_remaining(self, reserve: float = 0.0) -> float:
-        if self._close_deadline is None:
-            return self._tuning.drain_timeout
-        return max(0.0, self._close_deadline - time.monotonic() - reserve)
 
     async def _force_close(self) -> None:
         """Deadline reached: drop every socket now and report CLOSED."""
@@ -561,15 +556,10 @@ class ScribeLiveClient:
                                  close_timeout=self._tuning.close_timeout)
 
     def _redact(self, text: str) -> str:
-        for key in self._keys:
-            if key:
-                text = text.replace(key, _REDACTED)
-        return text
+        return self._keys.redact(text)
 
     def _remember_key(self, key: str) -> None:
-        if key not in self._keys:
-            self._keys.append(key)
-            del self._keys[:-4]
+        self._keys.remember(key)
 
     async def _open_session(self) -> _Session:
         key = self._get_secret(self._secret_name)
