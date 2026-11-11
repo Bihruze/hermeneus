@@ -259,7 +259,8 @@ def palette_from_json(raw: str) -> Optional[Palette]:
         speakers = tuple(Rgba(**c) for c in data.pop("speakers"))
         colors = {k: Rgba(**data.pop(k)) for k in COLOR_TOKENS}
         failed = Rgba(**data["failed"]) if data.get("failed") else None
-        strings = tuple((str(k), str(v)) for k, v in data.get("strings") or ())
+        # The same key filter as the validator, so a hand-edited file cannot break the overlay's Strings.
+        strings = tuple((str(k), str(v)) for k, v in data.get("strings") or () if k in STRING_KEYS and isinstance(v, str))
         return Palette(speakers=speakers, dark=bool(data["dark"]), radius_px=float(data.get("radius_px", FALLBACK_RADIUS_PX)),
                        font=str(data.get("font", FALLBACK_FONT)), source=str(data.get("source", "desktop")),
                        failed=failed, strings=strings, **colors)

@@ -610,3 +610,26 @@ def test_a_marker_stays_with_the_first_word_it_introduces():
     runs = [Run("aaaa bbbb cc", FAILED), Run("Mark", MARK), Run("dddd", FAILED)]
     rows = wrap(runs, 17, chars, 3)
     assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb cc", "Mark dddd"]
+
+
+
+def test_label_and_marker_keep_one_row_and_the_text_breaks_when_all_three_do_not_fit():
+    # Before: the label sat alone on its row and the marker started the next (A3 reaudit3 N9).
+    runs = [Run("aaaa bbbb", TRANSLATED, 1), Run("Speaker 2", LABEL, 2), Run("Not translated", MARK, 2),
+            Run("cc", FAILED, 2)]
+    rows = wrap(runs, 26, chars, 3)
+    assert ["".join(r.text for r in row).strip() for row in rows] == ["aaaa bbbb", "Speaker 2 Not translated", "cc"]
+    rows = wrap(runs, 40, chars, 3)  # everything fits: one row
+    assert ["".join(r.text for r in row).strip() for row in rows] == ["aaaa bbbb Speaker 2 Not translated cc"]
+    rows = wrap(runs[1:], 12, chars, 4)  # the tags alone are wider than a row: they may break
+    assert all(sum(chars(r.text.rstrip(), r) for r in row) <= 15 for row in rows)
+
+
+def test_a_hand_edited_theme_file_with_an_unknown_word_key_still_loads():
+    # Before: an unknown key reached Strings(**...) and raised on every tick (A3 reaudit3 N10).
+    from hermeneus_engine.overlay.model import Strings
+    raw = json.loads(tok.palette_to_json(tok.FALLBACK[False]))
+    raw["strings"] = [["speaker", "Konuşmacı {n}"], ["shout", "x"], ["waiting", 7]]
+    p = tok.palette_from_json(json.dumps(raw))
+    assert dict(p.strings) == {"speaker": "Konuşmacı {n}"}
+    assert Strings(**dict(p.strings)).label(2) == "Konuşmacı 2"
