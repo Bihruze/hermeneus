@@ -30,6 +30,7 @@ You need:
 
 - macOS 14.2 or later. macOS 13 works only with the [virtual device fallback](#fallback-virtual-device-with-a-multi-output-device).
 - Hermes 0.23.1 or later with a model set up, and Hermes Desktop for the clicks below.
+- Python 3.12 or later. Hermes itself allows 3.11, but numpy 2.5.4 (the version Hermes v0.23.1 pins in its `voice` extra) declares `Requires-Python >=3.12`.
 - An ElevenLabs account. Hermeneus uses your own key and your own billing (see [Cost](#cost)).
 
 ### In Hermes Desktop
@@ -44,7 +45,7 @@ You need:
    ![The ELEVENLABS key field in Settings > Tools & Keys, holding a test key](docs/media/setup-key-saved.png)
 
 4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again**.
-5. **Start.** The translation model is your main Hermes model. The subtitle language is your Hermes or system language. Both are filled in. Press **Start**. Subtitles appear in the pane and in the floating strip above your other apps.
+5. **Start.** The translation model is your main Hermes model, unless you pinned one for **Live translation**. The subtitle language is your Hermes or system language. Both are filled in. The source is all system audio by default. Press **Start**, then play a video or a stream with speech in it. Subtitles appear in the pane and in the floating strip above your other apps.
 
 If the pane is closed, click **Hermeneus** in the status bar. Until setup is complete, that click opens the pane instead of starting. After the first run, one click on **Hermeneus** starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
 
@@ -72,7 +73,7 @@ hermes plugins enable hermeneus                  # if Hermes installed it disabl
 hermes plugins remove hermeneus                  # remove it
 ```
 
-The Python packages (`websockets`, `sounddevice`, `numpy`, on macOS `pyobjc-framework-CoreAudio` and `pyobjc-framework-Cocoa`, on Windows only `comtypes`, `pycaw` and `psutil`) are declared in `pyproject.toml`. Hermes asks before it installs them. They need Python 3.12 or later: Hermes itself allows 3.11, but numpy 2.5.4 (the version Hermes v0.23.1 pins in its `voice` extra) declares `Requires-Python >=3.12`.
+The Python packages (`websockets`, `sounddevice`, `numpy`, on macOS `pyobjc-framework-CoreAudio` and `pyobjc-framework-Cocoa`, on Windows only `comtypes`, `pycaw` and `psutil`) are declared in `pyproject.toml`. Hermes asks before it installs them.
 
 ### The System Audio Recording permission
 
