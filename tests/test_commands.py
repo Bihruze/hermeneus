@@ -157,11 +157,11 @@ async def test_run_json_prints_the_event_schema(data_dir):
     rig.stt.emit(CommittedTranscript("hi", segment_index=0))
     await wait_for(lambda: '"translated"' in out.getvalue())
     from hermeneus_engine.contracts import SttState, SttStatus
-    rig.stt.emit(SttStatus(SttState.FAILED, message="quota exceeded"))
+    rig.stt.emit(SttStatus(SttState.FAILED, message="Your ElevenLabs quota is used up.", error_type="quota_exceeded"))
     assert await asyncio.wait_for(task, 3) == 1
     events = [json.loads(l) for l in out.getvalue().splitlines()]
     assert {e["type"] for e in events} >= {"line", "status"}
-    assert events[-1]["state"] == "failed" and events[-1]["message"] == "quota exceeded"
+    assert events[-1]["state"] == "failed" and events[-1]["message"].startswith("Speech to text: the ElevenLabs quota")
 
 
 async def test_run_attaches_to_a_running_session_and_detaches_on_signal(data_dir):

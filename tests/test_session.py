@@ -98,13 +98,14 @@ async def test_relabel_reaches_bus_stored_lines_and_scheduler(data_dir):
 async def test_stt_failed_status_reaches_consumers_and_releases_lock(data_dir):
     rt, rig = await started(data_dir)
     sub = rt.bus.subscribe()
-    rig.stt.emit(SttStatus(SttState.FAILED, message="The API key was rejected."))
+    rig.stt.emit(SttStatus(SttState.FAILED, message="The API key was rejected.", error_type="auth_error"))
     await asyncio.wait_for(rt.session.wait_closed(), 2)
     states = []
     while (e := await sub.get(timeout=0.2)) is not None:
         if e["type"] == "status":
             states.append((e["state"], e["message"]))
-    assert states[-1] == ("failed", "The API key was rejected.")
+    assert states[-1][0] == "failed"
+    assert states[-1][1].startswith("Speech to text: ElevenLabs rejected the API key. Check ELEVENLABS_API_KEY")
     await rt.wait()
     assert lock_holder(data_dir) is None
 
@@ -117,7 +118,9 @@ async def test_capture_error_from_backend_thread_fails_session(data_dir):
     t.start()
     t.join()
     await asyncio.wait_for(rt.session.wait_closed(), 2)
-    assert rt.bus.status() == {**rt.bus.status(), "state": "failed", "message": "BlackHole 2ch disappeared"}
+    assert rt.bus.status()["state"] == "failed"
+    assert rt.bus.status()["message"] == ("BlackHole 2ch disappeared. Start translation again, or pick another "
+                                          "source (see: hermes hermeneus devices).")
     await rt.close()
 
 

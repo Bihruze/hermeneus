@@ -14,6 +14,7 @@ from hermeneus_engine.contracts import CaptureSource, LineState, SubtitleLine, S
 from hermeneus_engine.session import SessionComponents, SessionOptions
 
 SOURCE = CaptureSource(backend="virtual-device", source_id="BlackHole 2ch", label="BlackHole 2ch", detail="2 in")
+SOURCE2 = CaptureSource(backend="process-tap", source_id="system", label="All system audio except Hermeneus")
 
 
 def short_tmpdir() -> Path:
@@ -133,16 +134,30 @@ class FakeScheduler:
 
 
 class FakeSpeaker:
-    def __init__(self) -> None:
+    def __init__(self, voice_id: str = "", device: str = "", *, fail_start: Optional[Exception] = None,
+                 fail_speak: Optional[Exception] = None) -> None:
+        self.voice_id = voice_id
+        self.device = device
         self.spoken: list[tuple[str, str]] = []
         self.started_with: Optional[str] = None
         self.closed = False
+        self.fail_start = fail_start
+        self.fail_speak = fail_speak
+        self.last_error = ""
+        self.unhealthy = ""
 
     async def start(self, language=None):
+        if self.fail_start is not None:
+            raise self.fail_start
         self.started_with = language
 
     async def speak(self, text, *, language):
+        if self.fail_speak is not None:
+            raise self.fail_speak
         self.spoken.append((text, language))
+
+    def health(self) -> str:
+        return self.unhealthy
 
     async def close(self):
         self.closed = True
@@ -156,6 +171,14 @@ class Rig:
     scheduler: Optional[FakeScheduler] = None
     translate: Callable[[str], str] = lambda text: f"<{text}>"
     capture_error: Optional[Callable] = None
+    # Live changes: what the factories hand out, and what they were asked for.
+    live_changes: bool = True
+    next_capture: Optional[FakeCapture] = None
+    next_speaker_error: Optional[Exception] = None
+    speakers: list = dataclasses.field(default_factory=list)
+    captures: list = dataclasses.field(default_factory=list)
+    route_checks: list = dataclasses.field(default_factory=list)
+    route_error: Optional[Exception] = None
 
     def build(self, options: SessionOptions, on_capture_error) -> SessionComponents:
         self.capture_error = on_capture_error
@@ -164,8 +187,28 @@ class Rig:
             self.scheduler = FakeScheduler(on_line, self.translate)
             return self.scheduler
 
+        def speaker_factory(voice_id, device, source):
+            speaker = FakeSpeaker(voice_id, device, fail_start=self.next_speaker_error)
+            self.speakers.append(speaker)
+            return speaker
+
+        def capture_factory(source):
+            capture = self.next_capture or FakeCapture()
+            self.next_capture = None
+            self.captures.append((source, capture))
+            return capture
+
+        def route_check(device, source):
+            self.route_checks.append((device, source))
+            if self.route_error is not None:
+                raise self.route_error
+
+        if not self.live_changes:
+            return SessionComponents(capture=self.capture, stt=self.stt, scheduler_factory=factory,
+                                     speaker=self.speaker)
         return SessionComponents(capture=self.capture, stt=self.stt, scheduler_factory=factory,
-                                 speaker=self.speaker)
+                                 speaker=self.speaker, speaker_factory=speaker_factory,
+                                 capture_factory=capture_factory, route_check=route_check)
 
 
 def make_rig(**kw) -> Rig:
