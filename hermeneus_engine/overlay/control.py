@@ -20,10 +20,10 @@ import json
 import os
 import select
 import signal
-import subprocess
 import sys
 import time
 from pathlib import Path
+from .. import subproc
 from typing import Optional
 
 from ..overlay_settings import OverlaySettings
@@ -156,12 +156,9 @@ def child_command(data_dir: Path) -> list[str]:
 
 
 def child_env() -> dict:
-    """The parent's environment, with the parent's import path so the child finds PyObjC where Hermes does."""
-    env = dict(os.environ)
-    paths = [str(plugin_root())] + [p for p in sys.path if p and os.path.isdir(p)]
-    env["PYTHONPATH"] = os.pathsep.join(dict.fromkeys(paths))
-    env.pop("PYTHONHOME", None)
-    return env
+    """A minimal environment without secrets, with the parent's import path so the child finds
+    PyObjC where Hermes does (see ``subproc.python_env``)."""
+    return subproc.python_env()
 
 
 def status(data_dir: Path) -> dict:
@@ -170,7 +167,7 @@ def status(data_dir: Path) -> dict:
 
 
 def show(data_dir: Path, settings: OverlaySettings, *, session_running: bool,
-         popen=subprocess.Popen, timeout_s: float = READY_TIMEOUT_S, **checks) -> dict:
+         popen=subproc.popen, timeout_s: float = READY_TIMEOUT_S, **checks) -> dict:
     """Open the overlay for the running session (or update the open one). Returns ``status``."""
     if not session_running:
         raise OverlayUnavailable("no translation session is running. Start one first; with the overlay "
@@ -181,8 +178,8 @@ def show(data_dir: Path, settings: OverlaySettings, *, session_running: bool,
         return {**status(data_dir), "message": "the overlay is open"}
     log = open(log_file(data_dir), "wb")
     try:
-        child = popen(child_command(data_dir), cwd=str(plugin_root()), env=child_env(), stdin=subprocess.DEVNULL,
-                      stdout=subprocess.PIPE, stderr=log, start_new_session=True, close_fds=True)
+        child = popen(child_command(data_dir), cwd=str(plugin_root()), env=child_env(), stdin=subproc.DEVNULL,
+                      stdout=subproc.PIPE, stderr=log, start_new_session=True, close_fds=True)
     finally:
         log.close()
     try:
@@ -212,7 +209,7 @@ def _wait_ready(child, timeout_s: float) -> None:
         child.terminate()
         try:
             child.wait(1.0)
-        except subprocess.TimeoutExpired:
+        except subproc.TimeoutExpired:
             child.kill()
         raise OverlayUnavailable(f"the overlay did not open within {timeout_s:.0f} s; see the overlay log")
     if code == 0:

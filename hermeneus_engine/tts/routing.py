@@ -21,12 +21,12 @@ from __future__ import annotations
 
 import collections
 import json
-import subprocess
 import sys
 import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
+from .. import subproc
 from ..contracts import ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, ENGINE_SAMPLE_WIDTH, FeedbackRiskError, FrameSink, OutputDevice
 
 if TYPE_CHECKING:
@@ -36,7 +36,7 @@ BACKEND_VIRTUAL_DEVICE = "virtual-device"
 BACKEND_PROCESS_TAP = "process-tap"
 BACKEND_PROCESS_LOOPBACK = "process-loopback"  # Windows; same rule as the process tap
 
-SYSTEM_PROFILER = "/usr/sbin/system_profiler"
+SYSTEM_PROFILER = subproc.SYSTEM_PROFILER
 
 # Gate tail. The gate already shifts each played block to the time PortAudio
 # says it reaches the DAC (outputBufferDacTime), so the tail only has to cover
@@ -105,7 +105,7 @@ class AudioInventory:
 
 def run_system_profiler(timeout_s: float = 15.0) -> dict:
     """Run ``system_profiler SPAudioDataType -json`` (read-only) and parse it."""
-    proc = subprocess.run([SYSTEM_PROFILER, "SPAudioDataType", "-json"], capture_output=True,
+    proc = subproc.run([SYSTEM_PROFILER, "SPAudioDataType", "-json"], capture_output=True,
                           timeout=timeout_s, check=True)
     return json.loads(proc.stdout)
 
@@ -205,7 +205,7 @@ def load_inventory() -> AudioInventory:
         if sys.platform != "darwin":
             raise FileNotFoundError(SYSTEM_PROFILER)
         sp = run_system_profiler()
-    except (OSError, subprocess.SubprocessError, ValueError) as exc:
+    except (OSError, subproc.SubprocessError, ValueError) as exc:
         notes.append(f"system_profiler unavailable: {type(exc).__name__}")
     ca = None
     if sys.platform == "darwin":  # the CoreAudio reader is macOS only; Windows uses sounddevice names

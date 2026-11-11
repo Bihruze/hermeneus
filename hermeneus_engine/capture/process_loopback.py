@@ -25,7 +25,6 @@ import importlib.util
 import json
 import logging
 import os
-import subprocess
 import sys
 import threading
 import weakref
@@ -33,6 +32,7 @@ from collections import deque
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from .. import subproc
 from ..contracts import CaptureError, CaptureSource, FrameSink
 from ._loopback_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
 from ._loopback_worker import KIND_LIST, KIND_STATUS
@@ -54,13 +54,8 @@ StatusCallback = Callable[[str, str, dict], None]
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
-# subprocess docs: "If specified, env must provide any variables required for
-# the program to execute. On Windows, in order to run a side-by-side assembly
-# the specified env must include a valid SystemRoot." The rest keep temp
-# files, the user profile and the console code page behaving as in the parent.
-WORKER_ENV_ALLOWLIST = ("SYSTEMROOT", "SYSTEMDRIVE", "WINDIR", "PATH", "PATHEXT", "TEMP", "TMP", "USERPROFILE",
-                        "LOCALAPPDATA", "APPDATA", "PROGRAMDATA", "COMSPEC", "NUMBER_OF_PROCESSORS",
-                        "PROCESSOR_ARCHITECTURE", "LANG", "PYTHONUTF8", "PYTHONIOENCODING")
+# The Windows allowlist and its reasons live in ``subproc.WINDOWS_ENV_ALLOWLIST``.
+WORKER_ENV_ALLOWLIST = subproc.WINDOWS_ENV_ALLOWLIST
 
 # CREATE_NO_WINDOW keeps a console window from flashing up under Hermes Desktop;
 # CREATE_NEW_PROCESS_GROUP keeps a Ctrl+C in Hermes's console out of the worker,
@@ -98,22 +93,19 @@ def windows_build() -> Optional[int]:
         return None
 
 
-def worker_env(parent: Optional[dict] = None) -> dict:
-    """Minimal environment for the worker; never carries API keys, tokens or secrets."""
-    parent = dict(os.environ) if parent is None else parent
-    upper = {k.upper(): v for k, v in parent.items()}
-    env = {k: upper[k] for k in WORKER_ENV_ALLOWLIST if k in upper}
-    env["PYTHONPATH"] = str(_PACKAGE_ROOT)
-    env["PYTHONUNBUFFERED"] = "1"
-    return env
+def worker_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
+    """Minimal environment for the worker; never carries API keys, tokens or secrets.
+
+    PYTHONPATH carries this package and the parent's ``sys.path`` directories, where Hermes puts
+    plugin dependencies at runtime (see ``subproc.python_env``)."""
+    return subproc.python_env(dict(os.environ) if parent is None else parent, path, windows=True)
 
 
-def spawn_worker() -> subprocess.Popen:
+def spawn_worker() -> subproc.Popen:
     flags = (CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW) if sys.platform == "win32" else 0
-    return subprocess.Popen(
-        [sys.executable, "-m", "hermeneus_engine.capture._loopback_worker"],
-        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        env=worker_env(), close_fds=True, creationflags=flags)
+    return subproc.popen([sys.executable, "-m", "hermeneus_engine.capture._loopback_worker"],
+                         stdin=subproc.PIPE, stdout=subproc.PIPE, stderr=subproc.PIPE,
+                         env=worker_env(), creationflags=flags)
 
 
 class _Run:
@@ -379,7 +371,7 @@ class ProcessLoopbackBackend:
             try:
                 proc.wait(timeout=STOP_TIMEOUT_S)
                 break
-            except subprocess.TimeoutExpired:
+            except subproc.TimeoutExpired:
                 log.warning("capture worker did not exit; escalating")
         for t in (run.reader, run.stderr_reader):
             if t is not None and t is not threading.current_thread():
@@ -399,7 +391,7 @@ def _close_quietly(proc) -> None:
         pass
     try:
         proc.wait(timeout=STOP_TIMEOUT_S)
-    except subprocess.TimeoutExpired:
+    except subproc.TimeoutExpired:
         try:
             proc.kill()
             proc.wait(timeout=STOP_TIMEOUT_S)

@@ -13,7 +13,6 @@ prompt; the start waits for the answer up to ``timeout_s``.
 from __future__ import annotations
 
 import math
-import subprocess
 import sys
 import threading
 import time
@@ -22,8 +21,9 @@ from typing import Callable, Optional
 
 import numpy as np
 
+from .. import subproc
 from ..contracts import ENGINE_SAMPLE_RATE, CaptureError, CaptureSource
-from .process_tap import PERMISSION_PANE, ProcessTapBackend, permission_message, responsible_app_name, worker_env
+from .process_tap import PERMISSION_PANE, ProcessTapBackend, permission_message, responsible_app_name
 
 TONE_HZ = 440.0
 # Tone level per route. A tap reads the samples a process writes, before the output volume, so
@@ -83,8 +83,8 @@ class TonePlayer:
                  ready_timeout_s: float = 10.0) -> None:
         self.device = device
         args = [sys.executable, "-c", PLAYER_SCRIPT, repr(float(amplitude))] + ([device] if device else [])
-        self._proc = subprocess.Popen(args, stdin=subprocess.PIPE,
-                                      stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=worker_env())
+        self._proc = subproc.popen(args, stdin=subproc.PIPE, stdout=subproc.PIPE, stderr=subproc.PIPE, text=True,
+                                   env=subproc.python_env())
         self.pid = self._proc.pid
         line = [""]
         reader = threading.Thread(target=lambda: line.__setitem__(0, self._proc.stdout.readline()), daemon=True)

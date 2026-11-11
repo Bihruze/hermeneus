@@ -536,7 +536,7 @@ def test_unexpected_worker_exit_sets_failure():
 
 def test_worker_env_is_minimal_and_keeps_systemroot():
     env = process_loopback.worker_env({"SystemRoot": r"C:\Windows", "Path": r"C:\Python", "TEMP": r"C:\t",
-                                       "ELEVENLABS_API_KEY": "secret", "OPENROUTER_API_KEY": "x"})
+                                       "ELEVENLABS_API_KEY": "secret", "OPENROUTER_API_KEY": "x"}, path=[])
     assert env["SYSTEMROOT"] == r"C:\Windows" and env["PATH"] == r"C:\Python" and env["TEMP"] == r"C:\t"
     assert "ELEVENLABS_API_KEY" not in env and "OPENROUTER_API_KEY" not in env
     assert env["PYTHONUNBUFFERED"] == "1" and env["PYTHONPATH"] == str(process_loopback._PACKAGE_ROOT)

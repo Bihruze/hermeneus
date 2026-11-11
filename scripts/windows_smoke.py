@@ -84,7 +84,9 @@ def main() -> int:
         import numpy as np
         import sounddevice as sd
         # 1. A tone played by another process reaches a capture of that process.
-        player = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(1.0)\n" + TONE])
+        from hermeneus_engine import subproc
+
+        player = subproc.python_popen(["-c", "import time; time.sleep(1.0)\n" + TONE])
         try:
             app = CaptureSource(process_loopback.BACKEND_NAME, f"pid:{player.pid}", "tone player")
             heard = capture(backend, app, 2.5)

@@ -616,7 +616,8 @@ def test_spawn_worker_passes_the_minimal_env(monkeypatch):
         seen.update(kw)
         return object()
 
-    monkeypatch.setattr(process_tap.subprocess, "Popen", fake_popen)
+    from hermeneus_engine import subproc
+    monkeypatch.setattr(subproc.subprocess, "Popen", fake_popen)
     process_tap.spawn_worker()
     assert "ELEVENLABS_API_KEY" not in seen["env"] and "SOME_PROVIDER_TOKEN" not in seen["env"]
 

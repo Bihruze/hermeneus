@@ -32,7 +32,6 @@ from __future__ import annotations
 import ctypes
 import json
 import math
-import subprocess
 import sys
 import threading
 import time
@@ -41,6 +40,7 @@ from typing import Any, Callable, Optional, Sequence
 
 import numpy as np
 
+from .. import subproc
 from ..contracts import (
     ENGINE_SAMPLE_RATE,
     CaptureError,
@@ -669,8 +669,8 @@ class _CoreAudioReader:
                                 members=members)
 
 
-def _profiler_default_output(run: Callable[..., Any] = subprocess.run) -> OutputDeviceInfo:
-    proc = run(["system_profiler", "SPAudioDataType", "-json"], capture_output=True, text=True,
+def _profiler_default_output(run: Callable[..., Any] = subproc.run) -> OutputDeviceInfo:
+    proc = run([subproc.SYSTEM_PROFILER, "SPAudioDataType", "-json"], capture_output=True, text=True,
                timeout=20, check=True)
     data = json.loads(proc.stdout)
     for group in data.get("SPAudioDataType", []):
@@ -716,7 +716,7 @@ def detect_multi_output_setup(virtual_device: str = "BlackHole 2ch", *,
         if fallback is not None:
             try:
                 info = fallback()
-            except (OSError, ValueError, subprocess.SubprocessError) as exc:
+            except (OSError, ValueError, subproc.SubprocessError) as exc:
                 errors["system_profiler"] = str(exc)
     if info is None:
         reason = "; ".join(f"{k}: {v}" for k, v in errors.items()) or "this check only runs on macOS"
