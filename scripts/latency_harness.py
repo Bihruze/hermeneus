@@ -631,8 +631,11 @@ class SegmentTracker:
                 self._attribute(key, words, "partial", overwrite=False)
             if ev.segment_index is not None:
                 self.by_index[ev.segment_index] = key
+            # COMMIT is the receive time; the client may deliver the event later (it waits for
+            # the language event). That wait is user-visible, so it is recorded per segment.
+            hold_ms = (arrived_ns - ev.received_ns) / 1e6 if ev.received_ns else None
             self.recorder.annotate(key, text=ev.text, segment_index=ev.segment_index,
-                                   language=ev.language_code)
+                                   language=ev.language_code, commit_client_hold_ms=hold_ms)
             if self.translator is not None and ev.text.strip():
                 context = tuple(self.history[-self.cfg.context_segments:]) if self.cfg.context_segments else ()
                 task = asyncio.get_running_loop().create_task(
@@ -851,6 +854,9 @@ async def run_pipeline(cfg: RunConfig, stop: Optional[asyncio.Event] = None) -> 
         "stream_sessions": clock.sessions,
         "end_stage": end_stage_for(cfg),
         "latency": recorder.summary(end_stage=end_stage_for(cfg)),
+        "commit_client_hold_ms": m.distribution(
+            meta["commit_client_hold_ms"] for _k, _s, meta in segments
+            if meta.get("commit_client_hold_ms") is not None),
         "segments": [{"key": k, "stages_ns": s, **meta} for k, s, meta in segments],
         "samples": sampler.samples,
     }

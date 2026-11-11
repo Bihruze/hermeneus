@@ -267,3 +267,13 @@ def test_sampler_libproc_and_ps_agree_and_see_children():
     finally:
         child.kill()
         child.wait()
+
+
+def test_commit_records_client_hold_between_receive_and_delivery():
+    rec = m.LatencyRecorder()
+    tracker = H.SegmentTracker(H.RunConfig(label="hold"), rec, m.StreamClock(), None, None)
+    tracker.handle(c.CommittedTranscript(text="hello", segment_index=0, received_ns=5_000_000),
+                   arrived_ns=1_005_000_000)
+    [(_key, stages, meta)] = rec.snapshot()
+    assert stages[m.Stage.COMMIT] == 5_000_000
+    assert meta["commit_client_hold_ms"] == 1000.0
