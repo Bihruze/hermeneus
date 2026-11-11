@@ -20,7 +20,7 @@ from typing import Optional, Sequence, Union
 
 from ..contracts import LlmCall, TranslationError
 from .languages import primary_subtag, resolve_target_language
-from .prompt import ContextLine, build_messages, clean_reply
+from .prompt import ContextLine, build_messages, clean_reply, reply_problem
 
 # A healthy one-line translation is a short prompt and a short reply. Six
 # seconds leaves room for a slow first token while still failing well before
@@ -80,7 +80,8 @@ class LlmTranslator:
         ``context`` holds earlier segments, oldest first, as plain strings or ``ContextLine``.
         Only the last ``context_segments`` entries are sent. ``timeout_s`` overrides the
         instance timeout for this call. Raises ``TranslationError`` on timeout, on any failure
-        of the LLM call, and on an empty reply. Cancellation propagates unchanged.
+        of the LLM call, on an empty reply, and on a reply that is not only a translation
+        (``prompt.reply_problem``). Cancellation propagates unchanged.
         """
         target = resolve_target_language(target_language)
         stripped = text.strip()
@@ -118,4 +119,9 @@ class LlmTranslator:
         cleaned = clean_reply(raw, original=stripped, target=target)
         if not cleaned:
             raise TranslationError("Translation failed: the model returned an empty reply.")
+        # Only the translation goes on screen: a reply with notes, copied speech or the wrong script
+        # fails the line ("Not translated") instead. String checks, no second model call.
+        problem = reply_problem(cleaned, original=stripped, target=target, source_language=source_language)
+        if problem:
+            raise TranslationError(f"Translation rejected: {problem}.")
         return cleaned

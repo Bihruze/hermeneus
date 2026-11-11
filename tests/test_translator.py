@@ -6,7 +6,7 @@ import pytest
 from hermeneus_engine.contracts import LineState, SubtitleLine, TranslationError, Translator
 from hermeneus_engine.translate import languages
 from hermeneus_engine.translate.llm_translator import LlmTranslator
-from hermeneus_engine.translate.prompt import ContextLine, build_messages, clean_reply
+from hermeneus_engine.translate.prompt import ContextLine, build_messages, clean_reply, reply_problem
 from hermeneus_engine.translate.scheduler import TranslationScheduler
 
 TR = languages.resolve_target_language("tr")
@@ -446,3 +446,86 @@ async def test_scheduler_with_llm_translator_end_to_end():
     ]
     assert out[1].error == "Translation failed: RuntimeError: provider down"
     assert "hello there" in user_content(llm, 2)
+
+
+# --------------------------------------------------------------------------
+# Reply guard: only a translation goes on screen (A7-3)
+# --------------------------------------------------------------------------
+
+# The two leak shapes seen in real sessions, with synthetic text: the speech followed by the model's
+# notes and a corrected translation, and a reply that starts with the speech's own words.
+TALK_ORIGINAL = ("people say they mostly follow the news on short clips, which matters a lot for sales because "
+                 "over 5 million small shops depend on it.")
+TALK_LEAK = (TALK_ORIGINAL + " Hmm, wait \u2014 only the Turkish text should be given. Correct output: insanlar "
+             "haberleri çoğunlukla kısa kliplerden takip ettiklerini söylüyor; 5 milyondan fazla küçük dükkân buna "
+             "bağlı olduğu için bu, satışlar açısından çok önemli.")
+NEWS_ORIGINAL = ("meetings took place between them and Mira Tal, who said she would not govern with them, though both "
+                 "had solid reasons.")
+NEWS_LEAK = ("between them and Mira Tal ile aralarında toplantılar yapıldı; Tal onlarla birlikte yönetmeyeceğini "
+             "söyledi, yine de iki tarafın da sağlam gerekçeleri vardı.")
+
+
+@pytest.mark.parametrize("original,reply", [(TALK_ORIGINAL, TALK_LEAK), (NEWS_ORIGINAL, NEWS_LEAK)])
+async def test_a_reply_with_notes_or_copied_speech_fails_the_line_and_is_never_shown(original, reply):
+    llm = FakeLlm(reply)
+    with pytest.raises(TranslationError, match="Translation rejected"):
+        await LlmTranslator(llm).translate(original, source_language="en", target_language="tr", context=[])
+    assert len(llm.calls) == 1  # no second model call
+
+
+async def test_the_scheduler_marks_a_rejected_reply_failed_with_no_translation():
+    line = SubtitleLine(line_id="l1", state=LineState.COMMITTED, original=TALK_ORIGINAL, source_language="en")
+    out: list[SubtitleLine] = []
+    sched = TranslationScheduler(LlmTranslator(FakeLlm(TALK_LEAK)), target_language="tr", on_line=out.append)
+    sched.submit(line)
+    await sched.drain()
+    assert [(l.state, l.translation) for l in out] == [(LineState.FAILED, "")]
+    assert "Translation rejected" in out[0].error
+    await sched.aclose()
+
+
+@pytest.mark.parametrize("reply", [
+    "Here is the translation: Merhaba dünya.",
+    "Merhaba dünya. (Note: the speaker is sarcastic.)",
+    "Merhaba dünya. Let me translate that again: Selam dünya.",
+    "I should only translate the segment. Merhaba.",
+    "<segment>Merhaba</segment> dünya",
+])
+def test_meta_commentary_is_rejected(reply):
+    assert reply_problem(reply, original="Hello world.", target=TR, source_language="en")
+
+
+def test_a_reply_in_the_wrong_script_is_rejected():
+    ru = languages.resolve_target_language("ru")
+    assert reply_problem("They said the talks will resume tomorrow", original="Они сказали", target=ru,
+                         source_language="ru-x") != ""
+    assert reply_problem("Они сказали, что переговоры возобновятся завтра", original="They said", target=ru,
+                         source_language="en") == ""
+    assert reply_problem("Переговоры возобновятся завтра в Анкаре", original="x", target=TR, source_language="ru")
+
+
+@pytest.mark.parametrize("original,reply,source", [
+    ("Last Week Tonight is back.", "Last Week Tonight geri döndü.", "en"),  # a title kept as it is
+    ("I watched Game of Thrones and The Lord of the Rings.", "Game of Thrones ve The Lord of the Rings'i izledim.", "eng"),
+    ("The New York Times said that.", "The New York Times bunu söyledi.", "en"),
+    ("uh", "ıı", "en"),
+    ("OK.", "Tamam.", None),
+    ("I should give it to him.", "Bunu ona vermeliyim.", "en"),
+    ("Hmm, wait.", "Hmm, bekle.", "en"),
+])
+def test_ordinary_translations_pass_the_guard(original, reply, source):
+    assert reply_problem(reply, original=original, target=TR, source_language=source) == ""
+
+
+def test_an_english_target_keeps_ordinary_english():
+    en = languages.resolve_target_language("en")
+    assert reply_problem("I should give it to him, wait for me.", original="Bunu ona vermeliyim, beni bekle.",
+                         target=en, source_language="tr") == ""
+    assert reply_problem("And then they said that it was over and done.", original="Sonra bittiğini söylediler.",
+                         target=en, source_language="tr") == ""
+
+
+def test_the_system_prompt_forbids_notes_and_copied_speech():
+    system = build_messages("hi", target=TR, speaker_id=None, source_language=None, context=[],
+                            context_chars_per_line=300)[0]["content"]
+    assert "Never add a comment about the task" in system and "Never copy the source-language words" in system
