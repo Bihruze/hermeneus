@@ -515,7 +515,7 @@ async def test_command_switches_a_running_session_and_prints_the_url(data_dir):
     port = free_port()
     settings = {"overlay_page": False, "overlay_page_port": port}
     plugin, _ = make_plugin(data_dir, settings)
-    await plugin.start(commands.Choices(to="tr", source="BlackHole"))
+    await plugin.start(commands.Choices(to="tr", source="BlackHole"), platform="cli")
     try:
         out = io.StringIO()
         code = await asyncio.to_thread(commands.cmd_overlay_page, plugin, overlay_args(switch="on"), out=out)
@@ -539,7 +539,7 @@ async def test_command_switches_a_running_session_and_prints_the_url(data_dir):
 async def test_plugin_unload_stops_the_page(data_dir):
     port = free_port()
     plugin, _ = make_plugin(data_dir, {"overlay_page": True, "overlay_page_port": port})
-    await plugin.start(commands.Choices(to="tr", source="BlackHole"))
+    await plugin.start(commands.Choices(to="tr", source="BlackHole"), platform="cli")
     assert (await plugin.controller.overlay())["running"]
     await asyncio.to_thread(plugin.unload)
     with pytest.raises(OSError):
@@ -553,3 +553,13 @@ def test_doctor_lines():
     assert waiting.ok and "47830" in waiting.detail
     failed = commands.overlay_check({"overlay_page": True}, {"running": False, "error": "port 1 busy"})
     assert failed.ok is False and failed.state == "warn" and "--port" in failed.fix
+
+
+def test_page_marks_a_failed_line_in_the_shared_red():
+    # Before: --text-failed equalled --text-pending and nothing else marked the line (A3 re-audit N2).
+    from hermeneus_engine import overlay_page as op, overlay_tokens as tok
+    tokens = op.theme_tokens(None)
+    assert tokens["dark"]["--failed"] == tok.FALLBACK[True].failed_color.css()
+    assert tokens["light"]["--failed"] == tok.FALLBACK[False].failed_color.css()
+    html = op.PAGE_FILE.read_text(encoding="utf-8")
+    assert ".failed .text::before" in html and "content: 'Not translated'" in html and "var(--failed)" in html

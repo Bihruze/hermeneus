@@ -17,7 +17,8 @@ import pytest
 from fake_wasapi import FakeWasapi
 from hermeneus_engine import audio_devices, components, doctor_windows, options, platform_words
 from hermeneus_engine._windows import process as winproc
-from hermeneus_engine.capture import _loopback_engine, _wasapi, _worker_path, process_loopback
+from hermeneus_engine import subproc
+from hermeneus_engine.capture import _loopback_engine, _wasapi, process_loopback
 from hermeneus_engine.capture._loopback_engine import LoopbackCapture, LoopbackSetupError, LoopbackSpec
 from hermeneus_engine.capture.process_loopback import ProcessLoopbackBackend
 from hermeneus_engine.contracts import CaptureSource
@@ -48,14 +49,15 @@ def test_w1_worker_pythonpath_carries_the_parent_sys_path(tmp_path):
     deps.mkdir()
     env = process_loopback.worker_env({"SystemRoot": r"C:\Windows"}, path=[str(deps), "", str(tmp_path / "gone")])
     parts = env["PYTHONPATH"].split(os.pathsep)
-    assert parts == [str(process_loopback._PACKAGE_ROOT), str(deps)]
+    assert parts == [str(subproc.PACKAGE_ROOT), str(deps)]
 
 
-@pytest.mark.skipif(sys.platform != "darwin", reason="compares with the macOS worker's own copy of the rule")
-def test_w1_same_rule_as_the_macos_worker(tmp_path):
+@pytest.mark.skipif(sys.platform != "darwin", reason="compares with the macOS worker")
+def test_w1_same_search_path_as_the_macos_worker(tmp_path):
     from hermeneus_engine.capture import process_tap
     paths = [str(tmp_path), "", str(tmp_path), "/nonexistent-dir"]
-    assert process_tap.worker_env({}, path=paths)["PYTHONPATH"] == _worker_path.worker_pythonpath(paths)
+    assert (process_tap.worker_env({}, path=paths)["PYTHONPATH"]
+            == process_loopback.worker_env({}, path=paths)["PYTHONPATH"])
 
 
 # ---------------------------------------------------------------- W2 one endpoint, several host APIs
@@ -387,3 +389,278 @@ def test_w17_exit_code_259_is_not_alive_once_the_handle_is_signaled():
     from test_windows_platform import FakeKernel32
     assert winproc.pid_alive(5, FakeKernel32(77, exit_code=259, signaled=True)) is False
     assert winproc.pid_alive(5, FakeKernel32(77, exit_code=259, signaled=False)) is True
+
+
+# ---------------------------------------------------------------- W18 / W19 (A4 re-audit N1 to N3)
+
+class WaitTrackingStream:
+    """A stream whose wait() blocks until the test releases it, and which records a close during a wait."""
+
+    def __init__(self, hal, target, include):
+        self.hal, self.target, self.include = hal, target, include
+        self.sample_rate, self.channels, self.sample_format = 48000, 2, "float32"
+        self.started = self.closed = False
+        self.in_wait = threading.Event()
+        self.release = threading.Event()
+        self.violations = []
+        self.closed_by = None
+
+    def start(self):
+        self.started = True
+
+    def wait(self, timeout_s):
+        self.in_wait.set()
+        self.release.wait(2.0)
+        self.in_wait.clear()
+        return False
+
+    def read(self):
+        return []
+
+    def close(self):
+        if self.in_wait.is_set():
+            self.violations.append("closed while a wait was pending")
+        self.closed = True
+        self.closed_by = threading.current_thread().name
+        self.release.set()
+        return []
+
+
+def test_w18_only_the_pump_closes_a_stream_it_may_be_waiting_on():
+    hal = hal_with_tree()
+    streams = []
+
+    def open_loopback(pid, include):
+        s = WaitTrackingStream(hal, pid, include)
+        streams.append(s)
+        return s
+
+    hal.open_loopback = open_loopback
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None, refresh_interval=60)
+    cap.open()
+    try:
+        first = streams[0]
+        assert first.in_wait.wait(1.0)          # the pump is inside WaitForSingleObject on the first stream
+        assert cap.rebuild("silence") is True    # the tick thread's rebuild, run from this thread
+        assert not first.closed                  # handed over, not closed under the waiting pump
+        first.release.set()                      # the wait returns
+        deadline = time.monotonic() + 1.0
+        while not first.closed and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert first.closed and first.closed_by == "hermeneus-loopback-pump"
+        assert first.violations == []
+    finally:
+        for s in streams:
+            s.release.set()
+        cap.close()
+    assert all(s.closed for s in streams) and all(not s.violations for s in streams)
+
+
+def test_w19_activation_runs_outside_the_lock():
+    hal = hal_with_tree()
+    real_open = hal.open_loopback
+    inside = threading.Event()
+    go_on = threading.Event()
+
+    def slow_open(pid, include):
+        if inside.is_set() is False and len(hal.streams) >= 1:
+            inside.set()
+            go_on.wait(2.0)
+        return real_open(pid, include)
+
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    hal.open_loopback = slow_open
+    t = threading.Thread(target=cap.rebuild, args=("silence",))
+    t.start()
+    assert inside.wait(1.0)
+    got = cap._lock.acquire(timeout=0.2)  # the pump could take the lock during a slow activation
+    if got:
+        cap._lock.release()
+    go_on.set()
+    t.join(2.0)
+    cap.close()
+    assert got and hal.clean
+
+
+def test_w19_the_peak_is_swapped_under_the_lock():
+    hal = hal_with_tree()
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    cap._window_peak = 0.5
+    done = threading.Event()
+    with cap._lock:
+        t = threading.Thread(target=lambda: (cap._watchdog(0.0), done.set()))
+        t.start()
+        assert not done.wait(0.1)  # the watchdog waits for the lock the pump holds while converting
+    assert done.wait(1.0)
+    t.join()
+    cap.close()
+
+
+# ---------------------------------------------------------------- W22 wording (A5 re-audit)
+
+def test_w22_remote_start_refusal_names_the_machine(monkeypatch):
+    import importlib
+
+    from plugin_loader import load_plugin_package
+    commands = importlib.import_module(load_plugin_package().__name__ + ".commands")
+    assert commands.REMOTE_START_REFUSED == ("Hermeneus captures audio on " + platform_words.this_machine() +
+                                             ", so start it from " + platform_words.the_machine() +
+                                             " (terminal or Hermes Desktop).")
+    assert platform_words.the_machine("darwin") == "the Mac" and platform_words.the_machine("win32") == "the PC"
+    if sys.platform == "darwin":  # macOS text unchanged, byte for byte
+        assert commands.REMOTE_START_REFUSED == ("Hermeneus captures audio on this Mac, so start it from the Mac "
+                                                 "(terminal or Hermes Desktop).")
+
+
+def test_w22_plugin_yaml_settings_are_os_neutral():
+    from pathlib import Path
+
+    text = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text(encoding="utf-8")
+    block = text[text.index("  allow_remote_start:"):]
+    description = next(line for line in block.splitlines() if line.strip().startswith("description:"))
+    assert "Mac" not in description and "this computer" in description
+
+
+# ---------------------------------------------------------------- W21 truncated MME cable names
+
+CABLE_NAMES = {
+    "MME": ("CABLE Input (VB-Audio Virtual C", "CABLE Output (VB-Audio Virtual "),
+    "Windows DirectSound": ("CABLE Input (VB-Audio Virtual Cable)", "CABLE Output (VB-Audio Virtual Cable)"),
+    "Windows WASAPI": ("CABLE Input (VB-Audio Virtual Cable)", "CABLE Output (VB-Audio Virtual Cable)"),
+}
+
+
+@pytest.mark.parametrize("out_api", sorted(CABLE_NAMES))
+@pytest.mark.parametrize("cap_api", sorted(CABLE_NAMES))
+def test_w21_cable_pair_matches_across_host_api_names(out_api, cap_api):
+    out_name, cap_name = CABLE_NAMES[out_api][0], CABLE_NAMES[cap_api][1]
+    assert len(CABLE_NAMES["MME"][0]) == 31 and len(CABLE_NAMES["MME"][1]) == 31
+    assert audio_devices.same_loopback_device(out_name, cap_name)
+    inv = routing.AudioInventory(devices=(
+        routing.AudioDeviceInfo(out_name, output_channels=2),
+        routing.AudioDeviceInfo(cap_name, input_channels=2),
+        routing.AudioDeviceInfo("Speakers (Realtek(R) Audio)", output_channels=2),
+    ))
+    v = routing.check_feedback_risk(out_name, cap_name, capture_backend="virtual-device", inventory=inv)
+    assert v.risky and v.code == routing.CODE_SAME_DEVICE
+
+
+def test_w21_numbered_and_truncated_cables_stay_apart():
+    assert audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE-A Output (VB-Audio Cable")
+    assert not audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE Output (VB-Audio Virtual ")
+    assert not audio_devices.same_loopback_device("Cable Modem Output", "Cable Modem Input")
+
+
+# ---------------------------------------------------------------- W20 WASAPI shared mode at 24 kHz
+
+class FakeStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def playback_for(name, devices, apis, *, asked=None):
+    made = []
+
+    def factory(**kwargs):
+        made.append(kwargs)
+        return FakeStream(**kwargs)
+
+    def hostapis():
+        if asked is not None:
+            asked.append(1)
+        return apis
+
+    q = PlaybackQueue(name, sample_rate=24000, stream_factory=factory, query_devices=lambda: devices,
+                      query_hostapis=hostapis, default_hostapi=lambda: 0,
+                      wasapi_settings=lambda: ("WasapiSettings", {"auto_convert": True}))
+    return q, made
+
+
+def test_w20_wasapi_output_gets_auto_convert_on_windows(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "win32")
+    q, made = playback_for("Speakers (Realtek(R) Audio)", WINDOWS_DEVICES, WINDOWS_HOSTAPIS)
+    q.start()
+    assert made[0]["device"] == 3 and made[0]["samplerate"] == 24000
+    assert made[0]["extra_settings"] == ("WasapiSettings", {"auto_convert": True})
+    q.stop()
+
+
+def test_w20_other_host_apis_on_windows_get_no_extra_settings(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "win32")
+    devices = [{"name": "Speakers (MME only)", "hostapi": 0, "max_output_channels": 2}]
+    q, made = playback_for("Speakers (MME only)", devices, WINDOWS_HOSTAPIS)
+    q.start()
+    assert "extra_settings" not in made[0]
+    q.stop()
+
+
+def test_w20_macos_stream_arguments_are_unchanged(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "darwin")
+    asked = []
+    devices = [{"name": "MacBook Air Speakers", "hostapi": 0, "max_output_channels": 2}]
+    q, made = playback_for("MacBook Air Speakers", devices, [{"name": "Core Audio"}], asked=asked)
+    q.start()
+    assert set(made[0]) == {"device", "samplerate", "channels", "dtype", "latency", "callback"} and asked == []
+    q.stop()
+
+
+def test_w20_real_sounddevice_has_wasapi_settings_with_auto_convert():
+    import inspect
+
+    import sounddevice
+    assert "auto_convert" in inspect.signature(sounddevice.WasapiSettings).parameters
+
+
+# ---------------------------------------------------------------- O1 to O3 (A4 re-audit 2)
+
+def test_o1_pcm_is_delivered_after_the_lock_is_released():
+    hal = hal_with_tree()
+    in_sink, release = threading.Event(), threading.Event()
+
+    def blocking_sink(pcm, ts):  # like a full stdout pipe to the parent
+        in_sink.set()
+        release.wait(2.0)
+
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), blocking_sink)
+    cap.open(start_pump=False)
+    hal.feed(sine(4800))
+    t = threading.Thread(target=cap.pump_once)
+    t.start()
+    assert in_sink.wait(1.0)
+    got = cap._lock.acquire(timeout=0.2)  # close() and rebuilds take this lock
+    if got:
+        cap._lock.release()
+    release.set()
+    t.join(2.0)
+    cap.close()
+    assert got
+
+
+def test_o2_release_returns_the_close_failure_once():
+    hal = hal_with_tree()
+    hal.close_failures = ["stop audio client: 0x88890004"]
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    cap.stats.teardown_failures.append("earlier failure")
+    assert cap._release() == ["stop audio client: 0x88890004"]
+    assert cap.stats.teardown_failures == ["earlier failure"]
+    cap.close()
+
+
+def test_o3_close_documents_a_tick_thread_inside_activation():
+    doc = LoopbackCapture.close.__doc__ or ""
+    assert "inside an activation" in doc and "R24" in doc

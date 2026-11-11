@@ -10,6 +10,7 @@ keeps the newest ones, so a long passage rolls upwards like film subtitles.
 
 from __future__ import annotations
 
+import math
 import re
 from collections import OrderedDict
 from dataclasses import dataclass, field
@@ -23,6 +24,8 @@ TRANSLATED = "translated"
 PENDING = "pending"
 FAILED = "failed"
 LABEL = "label"
+MARK = "mark"  # "Not translated" before a failed line, in --ui-red as the pane marks it
+NOT_TRANSLATED = "Not translated"
 
 RUNNING = frozenset({"starting", "live", "reconnecting", "stopping"})
 
@@ -173,6 +176,8 @@ def compose(model: OverlayModel, now: float, *, show_speaker: bool, show_origina
         if show_speaker and number is not None and line.speaker_id != previous_speaker:
             runs.append(Run(speaker_label(number), LABEL, number))
         previous_speaker = line.speaker_id
+        if seg.kind == FAILED:
+            runs.append(Run(NOT_TRANSLATED, MARK, number))
         runs.append(Run(seg.text, seg.kind, number))
     newest = lines[-1]
     original = newest.original.strip() if show_original and segment(newest).kind == TRANSLATED else ""
@@ -279,7 +284,7 @@ def _turns(runs: list[Run]) -> list[list[Run]]:
     for run in runs:
         previous = turns[-1][-1] if turns else None
         new_turn = (previous is None or run.kind == LABEL
-                    or (previous.kind != LABEL and previous.speaker != run.speaker))
+                    or (previous.kind not in (LABEL, MARK) and previous.speaker != run.speaker))
         if new_turn:
             turns.append([])
         turns[-1].append(run)
@@ -289,13 +294,13 @@ def _turns(runs: list[Run]) -> list[list[Run]]:
 def _segments(runs: list[Run]) -> list[list[Run]]:
     """Runs grouped per line: a speaker label stays with the text after it."""
     groups: list[list[Run]] = []
-    pending_label: list[Run] = []
+    pending: list[Run] = []
     for run in runs:
-        if run.kind == LABEL:
-            pending_label = [run]
+        if run.kind in (LABEL, MARK):
+            pending.append(run)
             continue
-        groups.append(pending_label + [run])
-        pending_label = []
+        groups.append(pending + [run])
+        pending = []
     return groups
 
 
@@ -346,5 +351,44 @@ def build_view(model: OverlayModel, now: float, *, width: float, measure: Measur
     runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original)
     lines = layout(runs, width, measure, max_lines, show_speaker) if runs else ()
     if original:
-        original = fit_head(original, width, original_measure or measure, Run(original, PENDING))
+        share = _shown_share(runs[-1], lines)
+        if share < 1.0:
+            # The translation rolled: show the matching end of the original, cut at its front.
+            words = original.split()
+            keep = max(1, math.ceil(len(words) * share))
+            tail = " ".join(words[-keep:])
+            original = fit_tail(("\u2026" if keep < len(words) else "") + tail, width,
+                                original_measure or measure, Run(original, PENDING))
+        else:
+            original = fit_head(original, width, original_measure or measure, Run(original, PENDING))
     return View(lines, original, notice)
+
+
+def _shown_share(newest: Run, lines: tuple[tuple[Run, ...], ...]) -> float:
+    """The share of the newest translation's words still on screen (1.0 when its start is shown)."""
+    words = newest.text.split()
+    shown = " ".join(r.text for row in lines for r in row if r.kind not in (LABEL, MARK)).split()
+    if not words:
+        return 1.0
+    for k in range(len(words), 0, -1):  # the longest end of the translation that ends what is shown
+        if shown[-k:] == words[-k:]:
+            return k / len(words)
+    return 1.0
+
+
+def fit_tail(text: str, width: float, measure: Measure, run: Run) -> str:
+    """``text`` on one line; when too wide, an ellipsis and as much of its end as fits, from a word start."""
+    text = " ".join(text.split())
+    if not text or measure(text, run) <= width:
+        return text
+    lo, hi = 0, len(text)
+    while lo < hi:  # the smallest cut whose tail fits after the ellipsis
+        mid = (lo + hi) // 2
+        if measure("\u2026" + text[mid:].lstrip(), run) <= width:
+            hi = mid
+        else:
+            lo = mid + 1
+    tail = text[lo:]
+    if lo > 0 and not text[lo - 1].isspace() and " " in tail:
+        tail = tail.split(" ", 1)[1]
+    return "\u2026" + tail.lstrip()

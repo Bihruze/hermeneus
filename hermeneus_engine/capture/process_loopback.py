@@ -14,8 +14,10 @@ of source.
 
 The stream runs in a worker process (``_loopback_worker``), started with a
 minimal environment and stopped through its stdin, then TerminateProcess.
-This module never imports comtypes, pycaw or psutil, so the Hermes process
-keeps its own COM apartment untouched.
+comtypes and pycaw are imported only in that worker, so the Hermes process
+keeps its own COM apartment untouched. psutil, which does not use COM, is
+imported in the Hermes process only by ``own_ancestry``, to refuse a pid:
+source that holds Hermeneus.
 """
 
 from __future__ import annotations
@@ -29,14 +31,12 @@ import sys
 import threading
 import weakref
 from collections import deque
-from pathlib import Path
 from typing import Any, Callable, Optional
 
 from .. import subproc
 from ..contracts import CaptureError, CaptureSource, FrameSink
 from ._loopback_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
 from ._loopback_worker import KIND_LIST, KIND_STATUS
-from ._worker_path import worker_pythonpath
 from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, read_frame
 
 log = logging.getLogger(__name__)
@@ -60,7 +60,6 @@ PRIVACY_PANE = "Settings > Privacy & security > Microphone"
 NO_AUDIO_TEXT = ("Windows is giving Hermeneus silence instead of audio. Open " + PRIVACY_PANE + ", turn on "
                  "Let desktop apps access your microphone, then start translation again.")
 
-_PACKAGE_ROOT = Path(__file__).resolve().parents[2]
 
 # The Windows allowlist and its reasons live in ``subproc.WINDOWS_ENV_ALLOWLIST``.
 WORKER_ENV_ALLOWLIST = subproc.WINDOWS_ENV_ALLOWLIST

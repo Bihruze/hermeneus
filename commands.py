@@ -14,7 +14,7 @@ from typing import Any, Callable, Optional, TextIO
 
 from . import glue
 from .hermeneus_engine import components, doctor, overlay_page, stop_signals
-from .hermeneus_engine.platform_words import this_machine
+from .hermeneus_engine.platform_words import the_machine, this_machine
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
 from .hermeneus_engine.ipc import SettingsRefused
@@ -29,7 +29,7 @@ from .hermeneus_engine.overlay.service import (OverlayService, OverlayUnavailabl
                                                describe as describe_window)
 from .hermeneus_engine.overlay.control import LOCAL_PLATFORMS
 
-REMOTE_START_REFUSED = ("Hermeneus captures audio on this Mac, so start it from the Mac "
+REMOTE_START_REFUSED = (f"Hermeneus captures audio on {this_machine()}, so start it from {the_machine()} "
                         "(terminal or Hermes Desktop).")
 
 
@@ -186,7 +186,7 @@ class Plugin:
             return describe_status(status) + (f" {note}" if note else "")
         if sub == "set":
             try:
-                result = await self.set(changes_from_namespace(parse_slash_set(rest)))
+                result = await self.set(changes_from_namespace(parse_slash_set(rest)), platform=context.get("platform"))
             except (UsageError, SettingsRefused) as exc:
                 return f"Not changed: {exc}"
             return describe_set(result)
@@ -355,7 +355,7 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
 def cmd_set(plugin: "Plugin", args: argparse.Namespace, *, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
     as_json = bool(getattr(args, "json", False))
     try:
-        result = asyncio.run(plugin.set(changes_from_namespace(args)))
+        result = asyncio.run(plugin.set(changes_from_namespace(args), platform="cli"))
     except (UsageError, SettingsRefused) as exc:
         if as_json:
             print(json.dumps({"ok": False, "message": str(exc)}), file=out)

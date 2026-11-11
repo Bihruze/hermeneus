@@ -15,6 +15,7 @@ import numpy as np
 import pytest
 
 from fake_wasapi import FakeWasapi, WasapiError
+from hermeneus_engine import subproc
 from hermeneus_engine.capture import _loopback_engine, _loopback_worker, _tap_worker, process_loopback
 from hermeneus_engine.capture._loopback_engine import (LoopbackCapture, LoopbackSetupError, LoopbackSpec,
                                                        app_roots, process_tree)
@@ -366,7 +367,7 @@ def test_worker_main_refuses_to_run_off_windows():
         pytest.skip("checks the guard that only runs off Windows")
     proc = subprocess.run([sys.executable, "-m", "hermeneus_engine.capture._loopback_worker"], input=b"",
                           capture_output=True, timeout=30, env=process_loopback.worker_env(),
-                          cwd=str(process_loopback._PACKAGE_ROOT))
+                          cwd=str(subproc.PACKAGE_ROOT))
     assert proc.returncode == 2
     kind, _, payload = _tap_worker.read_frame(__import__("io").BytesIO(proc.stdout))
     assert kind == _tap_worker.KIND_ERROR and "needs Windows" in json.loads(payload)["message"]
@@ -540,7 +541,7 @@ def test_worker_env_is_minimal_and_keeps_systemroot():
     assert env["SYSTEMROOT"] == r"C:\Windows" and env["PATH"] == r"C:\Python" and env["TEMP"] == r"C:\t"
     assert "ELEVENLABS_API_KEY" not in env and "OPENROUTER_API_KEY" not in env
     assert env["PYTHONUNBUFFERED"] == "1"
-    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(process_loopback._PACKAGE_ROOT)
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(subproc.PACKAGE_ROOT)
 
 
 @pytest.mark.skipif(__import__("ctypes").sizeof(__import__("ctypes").c_void_p) != 8, reason="64-bit layout")

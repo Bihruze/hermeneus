@@ -24,7 +24,6 @@ PACKAGE_ROOT = Path(__file__).resolve().parents[1]
 
 SYSTEM_PROFILER = "/usr/sbin/system_profiler"
 PS = "/bin/ps"
-AFPLAY = "/usr/bin/afplay"
 
 # Variables a helper process may inherit. None of them holds a secret.
 ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")

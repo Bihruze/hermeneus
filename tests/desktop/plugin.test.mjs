@@ -570,7 +570,8 @@ test('the theme is sent once per change, in the shape POST /overlay/theme takes'
 })
 
 test('the pane resolves the same tokens the backend table names', () => {
-  assert.deepEqual(Object.keys(OVERLAY_COLOR_TOKENS), ['surface', 'text', 'text_secondary', 'text_tertiary', 'stroke'])
+  assert.deepEqual(Object.keys(OVERLAY_COLOR_TOKENS), ['surface', 'text', 'text_secondary', 'text_tertiary', 'stroke', 'failed'])
+  assert.equal(OVERLAY_COLOR_TOKENS.failed, '--ui-red')
   assert.deepEqual([...OVERLAY_TEXT_SIZES], [20, 26, 34, 44])
 })
 
@@ -615,4 +616,30 @@ test('the controls row imports the SDK popover and no switch', async () => {
     assert.match(sdk, new RegExp(`\\b${name}\\b`))
   }
   assert.doesNotMatch(sdk, /\bSwitch\b/)
+})
+
+test('the look popover shows a value set elsewhere as one more choice', () => {
+  // Before: a size of 30 set from the CLI left no option selected (A3 re-audit N3).
+  const { lookOptions } = plugin
+  assert.deepEqual(lookOptions([20, 26, 34, 44], 30), [20, 26, 30, 34, 44])
+  assert.deepEqual(lookOptions([20, 26, 34, 44], 26), [20, 26, 34, 44])
+  assert.deepEqual(lookOptions([0, 40, 80, 100], undefined), [0, 40, 80, 100])
+})
+
+test('the idle overlay tooltip says whether the overlay is armed', () => {
+  // Before: it read "Opens with the next session" armed or not (A3 re-audit N4).
+  const { overlayButtonLabel } = plugin
+  const t = key => key
+  assert.equal(overlayButtonLabel(t, false, { armed: true }), 'overlay: overlayArmed')
+  assert.equal(overlayButtonLabel(t, false, { armed: false }), 'overlay: overlayNotArmed')
+  assert.equal(overlayButtonLabel(t, true, { visible: true }), 'hideOverlay')
+  assert.equal(overlayButtonLabel(t, true, { visible: false }), 'showOverlay')
+})
+
+test('the theme reader runs on theme changes only', async () => {
+  // Before: its effect had no dependency list and read 13 styles per subtitle event (A3 re-audit N5).
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  const probe = source.slice(source.indexOf('function ThemeProbe('), source.indexOf('const THEME_PROBES'))
+  assert.match(probe, /\}, \[renderedMode, theme, themeName\]\)/)
 })

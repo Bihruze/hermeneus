@@ -151,7 +151,7 @@ hermes hermeneus overlay-page on   # subtitles on a 127.0.0.1 page for OBS (off 
 
 `doctor`, `devices`, `status`, `set`, `voices`, `stop`, `overlay` and `overlay-page` also take `--json`. `doctor` also takes `--no-audio-check` and `--test-model` (see [First run](#first-run)). `voices` also takes `--refresh`.
 
-`run` prints one translated line per segment, prefixed with the speaker label Scribe gave it, for example `[s1:speaker_0] ...`. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
+`run` prints one translated line per segment, prefixed with the speaker's number in order of first appearance, for example `[Speaker 1] ...`, the same numbering the pane uses. A line that could not be translated is printed in the original language with the reason. Status changes go to standard error. Press Ctrl+C to stop a session that this `run` started.
 
 When a session is already running (started from Desktop or by a slash command), `run` attaches to it and prints its lines. Its start flags are ignored. Ctrl+C then detaches and the session keeps running; `hermes hermeneus stop` ends it.
 
@@ -171,6 +171,12 @@ Without `--source`, Hermeneus captures all system audio except its own output on
 | `--source NAME` | Another audio source, as `hermes hermeneus devices` lists it. |
 
 Spoken translation needs an output device. Pass `--device` together with `--mode both`, `--mode voice` or `--speak on` when none is set yet.
+
+### Spoken translation output
+
+`hermes hermeneus devices`, `GET /devices` and the pane's **Output device** picker list only the outputs that are safe and audible. Hermeneus leaves out every output that would feed the speech back into the capture source, and it also leaves out virtual devices such as BlackHole and VB-Cable, because a person who picks one from the list hears nothing (`hermeneus_engine/tts/routing.py`, `safe_output_devices`).
+
+A virtual device is still accepted when you name it, for example `--device "BlackHole 2ch"` or `output_device: BlackHole 2ch`. Use that to send the spoken translation into another app, such as OBS or a call app that reads BlackHole as its microphone. You hear the speech only if that app plays the device to your speakers or headphones. The feedback check still applies: on the fallback, a session that captures BlackHole 2ch refuses to speak into BlackHole 2ch. With the process tap any output is safe, because Hermeneus leaves its own process out of the capture.
 
 ### Voices
 
@@ -213,7 +219,7 @@ In a Hermes session:
 
 `/translate` on its own shows the status. `start` takes the same session flags as `hermes hermeneus run` (`--to`, `--source`, `--speak`, `--device`, `--voice`), and `set` takes the flags of `hermes hermeneus set`. The session runs inside that Hermes process and stops when the process exits or the plugin is unloaded. A missing choice ends the command with a message that names the flag to pass; nothing waits for input.
 
-From a chat platform such as Telegram or Slack, `/translate start` and `/translate set --source` are refused with "Hermeneus captures audio on this Mac, so start it from the Mac (terminal or Hermes Desktop)." A start from chat would turn on capture on the Mac that runs Hermes and send that audio to ElevenLabs while nobody may be at the Mac. To allow it, turn on the `allow_remote_start` setting. `/translate status`, `/translate stop` and the other `set` changes work from anywhere. The overlay is refused from a chat platform either way.
+From a chat platform such as Telegram or Slack, `/translate start` and `/translate set --source` are refused with "Hermeneus captures audio on this Mac, so start it from the Mac (terminal or Hermes Desktop)." (on Windows: "this PC" and "the PC") A start from chat would turn on capture on the Mac that runs Hermes and send that audio to ElevenLabs while nobody may be at the Mac. To allow it, turn on the `allow_remote_start` setting. `/translate status`, `/translate stop` and the other `set` changes work from anywhere. The overlay is refused from a chat platform either way.
 
 ### Desktop pane
 
@@ -269,7 +275,7 @@ Command flags override the settings for one session.
 | `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
 | `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
-| `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this Mac and sends that audio to ElevenLabs while nobody may be at the Mac. Status and stop work from anywhere either way. |
+| `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
 
@@ -394,7 +400,7 @@ Every failure message a session can show, with its exact text and where it appea
 
 Other problems:
 
-- **The session starts but no subtitles appear while audio plays.** With the process tap, Hermeneus notices when the tap delivers only silence while the app reports that it is playing. It rebuilds the tap up to five times and then shows a message. If the message says macOS is giving silence, allow the app that runs Hermes under System Settings > Privacy & Security > Screen & System Audio Recording and start again. Check that the source is the app that is playing (`hermes hermeneus devices` marks apps that are playing now).
+- **The session starts but no subtitles appear while audio plays.** With the process tap, Hermeneus notices when the tap delivers only silence while the app reports that it is playing. It rebuilds the tap up to five times and then shows a message. If the message says macOS is giving silence, allow the app that runs Hermes under System Settings > Privacy & Security > Screen & System Audio Recording and start again. Check that the source is the app that is playing (`hermes hermeneus devices` marks apps that are playing now, on any output device; it lists apps with a Dock icon, so a command-line player does not appear).
 - **The captured app quit, or you changed the output device.** No action is needed with the process tap. When the app starts again, capture follows its new processes within about a second. When the default output or the device list changes, capture is rebuilt. The status line says so in both cases.
 - **"Capture did not start within 30 s".** macOS was probably showing the permission prompt. Allow it and start again.
 - **"no audio source chosen".** More than one virtual device is installed and no source was given. Pass `--source <name>` or set `source`.
@@ -495,6 +501,11 @@ From the A4 review (COM and WASAPI), R1 to R19:
 - R17 `msvcrt.locking` raises EACCES when another handle holds the byte, and truncating at offset 0 works while the byte at 1 GiB is locked.
 - R18 Ctrl+C, Ctrl+Break and closing the console window stop `hermes hermeneus run` cleanly.
 - R19 Hermes `ctx.llm`, `get_secret`, the Desktop pane and the TCP session client behave as on macOS.
+- R20 QueryInterface(IID_IMarshal) on the completion handler returns the free-threaded marshaler's IMarshal (custom routing in `_wasapi.marshal_query`), and activation still completes.
+- R21 Repeated rebuilds (silence, app restart, stream errors) never hang or crash the pump. Only the pump closes a stream it may be waiting on, after its wait returns; WaitForSingleObject's behaviour is undefined when its handle closes during the wait.
+- R22 Worst-case start time when the first format is refused, which costs a second activation.
+- R23 Spoken translation opens the WASAPI entry of the output device at 24 kHz with `WasapiSettings(auto_convert=True)` and plays at the right pitch and speed, whatever the mixer rate is (sounddevice: auto_convert "is in particular required for streams not matching the system mixer sample rate").
+- R24 A tick thread still inside an activation when capture stops keeps running until that activation returns or the worker exits; the stream it gets is closed, never started, and the worker still exits within the parent's 5 s stop window.
 
 From the A5 review (parity and packaging):
 

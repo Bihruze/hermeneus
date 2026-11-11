@@ -57,7 +57,7 @@ def test_on_unload_stops_the_local_session_and_removes_socket_and_lock(data_dir)
     rig = make_rig()
     plugin = pkg.commands.Plugin(None, owner="test", settings=lambda: {}, data_dir=lambda: data_dir,
                                  build=rig.build, list_sources=lambda: ([SOURCE], []))
-    out = asyncio.run(plugin.slash("start --to tr --source BlackHole"))
+    out = asyncio.run(plugin.slash("start --to tr --source BlackHole", platform="cli"))
     assert "Translation is" in out
     assert lock_holder(data_dir) is not None and socket_path(data_dir).exists()
     plugin.unload()

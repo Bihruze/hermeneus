@@ -178,7 +178,7 @@ LABEL_SCALE = 0.62
 def _scheme_vars(pal: Any) -> dict:
     out = {"--surface": pal.surface.css(), "--text-primary": pal.text.css(),
            "--text-secondary": pal.text_secondary.css(), "--text-pending": pal.text_secondary.css(),
-           "--text-failed": pal.text_secondary.css(), "--font-sans": f"{pal.font}, system-ui, sans-serif",
+           "--text-failed": pal.text_secondary.css(), "--failed": pal.failed_color.css(), "--font-sans": f"{pal.font}, system-ui, sans-serif",
            "--radius": f"{pal.radius_px:g}px"}
     out.update({f"--speaker-{i + 1}": c.css() for i, c in enumerate(pal.speakers)})
     return out

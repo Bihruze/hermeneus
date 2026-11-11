@@ -103,18 +103,18 @@ def test_slash_parser_never_exits():
 
 async def test_slash_start_status_stop(data_dir):
     plugin, rig = make_plugin(data_dir)
-    out = await plugin.slash("start --to tr --source BlackHole")
+    out = await plugin.slash("start --to tr --source BlackHole", platform="cli")
     assert out.startswith("Translation is") and "into tr" in out
     await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
     assert "live" in await plugin.slash("status")
-    assert "already running" in await plugin.slash("start --to tr --source BlackHole")
+    assert "already running" in await plugin.slash("start --to tr --source BlackHole", platform="cli")
     assert await plugin.slash("stop") == "Translation is off."
     assert lock_holder(data_dir) is None
 
 
 async def test_slash_start_without_choices_explains_flags(data_dir):
     plugin, _ = make_plugin(data_dir)
-    out = await plugin.slash("start")
+    out = await plugin.slash("start", platform="cli")
     assert "Could not start translation" in out and "--to" in out
     assert "usage: /translate" in await plugin.slash("bogus")
     assert "takes no arguments" in await plugin.slash("stop now")
@@ -263,7 +263,7 @@ async def test_slash_set_changes_a_running_session_and_refuses_without_one(data_
     from pipeline_fakes import SOURCE2
     plugin, rig = make_plugin(data_dir, sources=(SOURCE, SOURCE2))
     assert (await plugin.slash("set --to de")).startswith("Not changed: No translation session is running.")
-    await plugin.slash("start --to tr --source BlackHole")
+    await plugin.slash("start --to tr --source BlackHole", platform="cli")
     await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
     text = await plugin.slash("set --to de --speak on --device Speakers --voice v7")
     assert text == ("Changed: subtitles now go into de from the next sentence. Applying spoken translation in "
@@ -274,11 +274,11 @@ async def test_slash_set_changes_a_running_session_and_refuses_without_one(data_
     assert status == ("Translation is live from BlackHole 2ch into de. Spoken translation is on "
                       "(voice v7, output Speakers).")
     assert (await plugin.slash("set --mode voice")) == "Changed: mode is voice only (subtitles hidden)."
-    assert (await plugin.slash("set --source 'All system'")).startswith("Applying source")
+    assert (await plugin.slash("set --source 'All system'", platform="cli")).startswith("Applying source")
     await wait_for(lambda: bus.status()["source"]["source_id"] == "system")
     assert (await plugin.slash("set --speak maybe")).startswith("Not changed: argument --speak")
     assert (await plugin.slash("set")).startswith("Not changed: nothing to change.")
-    assert (await plugin.slash("set --source Nowhere")).startswith("Not changed: no audio source called 'Nowhere'")
+    assert (await plugin.slash("set --source Nowhere", platform="cli")).startswith("Not changed: no audio source called 'Nowhere'")
     await plugin.slash("stop")
 
 
@@ -405,3 +405,11 @@ def test_model_preflight_unavailable_is_logged_and_shown_in_doctor(monkeypatch, 
     checks = [c for c in pkg.commands.model_checks(False) if c.name == "translation model feature"]
     assert checks and checks[0].ok is None and checks[0].state == "warn"
     assert checks[0].detail.startswith("model preflight unavailable")
+
+
+async def test_a_caller_that_names_no_surface_is_not_local(data_dir):
+    plugin, _rig = make_plugin(data_dir)
+    assert await plugin.slash("start --to tr --source BlackHole") == commands.REMOTE_START_REFUSED
+    assert await plugin.slash("start --to tr --source BlackHole", platform="") == commands.REMOTE_START_REFUSED
+    with pytest.raises(commands.RemoteStartRefused):
+        await plugin.start(commands.Choices(to="tr", source="BlackHole"))
