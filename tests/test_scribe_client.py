@@ -269,7 +269,7 @@ async def test_scripted_event_flow(fake):
     stamps = [e.received_ns for e in events if not isinstance(e, SttStatus)]
     assert stamps == sorted(stamps) and all(stamps)
     await client.close()
-    assert fake.conns[0].received[-1]["commit"] is True
+    assert fake.conns[0].received == []  # no audio was sent, so close has nothing to commit
 
 
 async def test_commit_waits_for_language_then_times_out(fake):
@@ -534,7 +534,8 @@ async def test_connection_killed_mid_stream_remaps_indices_and_speakers(fake):
             await conn.send("diarized_transcript", segment_index=i, text=text,
                             words=[{"text": text, "speaker_id": "speaker_0"}])
         await conn.send("speakers_merged", from_speaker_id="speaker_1", to_speaker_id="speaker_0")
-        await asyncio.sleep(0.05)
+        # Audio is flowing when the network drops, so this is not an idle close.
+        await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
         conn.kill()
 
     async def second(conn):
@@ -548,8 +549,9 @@ async def test_connection_killed_mid_stream_remaps_indices_and_speakers(fake):
     fake.scripts = [first, second]
     client = make_client(fake)
     await client.start()
-    events = await collect(client, lambda ev, out: len([e for e in out if isinstance(e, SttStatus)
-                                                        and e.state == SttState.LIVE]) == 2)
+    events = await collect(client, status_is(SttState.LIVE))
+    client.send_audio(pcm(1, 3200), 0)
+    events += await collect(client, status_is(SttState.LIVE))
     client.send_audio(pcm(1, 3200), 0)
     events += await collect(client, lambda ev, out: isinstance(ev, DiarizedTranscript)
                             and ev.text == "charlie")
@@ -593,18 +595,85 @@ async def test_idle_close_waits_for_audio_before_reconnecting(fake):
         await conn.send("insufficient_audio_activity", error="no audio")
         await conn.ws.close()
 
+    async def second(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
+        await conn.send("partial_transcript", text="back")
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [first, second]
+    client = make_client(fake)
+    await client.start()
+    events = await collect(client, status_is(SttState.LIVE))
+    while client.stats.idle_closes == 0:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.3)
+    assert len(fake.conns) == 1  # no reconnect without audio
+    client.send_audio(pcm(7, 3200), 0)
+    events += await collect(client, lambda ev, out: isinstance(ev, PartialTranscript))
+    assert fake.conns[1].audio() == pcm(7, 3200)
+    # The idle close is invisible: no RECONNECTING and no second LIVE.
+    assert statuses(events) == [(SttState.CONNECTING, ""), (SttState.LIVE, "")]
+    assert client.stats.reconnects == 0 and client.stats.idle_resume_first_partial_ms is not None
+    await client.close()
+
+
+async def test_close_without_audio_is_idle_not_a_network_failure(fake):
+    async def first(conn):
+        await conn.started()
+        await asyncio.sleep(0.1)
+        await conn.ws.close()  # the server's 15 s no-audio close, without an error message
+
+    fake.scripts = [first]
+    sleeps = Sleeps()
+    client = make_client(fake, sleep=sleeps)
+    await client.start()
+    events = await collect(client, status_is(SttState.LIVE))
+    while client.stats.idle_closes == 0:
+        await asyncio.sleep(0.01)
+    await asyncio.sleep(0.3)
+    assert len(fake.conns) == 1 and sleeps.delays == [] and client.stats.reconnects == 0
+    client.send_audio(pcm(3, 640), 0)
+    while len(fake.conns) < 2 or not fake.conns[1].audio():
+        await asyncio.sleep(0.01)
+    assert fake.conns[1].audio() == pcm(3, 640)
+    await client.close()
+    events += await collect(client, status_is(SttState.CLOSED))
+    assert SttState.RECONNECTING not in [s for s, _ in statuses(events)]
+
+
+async def test_close_after_recent_audio_is_a_network_drop(fake):
+    async def first(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
+        await conn.ws.close()
+
     fake.scripts = [first]
     client = make_client(fake)
     await client.start()
-    events = await collect(client, status_is(SttState.RECONNECTING))
-    assert events[-1].error_type == "insufficient_audio_activity"
-    await asyncio.sleep(0.3)
-    assert len(fake.conns) == 1
-    client.send_audio(pcm(7, 3200), 0)
     await collect(client, status_is(SttState.LIVE))
-    while len(fake.conns[1].audio()) < 3200:
+    client.send_audio(loud(640), 0)
+    events = await collect(client, status_is(SttState.LIVE))
+    assert (SttState.RECONNECTING, "connection_closed") in statuses(events)
+    assert client.stats.reconnects == 1 and client.stats.idle_closes == 0
+    await client.close()
+
+
+async def test_close_after_long_silence_on_the_wire_is_idle(fake):
+    async def first(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
+        await asyncio.sleep(0.4)  # longer than idle_close_seconds below
+        await conn.ws.close()
+
+    fake.scripts = [first]
+    client = make_client(fake, tuning=ScribeTuning(idle_close_seconds=0.3, drain_quiet=0.1))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(640), 0)
+    while client.stats.idle_closes == 0:
         await asyncio.sleep(0.01)
-    assert fake.conns[1].audio() == pcm(7, 3200)
+    assert client.stats.reconnects == 0 and len(fake.conns) == 1
     await client.close()
 
 
@@ -663,6 +732,7 @@ async def test_backoff_jitter_stays_in_the_upper_half(fake):
 async def test_a_session_with_transcript_resets_the_outage(fake):
     async def flaky(conn):
         await conn.started()
+        await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
         await conn.send("partial_transcript", text="hi")
         await asyncio.sleep(0.05)
         await conn.ws.close()
@@ -671,8 +741,16 @@ async def test_a_session_with_transcript_resets_the_outage(fake):
     sleeps = Sleeps()
     client = make_client(fake, sleep=sleeps)
     await client.start()
+
+    async def feed():
+        while True:
+            client.send_audio(loud(640), 0)
+            await asyncio.sleep(0.02)
+
+    feeder = asyncio.create_task(feed())
     events = await collect(client, lambda ev, out: len([e for e in out if isinstance(e, SttStatus)
                                                         and e.state == SttState.LIVE]) == 4)
+    feeder.cancel()
     messages = [e.message for e in events if isinstance(e, SttStatus) and e.state == SttState.RECONNECTING]
     assert len(messages) == 3 and all(m.endswith("(attempt 1, next in 1 s)") for m in messages)
     assert sleeps.delays == [1, 1, 1]
@@ -1018,3 +1096,18 @@ async def test_close_while_connecting_is_bounded(fake):
     events = await collect(client, status_is(SttState.CLOSED))
     assert elapsed <= 0.5 and events[-1].state == SttState.CLOSED
     assert "forced" in client.stats.close_ms
+
+
+async def test_audio_gap_commits_the_open_segment(fake):
+    client = make_client(fake, tuning=ScribeTuning(gap_commit_seconds=0.2, segment_soft_seconds=0,
+                                                   segment_hard_seconds=0, drain_quiet=0.1))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(3200), 0)
+    conn = fake.conns[0]
+    await asyncio.sleep(0.5)
+    assert commit_flags(conn) == [False] * 5 + [True]
+    assert client.stats.gap_commits == 1
+    await asyncio.sleep(0.4)
+    assert client.stats.gap_commits == 1  # one commit per gap, not one per wait
+    await client.close()

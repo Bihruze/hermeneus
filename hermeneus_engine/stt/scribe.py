@@ -144,6 +144,16 @@ class ScribeTuning:
       8 attempts) gave up 11.5 s after ElevenLabs became unreachable (A1, E3).
       Waiting for audio after ``insufficient_audio_activity`` is not part of
       an outage and costs no budget.
+    * ``idle_close_seconds=10``: a dropped connection counts as an idle close
+      when no audio was sent on it for this long (or none at all). The guide
+      says the server "closes the connection after 15 seconds without any
+      client messages", and the session holds back digital silence after
+      10 s, so such closes are expected. An idle close emits no status, costs
+      no budget, and the client reconnects when audio is queued again.
+    * ``gap_commit_seconds=1``: when audio stops arriving in the middle of a
+      segment, the client commits that segment after this long. Without it a
+      live run lost the last 8 s of speech: the server's idle close came
+      before any VAD commit, because no trailing silence was sent.
     * ``rotation_seconds=600``: no official page states the session time limit
       behind ``session_time_limit_exceeded`` (UNVERIFIED). Rotation pre-opens
       the next session, so a short interval costs only one extra handshake.
@@ -186,6 +196,8 @@ class ScribeTuning:
     reconnect_budget_s: float = 180.0
     max_attempts: int = 0
     stable_seconds: float = 30.0
+    idle_close_seconds: float = 10.0
+    gap_commit_seconds: float = 1.0
     rotation_seconds: float = 600.0
     rotation_retry_seconds: float = 30.0
     boundary_wait: float = 20.0
@@ -225,6 +237,9 @@ class ScribeStats:
     languages_missed: int = 0
     pause_commits: int = 0
     hard_commits: int = 0
+    idle_closes: int = 0
+    gap_commits: int = 0
+    idle_resume_first_partial_ms: Optional[float] = None  # audio queued after an idle close to first partial
     close_ms: dict = field(default_factory=dict)  # phase name -> ms since close() began
 
 
@@ -321,6 +336,7 @@ class _Session:
     finished: bool = False
     first_chunk_sent: bool = False
     segment_bytes: int = 0      # audio sent since the last commit seen or sent
+    last_audio_at: Optional[float] = None  # time.monotonic() of the last non-empty chunk sent
     trailing_quiet_ms: int = 0  # length of the quiet run at the end of the sent audio
     wants_previous_text: bool = False
     rotate_at: float = 0.0
@@ -358,6 +374,7 @@ class ScribeLiveClient:
         self.reconnect_attempt = 0
         self.reconnect_delay_s = 0.0
         self._outage = _Outage()
+        self._idle_resume_ns: Optional[int] = None
 
         self._loop: Optional[asyncio.AbstractEventLoop] = None
         self._events: asyncio.Queue = asyncio.Queue()
@@ -509,12 +526,36 @@ class ScribeLiveClient:
         session.first_chunk_sent = True
         self.stats.chunks_sent += 1
         self.stats.audio_bytes_sent += len(pcm)
+        if pcm:
+            session.last_audio_at = time.monotonic()
         if commit:
             session.segment_bytes = 0
         else:
             session.segment_bytes += len(pcm)
             session.trailing_quiet_ms = _trailing_quiet_ms(pcm, session.trailing_quiet_ms,
                                                            self._tuning.pause_dbfs)
+
+    def _gap_wait(self) -> Optional[float]:
+        """How long the sender may wait for audio before the gap commit is due."""
+        session = self._active
+        gap = self._tuning.gap_commit_seconds
+        if gap <= 0 or session is None or session.segment_bytes == 0 or session.last_audio_at is None:
+            return None
+        return max(0.0, session.last_audio_at + gap - time.monotonic())
+
+    async def _commit_after_gap(self) -> None:
+        """Audio stopped mid-segment: commit it so its text is not lost with an idle close."""
+        session = self._active
+        if session is None or session.done.is_set() or session.segment_bytes == 0:
+            return
+        async with session.send_lock:
+            if session is not self._active or session.segment_bytes == 0:
+                return
+            try:
+                await self._send_on(session, b"", commit=True)
+                self.stats.gap_commits += 1
+            except ConnectionClosed:
+                pass
 
     def _segment_commit_due(self, session: _Session) -> str:
         """Return "hard", "pause" or "" for the segment length cap."""
@@ -541,7 +582,9 @@ class ScribeLiveClient:
                     return
                 else:
                     self._wake_sender.clear()
-                    await self._wake_sender.wait()
+                    woke = await _first(self._wake_sender.wait(), timeout=self._gap_wait())
+                    if not woke:
+                        await self._commit_after_gap()
                     continue
             session = self._active
             if session is None or session.done.is_set():
@@ -728,6 +771,9 @@ class ScribeLiveClient:
             return
         if kind == "partial_transcript":
             session.got_transcript = True
+            if self._idle_resume_ns is not None and not session.draining:
+                self.stats.idle_resume_first_partial_ms = round((now - self._idle_resume_ns) / 1e6, 1)
+                self._idle_resume_ns = None
             if session.draining:
                 return
             event = PartialTranscript(
@@ -940,9 +986,20 @@ class ScribeLiveClient:
                 return
             if exc.error_type == "session_time_limit_exceeded":
                 self._learn_session_limit(session)
-            self.stats.reconnects += 1
+            if exc.error_type == "connection_closed" and self._was_idle(session):
+                exc.idle = True
+            if not exc.idle:
+                self.stats.reconnects += 1
             if not await self._backoff(exc):
                 return
+
+    def _was_idle(self, session: _Session) -> bool:
+        """No audio went out on this session for ``idle_close_seconds`` before it closed."""
+        if self._buf:
+            return False
+        if session.last_audio_at is None:
+            return True
+        return time.monotonic() - session.last_audio_at >= self._tuning.idle_close_seconds
 
     def _next_delay(self, attempt: int) -> float:
         t = self._tuning
@@ -952,14 +1009,18 @@ class ScribeLiveClient:
     async def _backoff(self, exc: _Retry) -> bool:
         """Wait before the next attempt. Returns False when the client stopped."""
         if exc.idle:
-            # The server closed an idle session. This is not a network failure:
-            # reconnect when audio is queued again, without using the budget.
+            # The server closed a session that had no audio for a while. This is
+            # not a network failure: no status, no budget, and the next session
+            # opens when audio is queued again.
             self._outage = _Outage()
-            self._status(SttState.RECONNECTING, exc.message, exc.error_type)
-            log.info("scribe idle close: %s", exc.message)
+            self.stats.idle_closes += 1
+            log.info("scribe idle close (%s): %s; reconnecting when audio arrives",
+                     exc.error_type, exc.message)
             self._audio_arrived.clear()
             if not self._buf:
                 await _first(self._audio_arrived.wait(), self._close_requested.wait())
+            if not self._close_requested.is_set():
+                self._idle_resume_ns = self._clock()
             return True
         outage = self._outage
         outage.attempts += 1
@@ -1072,6 +1133,8 @@ class ScribeLiveClient:
         """Send the final ``commit: true``; caller holds ``session.send_lock``."""
         if session.done.is_set():
             return
+        if session.segment_bytes == 0:
+            return  # everything sent is already committed; nothing for the server to answer
         session.flush_mark = session.commits_received
         try:
             await self._send_on(session, b"", commit=True)
@@ -1084,6 +1147,10 @@ class ScribeLiveClient:
         if deadline is None:
             deadline = time.monotonic() + self._tuning.drain_timeout
         quiet_since = time.monotonic()
+        if session.flush_mark is None and not any(not i.ready for i in session.outbox):
+            session.draining = True
+            await self._abort(session, budget=max(0.0, deadline - time.monotonic()))
+            return
         while not session.done.is_set() and not self._flush_answered(session):
             remaining = deadline - reserve - time.monotonic()
             if remaining <= 0:
