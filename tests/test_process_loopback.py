@@ -504,10 +504,10 @@ def test_status_frames_reach_status_message():
     hal = chrome_hal()
     seen = []
     b = make_backend(hal, on_status=lambda c, m, d: seen.append(c))
-    b._handle_status(json.dumps({"code": "no-audio", "message": "silence", "details": {}}).encode())
-    assert b.status_message == "silence"
+    b._handle_status(json.dumps({"code": "rebuilt", "message": "the stream was rebuilt", "details": {}}).encode())
+    assert b.status_message == "the stream was rebuilt" and b.failure == ""
     b._handle_status(json.dumps({"code": "recovered", "message": "back", "details": {}}).encode())
-    assert b.status_message == "" and seen == ["no-audio", "recovered"]
+    assert b.status_message == "" and seen == ["rebuilt", "recovered"]
 
 
 def test_atexit_handler_stops_live_backends():
@@ -539,7 +539,8 @@ def test_worker_env_is_minimal_and_keeps_systemroot():
                                        "ELEVENLABS_API_KEY": "secret", "OPENROUTER_API_KEY": "x"})
     assert env["SYSTEMROOT"] == r"C:\Windows" and env["PATH"] == r"C:\Python" and env["TEMP"] == r"C:\t"
     assert "ELEVENLABS_API_KEY" not in env and "OPENROUTER_API_KEY" not in env
-    assert env["PYTHONUNBUFFERED"] == "1" and env["PYTHONPATH"] == str(process_loopback._PACKAGE_ROOT)
+    assert env["PYTHONUNBUFFERED"] == "1"
+    assert env["PYTHONPATH"].split(os.pathsep)[0] == str(process_loopback._PACKAGE_ROOT)
 
 
 @pytest.mark.skipif(__import__("ctypes").sizeof(__import__("ctypes").c_void_p) != 8, reason="64-bit layout")

@@ -51,10 +51,10 @@ MIN_BUILD = 20348
 AUDCLNT_SHAREMODE_SHARED = 0
 AUDCLNT_STREAMFLAGS_LOOPBACK = 0x00020000
 AUDCLNT_STREAMFLAGS_EVENTCALLBACK = 0x00040000
-AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY = 0x08000000
 AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM = 0x80000000
 AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY = 0x1
 AUDCLNT_BUFFERFLAGS_SILENT = 0x2
+AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR = 0x4
 AUDIO_SESSION_STATE_ACTIVE = 1  # AudioSessionStateActive
 
 # mmreg.h
@@ -66,17 +66,26 @@ WAIT_OBJECT_0 = 0
 WAIT_TIMEOUT = 0x102
 REFTIMES_PER_SEC = 10_000_000
 
-# Asked of AUTOCONVERTPCM in this order. The first is the usual engine mix
-# format; the last is the format of Microsoft's sample.
+# Asked of AUTOCONVERTPCM in this order, each on a freshly activated client
+# (no Initialize is ever retried on the same IAudioClient). The first is the
+# usual engine mix rate, so Windows need not convert; the second is the format of
+# Microsoft's sample (LoopbackCapture.cpp: 44100 Hz, 2 channels, 16 bit PCM).
 CAPTURE_FORMATS = (
     (WAVE_FORMAT_IEEE_FLOAT, 48000, 2, 32),
-    (WAVE_FORMAT_PCM, 48000, 2, 16),
     (WAVE_FORMAT_PCM, 44100, 2, 16),
 )
-# WASAPI buffer. Large enough to ride out a busy interpreter; it adds no
-# latency because the pump reads each packet as soon as its event fires.
-BUFFER_DURATION_S = 0.2
+# The sample's flags exactly (LoopbackCapture.cpp:106-112).
+STREAM_FLAGS = AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM
+# IAudioClient::Initialize: "For a shared-mode stream that uses event-driven
+# buffering, the caller must set both hnsPeriodicity and hnsBufferDuration to 0."
+# (learn.microsoft.com/en-us/windows/win32/api/audioclient/nf-audioclient-iaudioclient-initialize);
+# the sample passes 0, 0. Windows then picks the buffer; how long it is and how
+# much a busy worker can lag behind it is measured only on a Windows run (README).
+BUFFER_DURATION_HNS = 0
+PERIODICITY_HNS = 0
 ACTIVATE_TIMEOUT_S = 10.0
+IID_IMARSHAL = "{00000003-0000-0000-C000-000000000046}"
+E_NOINTERFACE = -2147467262  # 0x80004002
 
 
 class WasapiError(RuntimeError):
@@ -112,6 +121,27 @@ class Packet:
     @property
     def discontinuity(self) -> bool:
         return bool(self.flags & AUDCLNT_BUFFERFLAGS_DATA_DISCONTINUITY)
+
+    @property
+    def timestamp_error(self) -> bool:
+        """The device position time is uncertain (AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR); use arrival time."""
+        return bool(self.flags & AUDCLNT_BUFFERFLAGS_TIMESTAMP_ERROR)
+
+
+def marshal_query(is_imarshal: bool, inner_query, fallback) -> int:
+    """QueryInterface for a handler that aggregates the free-threaded marshaler.
+
+    IID_IMarshal goes to the FTM's inner unknown (``inner_query`` returns an
+    HRESULT or raises); every other IID goes to the object's own table. This is
+    what WRL's ``FtmBase`` does for the sample's handler (LoopbackCapture.h:18).
+    """
+    if not is_imarshal:
+        return fallback()
+    try:
+        hr = inner_query()
+    except Exception:
+        return E_NOINTERFACE
+    return 0 if hr is None else int(hr)
 
 
 def _hr(exc: BaseException) -> str:
@@ -318,10 +348,19 @@ class WasapiHAL:
     # ------------------------------------------------------------- activation
 
     def _make_handler_class(self):
-        from comtypes import COMObject
+        """The completion handler: agile through IAgileObject and an aggregated free-threaded marshaler.
+
+        ActivateCompleted's page asks for "agile (aggregating a free-threaded
+        marshaler)"; ActivateAudioInterfaceAsync's page accepts IAgileObject. The
+        handler does both, so either check passes.
+        """
+        from comtypes import GUID, COMObject, IUnknown
 
         IHandler, IAgile = self._IHandler, self._IAgile
         IAudioClient = self._IAudioClient
+        iid_imarshal = GUID(IID_IMARSHAL)
+        ole32 = ctypes.OleDLL("ole32")  # type: ignore[attr-defined]
+        ole32.CoCreateFreeThreadedMarshaler.argtypes = [c_void_p, POINTER(POINTER(IUnknown))]
         import threading
 
         class Handler(COMObject):
@@ -332,6 +371,17 @@ class WasapiHAL:
                 self.done = threading.Event()
                 self.client = None
                 self.error = ""
+                # Outer unknown = this object's IUnknown; the FTM delegates its own IUnknown back to it.
+                outer = ctypes.cast(self._com_pointers_[IUnknown._iid_], c_void_p)
+                self._ftm = POINTER(IUnknown)()
+                ole32.CoCreateFreeThreadedMarshaler(outer, byref(self._ftm))
+
+            def IUnknown_QueryInterface(self, this, riid, ppvObj, _debug=None):
+                ftm = self._ftm
+                return marshal_query(
+                    bool(ftm) and riid[0] == iid_imarshal,
+                    lambda: ftm._IUnknown__com_QueryInterface(riid, ppvObj),  # type: ignore[attr-defined]
+                    lambda: COMObject.IUnknown_QueryInterface(self, this, riid, ppvObj))
 
             def ActivateCompleted(self, operation):  # called by Windows on an MTA thread
                 try:
@@ -347,8 +397,8 @@ class WasapiHAL:
 
         return Handler
 
-    def open_loopback(self, target_pid: int, include_tree: bool) -> LoopbackStream:
-        """Activate, initialize and return a stream (not started). Raises WasapiError."""
+    def _activate_client(self, target_pid: int, include_tree: bool):
+        """One ActivateAudioInterfaceAsync round trip. Returns an uninitialized IAudioClient."""
         mode = (PROCESS_LOOPBACK_MODE_INCLUDE_TARGET_PROCESS_TREE if include_tree
                 else PROCESS_LOOPBACK_MODE_EXCLUDE_TARGET_PROCESS_TREE)
         params = _LoopbackParams(AUDIOCLIENT_ACTIVATION_TYPE_PROCESS_LOOPBACK, int(target_pid), mode)
@@ -371,10 +421,38 @@ class WasapiHAL:
         del operation, handler_ptr
         if handler.client is None:
             raise WasapiError(f"process loopback activation failed: {handler.error}")
-        client = handler.client
-        fmt, last = self._initialize(client)
-        if fmt is None:
-            raise WasapiError(f"IAudioClient::Initialize refused every capture format ({last})")
+        return handler.client
+
+    def open_loopback(self, target_pid: int, include_tree: bool) -> LoopbackStream:
+        """Activate, initialize and return a stream (not started). Raises WasapiError.
+
+        Each format gets its own activated client: the Initialize page documents
+        no retry on a client whose Initialize failed.
+        """
+        last = ""
+        for fmt in CAPTURE_FORMATS:
+            client = self._activate_client(target_pid, include_tree)
+            try:
+                client.Initialize(AUDCLNT_SHAREMODE_SHARED, STREAM_FLAGS, BUFFER_DURATION_HNS, PERIODICITY_HNS,
+                                  byref(self._waveformat(fmt)), None)
+            except Exception as exc:
+                last = _hr(exc)
+                log.info("process loopback: format %s refused (%s)", fmt, last)
+                del client
+                continue
+            return self._stream_for(client, fmt)
+        raise WasapiError(f"IAudioClient::Initialize refused every capture format ({last})")
+
+    def _waveformat(self, fmt: tuple):
+        tag, rate, channels, bits = fmt
+        wf = self._WAVEFORMATEX()
+        wf.wFormatTag, wf.nChannels, wf.nSamplesPerSec, wf.wBitsPerSample = tag, channels, rate, bits
+        wf.nBlockAlign = channels * bits // 8
+        wf.nAvgBytesPerSec = rate * wf.nBlockAlign
+        wf.cbSize = 0
+        return wf
+
+    def _stream_for(self, client, fmt: tuple) -> LoopbackStream:
         try:
             unknown = client.GetService(byref(self._ICapture._iid_))
             capture = unknown.QueryInterface(self._ICapture)
@@ -389,23 +467,3 @@ class WasapiHAL:
             self._k32.CloseHandle(event)
             raise WasapiError(f"IAudioClient::SetEventHandle failed ({_hr(exc)})") from exc
         return LoopbackStream(client, capture, event, self._k32, fmt)
-
-    def _initialize(self, client) -> tuple[Optional[tuple], str]:
-        flags = (AUDCLNT_STREAMFLAGS_LOOPBACK | AUDCLNT_STREAMFLAGS_EVENTCALLBACK
-                 | AUDCLNT_STREAMFLAGS_AUTOCONVERTPCM | AUDCLNT_STREAMFLAGS_SRC_DEFAULT_QUALITY)
-        last = ""
-        for fmt in CAPTURE_FORMATS:
-            tag, rate, channels, bits = fmt
-            wf = self._WAVEFORMATEX()
-            wf.wFormatTag, wf.nChannels, wf.nSamplesPerSec, wf.wBitsPerSample = tag, channels, rate, bits
-            wf.nBlockAlign = channels * bits // 8
-            wf.nAvgBytesPerSec = rate * wf.nBlockAlign
-            wf.cbSize = 0
-            try:
-                client.Initialize(AUDCLNT_SHAREMODE_SHARED, flags, int(BUFFER_DURATION_S * REFTIMES_PER_SEC), 0,
-                                  byref(wf), None)
-                return fmt, ""
-            except Exception as exc:
-                last = _hr(exc)
-                log.info("process loopback: format %s refused (%s)", fmt, last)
-        return None, last

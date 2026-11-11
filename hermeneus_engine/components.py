@@ -141,6 +141,13 @@ def own_process_excluded(source: CaptureSource) -> bool:
     if source.backend not in PROCESS_BACKENDS:
         return True
     if source.source_id.startswith("pid:"):
+        if source.backend == "process-loopback":
+            # INCLUDE captures the whole tree under that pid, so a parent of this process is unsafe too.
+            from .capture.process_loopback import own_ancestry
+            try:
+                return int(source.source_id[4:]) not in own_ancestry()
+            except ValueError:
+                return False
         return source.source_id[4:] != str(os.getpid())
     return True
 
