@@ -247,7 +247,7 @@ The overlay is a strip near the bottom of the screen that floats above every oth
 - It closes by itself when the session stops, and with `overlay hide`, the same buttons, or **Hide overlay** in its menu.
 - It never takes keyboard focus and clicks pass through it to the app underneath. Only two small handles take the mouse: drag the grip at the left edge to move the strip, drag the handle at the right edge to change its width, right-click the grip for width presets, **Reset position** and **Hide overlay**. Position and width are remembered for each display.
 - It draws with the Hermes Desktop theme you use. The pane reads the theme's colours, radius and font on its own element and sends them to the backend, and both the overlay and the 127.0.0.1 page use them, in Desktop's light or dark. Until Desktop has sent a theme, the overlay uses the default Nous values and the system appearance.
-- Text keeps a soft halo in the background colour, and below 50% background opacity an outline as well, so it stays readable on bright or dark video with no background at all.
+- Text keeps a soft halo in the background colour, and below 50% background opacity a thin outline drawn behind opaque letters as well, so it stays readable on bright or dark video with no background at all.
 - The look popover next to the pane's overlay button sets text size, lines, background opacity, the original line and speaker names. These are the `overlay_*` settings below; a change there or in Settings reaches an open overlay without closing it.
 - The overlay opens only on the Mac where the request comes from: a slash command from a chat platform such as Telegram, or a Desktop connected to a remote backend, is refused with a message.
 

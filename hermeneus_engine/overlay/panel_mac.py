@@ -19,7 +19,8 @@ windows and reads the pointer position from its own mouse events.
 Layout, bottom up: the translation rows, then the original in small text
 above them (as on the 127.0.0.1 page). The strip grows and shrinks with its
 rows, keeping its bottom edge. Text carries a soft shadow in the surface
-colour so it stays readable at any background opacity. A change cross-fades
+colour so it stays readable at any background opacity; under 50% it also
+gets a thin outline behind an opaque fill (``theme.text_edge``). A change cross-fades
 in 150 ms unless the user asked macOS to reduce motion.
 """
 
@@ -81,7 +82,6 @@ ORIGINAL_SCALE = 0.58
 LABEL_SCALE = 0.62
 ORIGINAL_GAP = 2.0
 FADE_S = 0.15
-OUTLINE_PERCENT = 12.0  # stroke width as a percentage of the font size (NSStrokeWidthAttributeName, positive = outline only)
 LEVEL = NSFloatingWindowLevel
 BEHAVIOUR = (NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
              | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle)
@@ -452,9 +452,10 @@ class MacPanel:
 
     def _shadow(self, p: theme.Palette, size: float):
         """A soft halo in the surface colour, so text stays readable over any video at any opacity."""
+        edge = theme.text_edge(self.settings.opacity)
         shadow = NSShadow.alloc().init()
-        shadow.setShadowColor_(_color(p.surface.with_alpha(0.9 if self._halo else 0.0)))
-        shadow.setShadowBlurRadius_(max(2.0, size * 0.14))
+        shadow.setShadowColor_(_color(p.surface.with_alpha(edge.halo_alpha if self._halo else 0.0)))
+        shadow.setShadowBlurRadius_(max(2.0, size * edge.halo_blur))
         shadow.setShadowOffset_((0, 0))
         return shadow
 
@@ -476,19 +477,24 @@ class MacPanel:
             y += line_h
         if self.view.original:
             font = self._font_for("original", s)
-            attrs = {NSFontAttributeName: font, NSForegroundColorAttributeName: _color(p.text_secondary),
+            ink = theme.ink(p.text_secondary, p.surface, theme.text_edge(s.opacity))
+            attrs = {NSFontAttributeName: font, NSForegroundColorAttributeName: _color(ink),
                      NSShadowAttributeName: self._shadow(p, font.pointSize())}
             text = NSAttributedString.alloc().initWithString_attributes_(self.view.original, attrs)
             self._draw_legible(text, p, (PAD_X, y + ORIGINAL_GAP - font.descender()))
 
     def _draw_legible(self, text, p: theme.Palette, point) -> None:
-        """Text over video. Under 50% background an outline in the surface colour goes under the glyphs,
-        so they keep their edge on bright or dark video; the soft halo is drawn with the glyphs."""
-        if self._halo and self.settings.opacity < 50:
+        """Text over video. Under 50% background a thin outline in the surface colour goes strictly behind
+        the glyphs: the fill is opaque (``theme.ink``) and drawn on top, so only the outer half of the stroke
+        shows and letters keep their shape and spacing. The outline pass casts no shadow; the soft halo is
+        drawn with the fill only."""
+        edge = theme.text_edge(self.settings.opacity)
+        if self._halo and edge.outline_percent > 0:
             outline = NSMutableAttributedString.alloc().initWithAttributedString_(text)
             whole = (0, outline.length())
-            outline.addAttribute_value_range_(NSStrokeColorAttributeName, _color(p.surface.with_alpha(0.95)), whole)
-            outline.addAttribute_value_range_(NSStrokeWidthAttributeName, OUTLINE_PERCENT, whole)
+            outline.addAttribute_value_range_(NSStrokeColorAttributeName, _color(p.surface.with_alpha(1.0)), whole)
+            outline.addAttribute_value_range_(NSStrokeWidthAttributeName, edge.outline_percent, whole)
+            outline.removeAttribute_range_(NSShadowAttributeName, whole)
             outline.drawAtPoint_(point)
         text.drawAtPoint_(point)
 
@@ -505,6 +511,7 @@ class MacPanel:
             color = {PENDING: p.text_secondary, FAILED: p.text_secondary, "notice": p.text_tertiary}.get(run.kind,
                                                                                                          p.text)
             text = run.text
+        color = theme.ink(color, p.surface, theme.text_edge(s.opacity))
         return NSAttributedString.alloc().initWithString_attributes_(
             text, {NSFontAttributeName: font, NSForegroundColorAttributeName: _color(color),
                    NSShadowAttributeName: shadow})

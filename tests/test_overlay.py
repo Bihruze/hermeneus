@@ -675,3 +675,27 @@ def test_one_line_on_a_row_too_narrow_for_the_header_keeps_the_newest_words():
     assert texts[0] == "Not translated" and texts[-1].endswith("ee")
     view = build_view(m, 0, width=10, measure=chars, max_lines=1, show_speaker=True, show_original=False)
     assert "".join(r.text for r in view.lines[0]).strip() == "cc dd ee"
+
+
+# -- legibility under a see-through background -------------------------------------
+
+def test_text_edge_keeps_the_halo_alone_from_50_percent_and_adds_a_thin_outline_below():
+    from hermeneus_engine.overlay import theme
+    for opacity in (50, 80, 100):
+        edge = theme.text_edge(opacity)
+        assert (edge.outline_percent, edge.halo_alpha, edge.halo_blur, edge.solid) == (0.0, 0.9, 0.14, False)
+    for opacity in (0, 30, 49):
+        edge = theme.text_edge(opacity)
+        assert edge.solid and 0 < edge.outline_percent <= 10  # thin: at most 5% of the size outside the glyph
+
+
+def test_ink_is_opaque_below_50_percent_so_the_outline_never_shows_through_the_letters():
+    from hermeneus_engine.overlay import theme
+    from hermeneus_engine.overlay_tokens import FALLBACK
+    for dark in (False, True):
+        p = FALLBACK[dark]
+        assert theme.ink(p.text_secondary, p.surface, theme.text_edge(80)) == p.text_secondary
+        for color in (p.text, p.text_secondary, p.failed_color, *p.speakers):
+            solid = theme.ink(color, p.surface, theme.text_edge(0))
+            assert solid.a == 1.0
+            assert solid == color.over(p.surface.with_alpha(1.0))
