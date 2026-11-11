@@ -21,7 +21,8 @@ from .hermeneus_engine.options import Choices, UsageError, add_session_arguments
 from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
-from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_window
+from .hermeneus_engine.overlay.service import (OverlayService, OverlayUnavailable, ThemeError,  # noqa: F401
+                                               describe as describe_window)
 
 SLASH_USAGE = ("usage: /translate start [--to LANG] [--source NAME] [--speak] "
                "[--device OUTPUT] [--voice VOICE_ID] | /translate stop | /translate status | "

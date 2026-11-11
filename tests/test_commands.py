@@ -267,7 +267,7 @@ def test_overlay_commands_refuse_cleanly_without_a_session(data_dir):
     assert "no translation session" in err.getvalue()
     args = argparse.Namespace(overlay_action="status", json=True)
     assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 0
-    assert json.loads(out.getvalue()) == {"visible": False, "pid": None}
+    assert {k: v for k, v in json.loads(out.getvalue()).items() if k != "settings"} == {"visible": False, "pid": None, "armed": False}
 
 
 def test_install_hint_format_is_pinned():

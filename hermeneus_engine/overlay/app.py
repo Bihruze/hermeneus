@@ -19,7 +19,8 @@ class Panel(Protocol):
     def main_display(self) -> Display: ...
     def measure(self, text: str, run: Run, settings: OverlaySettings) -> float: ...
     def measure_original(self, text: str, settings: OverlaySettings) -> float: ...
-    def strip_height(self, settings: OverlaySettings) -> float: ...
+    def strip_height(self, settings: OverlaySettings, rows: Optional[int] = None,
+                     original: Optional[bool] = None) -> float: ...
     def text_inset(self) -> float: ...
     def set_frame(self, frame: Rect) -> None: ...
     def render(self, view: View, settings: OverlaySettings) -> None: ...
@@ -83,6 +84,25 @@ class OverlayApp:
 
     _now = 0.0
 
+    def _fit_height(self, view: View) -> None:
+        """The strip follows its content up to max lines, keeping its bottom edge."""
+        if view.empty or self.frame is None or self.display is None:
+            return
+        rows = len(view.lines) or 1
+        height = self.panel.strip_height(self.settings, rows, bool(view.original))
+        if abs(height - self.frame.h) < 0.5:
+            return
+        self.frame = frame_for(spot_for(self.frame, self.display), self.display, height)
+        self.panel.set_frame(self.frame)
+
+    def repaint(self) -> None:
+        """Fonts or colours changed: measure and draw again."""
+        if self.frame is None:
+            return
+        self.view = View()
+        self.place()
+        self.refresh(self._now)
+
     def apply_settings(self, settings: OverlaySettings) -> None:
         if settings == self.settings:
             return
@@ -109,6 +129,7 @@ class OverlayApp:
                           original_measure=lambda text, run: self.panel.measure_original(text, s))
         if view != self.view:
             self.view = view
+            self._fit_height(view)
             self.panel.render(view, s)
         visible = not view.empty
         if visible != self.visible:

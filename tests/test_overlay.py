@@ -215,8 +215,10 @@ class FakePanel:
     def measure_original(self, text, settings):
         return float(len(text) * 6)
 
-    def strip_height(self, settings):
-        return 40.0 * settings.max_lines + (20 if settings.show_original else 0)
+    def strip_height(self, settings, rows=None, original=None):
+        rows = settings.max_lines if rows is None else rows
+        original = settings.show_original if original is None else original
+        return 40.0 * rows + (20 if original else 0)
 
     def text_inset(self):
         return 20.0
@@ -424,3 +426,76 @@ def test_older_lines_leave_whole_before_the_newest_is_cut():
     assert [[r.text for r in ln] for ln in view.lines] == [["Speaker 1 ", "second"]]
     view = build_view(m, 0, width=40, measure=chars, max_lines=1, show_speaker=False, show_original=False)
     assert ["".join(r.text for r in ln) for ln in view.lines] == ["first line here second"]
+
+
+def test_strip_height_follows_its_content_and_keeps_its_bottom(data_dir):
+    # Before: the strip kept max-lines height, so one short line sat in an empty box (A3 F9).
+    panel = FakePanel()
+    app = OverlayApp(panel, Positions(data_dir / "p.json"), ovs.OverlaySettings(max_lines=3))
+    app.place()
+    bottom = panel.frames[-1].y
+    assert panel.frames[-1].h == 140
+    app.on_event(line(1, "a", "translated", "Hi", "Merhaba"), 0)
+    assert panel.frames[-1].h == 60 and panel.frames[-1].y == bottom  # one row and the original
+    app.on_event(line(2, "b", "partial", "and more", "", "s1:speaker_1"), 0)
+    assert panel.frames[-1].h == 80 and panel.frames[-1].y == bottom  # two rows, no original yet
+
+
+# -- shared token table (A3 F3, F10, F15) -------------------------------------------------
+
+from hermeneus_engine import overlay_tokens as tok  # noqa: E402
+
+
+def test_css_colours_as_getcomputedstyle_writes_them():
+    assert tok.parse_color("rgb(255, 0, 0)") == tok.Rgba(1, 0, 0, 1)
+    assert tok.parse_color("rgba(0, 0, 0, 0.5)").a == 0.5
+    assert tok.parse_color("rgb(0 0 0 / 50%)").a == 0.5
+    assert tok.parse_color("color(srgb 0.5 0.25 1 / 0.94)") == tok.Rgba(0.5, 0.25, 1, 0.94)
+    assert tok.parse_color("#ffffff80").a == 128 / 255
+    for bad in ("red", "url(x)", "rgb(1,2)", 7, "x" * 100):
+        assert tok.parse_color(bad) is None
+
+
+def test_payload_round_trips_and_rejects_what_it_cannot_read():
+    payload = {"mode": "light", "name": "github",
+               "colors": {"surface": "#ffffff", "text": "rgba(31, 35, 40, 0.94)", "text_secondary": "#1f2328bd",
+                          "text_tertiary": "#1f23288a", "stroke": "rgba(0, 83, 253, 0.22)",
+                          "speakers": ["#0053fd", "#1f8a65"]},
+               "radius_px": 2.4, "font": "-apple-system"}
+    p = tok.palette_from_payload(payload)
+    assert not p.dark and p.speaker(3) == p.speaker(1) and p.source == "desktop:github"
+    assert tok.palette_from_json(tok.palette_to_json(p)) == p
+    assert tok.palette_from_json("{") is None
+    for broken in ({**payload, "colors": {**payload["colors"], "stroke": "blue"}}, {**payload, "radius_px": True},
+                   {**payload, "colors": {**payload["colors"], "speakers": []}}):
+        with pytest.raises(tok.ThemeError):
+            tok.palette_from_payload(broken)
+
+
+def test_fallback_hairline_is_the_popover_token_not_a_multiple():
+    # --ui-stroke-secondary for nous light: color-mix(#0053fd 16%, #1f2328 at 7%) (styles.css:380-384).
+    stroke = tok.FALLBACK[False].stroke
+    assert abs(stroke.a - (0.16 + 0.84 * 0.07)) < 1e-9
+    assert tok.FALLBACK[False].radius_px == 2.4 and tok.WEIGHT_LABEL == 600
+
+
+def test_service_applies_settings_live_and_reports_armed(data_dir):
+    import fcntl
+    settings = {"overlay": True, "overlay_text_size": 40}
+
+    async def status():
+        return {"state": "idle"}
+
+    svc = OverlayService(lambda: data_dir, lambda: settings, status)
+    assert svc.status()["armed"] is True
+    svc.apply()
+    assert not control.settings_file(data_dir).exists()  # nothing open, nothing written
+    control.overlay_dir(data_dir)
+    fd = os.open(control.lock_file(data_dir), os.O_RDWR | os.O_CREAT, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    os.write(fd, b'{"pid": 99}')
+    try:
+        svc.apply()
+        assert json.loads(control.settings_file(data_dir).read_text())["text_size"] == 40
+    finally:
+        os.close(fd)

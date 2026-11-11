@@ -30,7 +30,7 @@ from Foundation import NSObject
 from ..ipc import SessionClient
 from ..overlay_settings import OverlaySettings
 from ..runtime import lock_holder, socket_path
-from . import control
+from . import control, theme
 from .app import OverlayApp
 from .follower import follow
 from .placement import Positions
@@ -62,6 +62,20 @@ def _read_settings(data_dir: Path) -> tuple[OverlaySettings, float]:
         return OverlaySettings(), 0.0
 
 
+def _apply_theme(data_dir: Path, panel, overlay, state: dict) -> None:
+    """Repaint with the token values the Desktop pane sent, when ``theme.json`` changed."""
+    path = control.theme_file(data_dir)
+    try:
+        mtime = path.stat().st_mtime
+    except OSError:
+        mtime = 0.0
+    if mtime == state["theme_mtime"]:
+        return
+    state["theme_mtime"] = mtime
+    panel.set_palette(theme.load(path) if mtime else None)
+    overlay.repaint()
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(prog="python -m hermeneus_engine.overlay")
     parser.add_argument("--data-dir", required=True)
@@ -88,7 +102,7 @@ def main(argv=None) -> int:
         return 3
 
     settings, settings_mtime = _read_settings(data_dir)
-    state = {"mtime": settings_mtime, "quit": False}
+    state = {"mtime": settings_mtime, "quit": False, "theme_mtime": None}
     stop_event_holder: dict = {}
 
     def quit_soon(*_args) -> None:
@@ -99,6 +113,7 @@ def main(argv=None) -> int:
                                on_reset=lambda: overlay.reset_position(),
                                on_hide=quit_soon)
     overlay = OverlayApp(panel, Positions(control.positions_file(data_dir)), settings)
+    _apply_theme(data_dir, panel, overlay, state)
     overlay.place()
     overlay.refresh(time.monotonic())
 
@@ -137,6 +152,7 @@ def main(argv=None) -> int:
                     pass
             _stop_app(nsapp)
             return
+        _apply_theme(data_dir, panel, overlay, state)
         new, mtime = _read_settings(data_dir)
         if mtime != state["mtime"]:
             state["mtime"] = mtime
