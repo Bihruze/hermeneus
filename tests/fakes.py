@@ -337,3 +337,12 @@ def fake_speaker(secrets):
 
 def fake_capture():
     return FakeCapture()
+
+
+SEEN_SECRETS: list = []
+
+
+def secret_recording_stt(config, on_event, secrets):
+    """``fake_stt`` that also records the secret getter the harness passed, for the key file tests."""
+    SEEN_SECRETS.append(secrets)
+    return fake_stt(config, on_event, secrets)

@@ -277,3 +277,63 @@ def test_commit_records_client_hold_between_receive_and_delivery():
     [(_key, stages, meta)] = rec.snapshot()
     assert stages[m.Stage.COMMIT] == 5_000_000
     assert meta["commit_client_hold_ms"] == 1000.0
+
+
+SECRET = "sk_test_0123456789abcdef"
+
+
+def _key_file(tmp_path, text=SECRET, mode=0o600):
+    p = tmp_path / "eleven.key"
+    p.write_text(text + "\n")
+    p.chmod(mode)
+    return p
+
+
+def test_harness_reads_no_credentials_from_the_environment(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "from-env-must-not-be-used")
+    assert H.RunConfig(label="x").secrets("ELEVENLABS_API_KEY") is None
+    source = (fakes.ROOT / "scripts" / "latency_harness.py").read_text()
+    assert "os.environ" not in source and "getenv" not in source
+
+
+def test_key_file_serves_only_the_elevenlabs_key(tmp_path):
+    g = H.KeyFileSecrets(_key_file(tmp_path), repo_root=tmp_path / "repo")
+    assert g("ELEVENLABS_API_KEY") == SECRET
+    assert g("OPENAI_API_KEY") is None
+    assert SECRET not in repr(g)
+
+
+@pytest.mark.parametrize("text,mode,needle", [
+    (SECRET, 0o644, "chmod 600"),
+    ("ELEVENLABS_API_KEY=" + SECRET, 0o600, "only the key"),
+    (SECRET + "\nsecond", 0o600, "only the key"),
+    ("", 0o600, "only the key"),
+])
+def test_key_file_refuses_unsafe_or_dotenv_files(tmp_path, text, mode, needle):
+    with pytest.raises(SystemExit, match=needle):
+        H.KeyFileSecrets(_key_file(tmp_path, text, mode), repo_root=tmp_path / "repo")
+
+
+def test_key_file_refused_inside_the_repository_or_missing(tmp_path):
+    with pytest.raises(SystemExit, match="inside the repository"):
+        H.KeyFileSecrets(_key_file(tmp_path), repo_root=tmp_path)
+    with pytest.raises(SystemExit, match="No such file"):
+        H.KeyFileSecrets(tmp_path / "absent.key", repo_root=tmp_path / "repo")
+
+
+def test_cli_passes_key_file_getter_and_keeps_value_out_of_outputs(tmp_path, corpus, monkeypatch):
+    wav, _ = corpus
+    fakes.SEEN_SECRETS.clear()
+    out = tmp_path / "out"
+    keyf = _key_file(tmp_path)
+    rc = H.main(["run", "--wav", str(wav), "--duration", "1.5", "--stt", "tests.fakes:secret_recording_stt", "--translate", "off",
+                 "--key-file", str(keyf), "--drain", "1", "--label", "key", "--out", str(out)])
+    assert rc == 0
+    assert fakes.SEEN_SECRETS[-1]("ELEVENLABS_API_KEY") == SECRET
+    data = (out / "summary.json").read_text()
+    assert json.loads(data)["runs"][0]["config"]["secrets"] == "key-file"
+    assert SECRET not in data and SECRET not in (out / "summary.md").read_text()
+    fakes.SEEN_SECRETS.clear()
+    rc = H.main(["run", "--wav", str(wav), "--duration", "1.5", "--stt", "tests.fakes:secret_recording_stt", "--translate", "off",
+                 "--drain", "1", "--label", "nokey", "--out", str(tmp_path / "out2")])
+    assert rc == 0 and fakes.SEEN_SECRETS[-1]("ELEVENLABS_API_KEY") is None
