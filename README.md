@@ -274,19 +274,20 @@ The full tables and their sources are in [`hermeneus_engine/languages.py`](herme
 
 ### Measured latency
 
-| Stage | Median | p95 | Audio |
-| --- | --- | --- | --- |
-| Sentence released for translation | 1.01 s | 1.37 s | both kinds below (69 sentences) |
-| Translated line | 2.33 s | 2.64 s | speech with pauses between sentences (32 sentences) |
-| Translated line | 2.12 s | 2.68 s | continuous news-style speech (21 sentences) |
-| First spoken audio after the request (with `--speak`) | 1.07 s | 1.89 s | 2 utterances only, a weak sample |
+| Stage | Median | p95 | Measured from | Sample |
+| --- | --- | --- | --- | --- |
+| Sentence released for translation | 1.01 s | 1.37 s | the plugin's own estimate of the sentence end (`status --json`) | 69 sentences, both kinds of speech below |
+| Translated line | 2.33 s | 2.64 s | the sentence end in the audio file | 32 sentences of speech with pauses between sentences |
+| Translated line | 2.12 s | 2.68 s | the sentence end in the audio file | 21 sentences of continuous news-style speech |
+| First spoken audio (with `--speak`) | 1.07 s | 1.89 s | the request to ElevenLabs text to speech | 2 utterances in a separate run, a weak sample |
 
 How it was measured:
 
-- An independent auditor ran the test on this Mac on 2026-11-11, with real ElevenLabs Scribe v3 Live and Claude Haiku 5.5 (provider `anthropic`) as the translation model.
+- A separate test run on 2026-11-11 used a MacBook Air (M3) on macOS 27.0.1, real ElevenLabs Scribe v3 Live and Claude Haiku 5.5 (provider `anthropic`) as the translation model.
 - English synthetic speech was played into a virtual input, captured from it and translated into Turkish.
-- Each time runs from the end of a spoken sentence, taken from the audio file itself, to the event named in the row.
-- `hermes hermeneus status --json` reports the same figures live under `metrics.latency_ms`. They agreed with the audio-based measurement within about 0.15 s.
+- The two "Translated line" rows run from the end of each sentence, taken from the audio file itself, to the translated line.
+- The first row is the plugin's own figure, which `hermes hermeneus status --json` reports live under `metrics.latency_ms`. It starts at the plugin's own estimate of when the sentence ended. In this run the plugin's figures agreed with the audio-based ones within about 0.15 s.
+- The spoken audio row comes from another run on the same day. It runs from the moment Hermeneus sends the translated line to ElevenLabs until the first audio comes back.
 
 The translated line reaches the pane and the terminal at once. The strip and the overlay page then show it at reading pace (see [Subtitle pace](#subtitle-pace)). Real streams, other voices and other models will differ.
 
