@@ -340,6 +340,7 @@ class _Session:
     trailing_quiet_ms: int = 0  # length of the quiet run at the end of the sent audio
     wants_previous_text: bool = False
     rotate_at: float = 0.0
+    stream_offset_s: Optional[float] = None  # stream time of this session's first audio sample
 
     def speaker(self, raw: Any) -> Optional[str]:
         if raw is None or raw == "":
@@ -356,7 +357,13 @@ class ScribeLiveClient:
                  connect: Optional[Connector] = None,
                  sleep: Sleeper = asyncio.sleep,
                  rng: Callable[[], float] = random.random,
-                 secret_name: str = SECRET_NAME) -> None:
+                 secret_name: str = SECRET_NAME, stream_times: bool = False) -> None:
+        """``stream_times``: give word ``start``/``end`` in seconds of the whole
+        audio stream this client has sent, across every Scribe session,
+        instead of seconds since the current session's first sample. A
+        consumer can then map every word to its capture time with one clock,
+        through rotations, idle closes and reconnects."""
+        self.stream_times = stream_times
         self._config = config
         self._get_secret = get_secret
         self._secret_name = secret_name
@@ -522,6 +529,10 @@ class ScribeLiveClient:
 
     async def _send_on(self, session: _Session, pcm: bytes, commit: bool) -> None:
         """Send one chunk; caller holds ``session.send_lock``."""
+        if pcm and session.stream_offset_s is None:
+            # Bytes go out in order and to one session at a time, so this
+            # session's sample 0 is the first byte after everything sent before.
+            session.stream_offset_s = self.stats.audio_bytes_sent / (ENGINE_SAMPLE_RATE * ENGINE_SAMPLE_WIDTH)
         await session.ws.send(self._audio_message(session, pcm, commit))
         session.first_chunk_sent = True
         self.stats.chunks_sent += 1
@@ -845,11 +856,17 @@ class ScribeLiveClient:
         if not isinstance(raw, list):
             return ()
         out = []
+        shift = (session.stream_offset_s or 0.0) if self.stream_times else 0.0
+
+        def at(value: Any) -> Optional[float]:
+            t = _float(value)
+            return None if t is None else t + shift
+
         for w in raw:
             if not isinstance(w, dict):
                 continue
-            out.append(Word(text=str(w.get("text") or ""), start=_float(w.get("start")),
-                            end=_float(w.get("end")), speaker_id=session.speaker(w.get("speaker_id")),
+            out.append(Word(text=str(w.get("text") or ""), start=at(w.get("start")),
+                            end=at(w.get("end")), speaker_id=session.speaker(w.get("speaker_id")),
                             type=w.get("type") if isinstance(w.get("type"), str) else None))
         return tuple(out)
 

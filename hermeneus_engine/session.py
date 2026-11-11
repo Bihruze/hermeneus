@@ -696,8 +696,8 @@ class TranslationSession:
         """FrameQueue consumer for one chunk per metrics tick."""
         self._sampled_silent = _is_silent(pcm)
         if self._frames is not None and self._frames._consumer == self._sample_audio:
-            self._frames._consumer = self._c.stt.send_audio
-        self._c.stt.send_audio(pcm, captured_ns)
+            self._frames._consumer = self._send_audio
+        self._send_audio(pcm, captured_ns)
 
     def _gate_audio(self, pcm: bytes, captured_ns: int) -> None:
         """FrameQueue consumer while the source is silent."""
@@ -706,8 +706,8 @@ class TranslationSession:
             return
         self._gated = False
         if self._frames is not None:
-            self._frames._consumer = self._c.stt.send_audio
-        self._c.stt.send_audio(pcm, captured_ns)
+            self._frames._consumer = self._send_audio
+        self._send_audio(pcm, captured_ns)
         self._audio_back()
 
     def _audio_back(self) -> None:
@@ -799,20 +799,31 @@ class TranslationSession:
         return f"{self._prefix}-{next(self._ids)}"
 
     def _send_audio(self, pcm: bytes, captured_ns: int) -> None:
-        """On the loop: note the chunk in the stream clock, then hand it to the STT client."""
-        stats = getattr(self._c.stt, "stats", None)
-        opened = getattr(stats, "sessions_opened", None)
-        if opened is not None:
-            if self._stt_sessions_seen is not None and opened != self._stt_sessions_seen:
-                # A rotation or reconnect started a new Scribe session. The
-                # client switches sessions inside its own sender, so where the
-                # new session's sample 0 falls is not visible here. Word times
-                # are no longer mapped rather than mapped wrongly (contract
-                # request: a per-session offset from the STT client).
+        """On the loop: note the chunk in the stream clock, then hand it to the STT client.
+
+        Every consumer of the FrameQueue ends here (the silence gate's too), so
+        the clock sees exactly the audio the client is given, in order.
+        """
+        stt = self._c.stt
+        stats = getattr(stt, "stats", None)
+        if getattr(stt, "stream_times", False):
+            # Word times count over the client's whole stream (scribe.py
+            # stream_times), so new Scribe sessions keep the mapping. Audio the
+            # client dropped from its queue shifts everything after it.
+            dropped = getattr(stats, "audio_bytes_dropped", 0)
+            if dropped:
                 self._clock_reliable = False
-            self._stt_sessions_seen = opened
+        else:
+            opened = getattr(stats, "sessions_opened", None)
+            if opened is not None:
+                if self._stt_sessions_seen is not None and opened != self._stt_sessions_seen:
+                    # Session-relative word times after a new Scribe session:
+                    # where its sample 0 falls is not visible here, so word
+                    # times are no longer mapped rather than mapped wrongly.
+                    self._clock_reliable = False
+                self._stt_sessions_seen = opened
         self._stream_clock.on_frame(len(pcm), captured_ns)
-        self._c.stt.send_audio(pcm, captured_ns)
+        stt.send_audio(pcm, captured_ns)
 
     def _word_capture_ns(self, t_s: Optional[float]) -> Optional[int]:
         """Capture time of a Scribe word time, or None when it cannot be mapped reliably."""
@@ -825,6 +836,10 @@ class TranslationSession:
 
     def _store(self, line: SubtitleLine) -> None:
         self.latency.record_timings(line.line_id, line.timings_ns)
+        released = line.timings_ns.get("released")
+        if isinstance(released, int) and "released" not in self.latency.get(line.line_id):
+            # metrics.STAGES has no "released" stage, so record_timings skips it.
+            self.latency.set(line.line_id, "released", released)
         self._lines.pop(line.line_id, None)
         self._lines[line.line_id] = line
         while len(self._lines) > self.options.max_lines:
@@ -903,7 +918,11 @@ class TranslationSession:
         else:
             timings, line_id = {}, self._new_id()
         self._partial_id = None
-        timings["commit"] = received_ns
+        # committed: Scribe committed the segment and the line went to
+        # translation then. released: the line went to translation (also
+        # earlier, at a sentence boundary or a pause, without a commit).
+        if not early:
+            timings["commit"] = received_ns
         timings["released"] = received_ns
         if early:
             timings["sentence_released"] = received_ns
