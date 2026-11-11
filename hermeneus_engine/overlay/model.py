@@ -25,7 +25,20 @@ PENDING = "pending"
 FAILED = "failed"
 LABEL = "label"
 MARK = "mark"  # "Not translated" before a failed line, in --ui-red as the pane marks it
-NOT_TRANSLATED = "Not translated"
+
+
+@dataclass(frozen=True)
+class Strings:
+    """The words the overlay draws. The Desktop pane sends its own localised copy (usePluginI18n) with
+    the theme; these English defaults are the pane's EN strings, for an overlay no pane has reached."""
+
+    speaker: str = "Speaker {n}"
+    not_translated: str = "Not translated"
+    waiting: str = "Waiting for speech"
+    reconnecting: str = "Reconnecting"
+
+    def label(self, number: int) -> str:
+        return self.speaker.replace("{n}", str(number))
 
 RUNNING = frozenset({"starting", "live", "reconnecting", "stopping"})
 
@@ -144,11 +157,13 @@ class OverlayModel:
         return [line for line in self.lines.values() if line.original.strip() or line.translation.strip()]
 
 
-def speaker_label(number: int) -> str:
-    return f"Speaker {number}"
+def speaker_label(number: int, strings: "Strings" = Strings()) -> str:
+    return strings.label(number)
 
 
 def segment(line: _Line) -> Run:
+    """What a line shows. One rule for the strip and the 127.0.0.1 page: a "translated" line with an
+    empty translation is shown as failed, its original with the "not translated" marker."""
     if line.state == "translated" and line.translation.strip():
         return Run(line.translation.strip(), TRANSLATED)
     if line.state in ("translated", "failed"):
@@ -157,14 +172,14 @@ def segment(line: _Line) -> Run:
 
 
 def compose(model: OverlayModel, now: float, *, show_speaker: bool, show_original: bool,
-            notice_waiting: str = "Waiting for speech", notice_reconnecting: str = "Reconnecting") -> tuple[list[Run], str, str]:
+            strings: Strings = Strings()) -> tuple[list[Run], str, str]:
     """(runs for the main block, original of the newest line, notice) for this moment."""
     lines = model.recent(now)
     if not lines:
         if model.state == "reconnecting":
-            return [], "", model.message or notice_reconnecting
+            return [], "", model.message or strings.reconnecting
         if model.running and not model.seen_line:
-            return [], "", notice_waiting
+            return [], "", strings.waiting
         return [], "", ""
     runs: list[Run] = []
     previous_speaker: Optional[str] = None
@@ -174,10 +189,10 @@ def compose(model: OverlayModel, now: float, *, show_speaker: bool, show_origina
             continue
         number = model.speakers.get(line.speaker_id) if line.speaker_id else None
         if show_speaker and number is not None and line.speaker_id != previous_speaker:
-            runs.append(Run(speaker_label(number), LABEL, number))
+            runs.append(Run(strings.label(number), LABEL, number))
         previous_speaker = line.speaker_id
         if seg.kind == FAILED:
-            runs.append(Run(NOT_TRANSLATED, MARK, number))
+            runs.append(Run(strings.not_translated, MARK, number))
         runs.append(Run(seg.text, seg.kind, number))
     newest = lines[-1]
     original = newest.original.strip() if show_original and segment(newest).kind == TRANSLATED else ""
@@ -193,7 +208,8 @@ _TOKEN = re.compile(r"\S+\s*")
 def _tokens(runs: list[Run]) -> list[tuple[str, Run]]:
     out: list[tuple[str, Run]] = []
     for index, run in enumerate(runs):
-        words = _TOKEN.findall(run.text)
+        # A speaker label or the "not translated" marker never breaks across rows.
+        words = [run.text.strip() + " "] if run.kind in (LABEL, MARK) and run.text.strip() else _TOKEN.findall(run.text)
         for i, word in enumerate(words):
             if i == len(words) - 1 and index < len(runs) - 1 and not word.endswith(" "):
                 word += " "
@@ -234,10 +250,16 @@ def wrap(runs: list[Run], width: float, measure: Measure, max_lines: int) -> tup
         return ()
     lines: list[list[tuple[str, Run]]] = [[]]
     used = 0.0
-    for word, run in _tokens(runs):
+    tokens = _tokens(runs)
+    for index, (word, run) in enumerate(tokens):
         trimmed = word.rstrip()
         need = measure(trimmed, run)
-        if lines[-1] and used + need > width:
+        # A label or marker stays on the row of the first word it introduces.
+        glued = need
+        if run.kind in (LABEL, MARK) and index + 1 < len(tokens) and tokens[index + 1][1].kind not in (LABEL, MARK):
+            nxt_word, nxt_run = tokens[index + 1]
+            glued = measure(word, run) + measure(nxt_word.rstrip(), nxt_run)
+        if lines[-1] and used + (glued if glued <= width else need) > width:
             lines.append([])
             used = 0.0
         if need > width:
@@ -308,6 +330,14 @@ def _rows(turn: list[Run], width: float, measure: Measure) -> int:
     return len(wrap(turn, width, measure, 99))
 
 
+def _label_for(turn: list[Run], number: int) -> Run:
+    """The turn's own label run (in whatever language compose wrote it), else the English default."""
+    for run in turn:
+        if run.kind == LABEL:
+            return run
+    return Run(speaker_label(number), LABEL, number)
+
+
 def _fit_turn(turn: list[Run], width: float, measure: Measure, max_lines: int,
               show_speaker: bool) -> tuple[tuple[Run, ...], ...]:
     """One speaker turn in at most ``max_lines`` rows: older lines of the turn leave whole, then the
@@ -317,12 +347,12 @@ def _fit_turn(turn: list[Run], width: float, measure: Measure, max_lines: int,
         groups.pop(0)
         first = groups[0]
         if show_speaker and first[0].kind != LABEL and first[0].speaker is not None:
-            groups[0] = [Run(speaker_label(first[0].speaker), LABEL, first[0].speaker)] + first
+            groups[0] = [_label_for(turn, first[0].speaker)] + first
     lines = wrap([r for g in groups for r in g], width, measure, max_lines)
     if show_speaker and lines and lines[0][0].kind != LABEL and lines[0][0].speaker is not None:
         # Words leave from the front until the label and the rest fit in max_lines.
         number = lines[0][0].speaker
-        label = Run(speaker_label(number), LABEL, number)
+        label = _label_for(turn, number)
         rest = [run for line in lines for run in line]
         while rest:
             lines = wrap([label] + rest, width, measure, max_lines + 1)
@@ -347,8 +377,10 @@ def layout(runs: list[Run], width: float, measure: Measure, max_lines: int,
 
 
 def build_view(model: OverlayModel, now: float, *, width: float, measure: Measure, max_lines: int,
-               show_speaker: bool, show_original: bool, original_measure: Optional[Measure] = None) -> View:
-    runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original)
+               show_speaker: bool, show_original: bool, original_measure: Optional[Measure] = None,
+               strings: Strings = Strings()) -> View:
+    runs, original, notice = compose(model, now, show_speaker=show_speaker, show_original=show_original,
+                                     strings=strings)
     lines = layout(runs, width, measure, max_lines, show_speaker) if runs else ()
     if original:
         share = _shown_share(runs[-1], lines)

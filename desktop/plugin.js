@@ -914,6 +914,9 @@ const EN = {
   overlay: 'Subtitle overlay',
   overlayArmed: 'Opens with the next session',
   overlayNotArmed: 'Off. Click to open it with the next session',
+  overlayNotTranslated: 'Not translated',
+  overlayWaiting: 'Waiting for speech',
+  overlayReconnecting: 'Reconnecting',
   overlayLook: 'Overlay look',
   overlayTextSize: 'Text size',
   overlayLines: 'Lines',
@@ -2046,8 +2049,11 @@ function StatusChip({ ctrl }) {
  *  says to for drawing outside CSS (desktop-plugin-sdk.md:2119-2122), and sends them to the overlays.
  *  It reads nothing of the app's markup: every span below is rendered here. */
 function ThemeProbe({ ctrl }) {
+  const t = usePluginI18n(ID)
   const { renderedMode, theme, themeName } = useTheme()
   const ref = useRef(null)
+  const strings = overlayStrings(t)
+  const stringsKey = JSON.stringify(strings)
 
   useEffect(() => {
     const root = ref.current
@@ -2056,23 +2062,16 @@ function ThemeProbe({ ctrl }) {
       return
     }
 
-    // The spans are rendered below in THEME_PROBES order, so the index names the token.
-    const read = (index, property) => getComputedStyle(root.children[index])[property]
-    const colorCount = Object.keys(OVERLAY_COLOR_TOKENS).length
-    const colors = Object.fromEntries(Object.keys(OVERLAY_COLOR_TOKENS).map((role, i) => [role, read(i, 'color')]))
+    // Desktop's ThemeProvider writes the new variables in its own effect, which React runs after
+    // this child's effect (apps/desktop/src/themes/context.tsx:630). Reading in the next animation
+    // frame sees what it wrote.
+    return afterPaint(() => {
+      const read = (index, property) => getComputedStyle(root.children[index])[property]
 
-    void ctrl.sendTheme(
-      overlayThemePayload({
-        colors,
-        font: read(THEME_PROBES.length - 1, 'fontFamily'),
-        mode: renderedMode,
-        name: themeName,
-        radius: Number.parseFloat(read(THEME_PROBES.length - 2, 'borderTopLeftRadius')) || 0,
-        speakers: SPEAKER_TOKENS.map((_, i) => read(colorCount + i, 'color'))
-      })
-    )
-    // Only a theme change re-reads the tokens; the status chip re-renders on every line.
-  }, [renderedMode, theme, themeName])
+      void ctrl.sendTheme(readThemeTokens(read, { renderedMode, themeName }, JSON.parse(stringsKey)))
+    })
+    // Only a theme or language change re-reads the tokens; the status chip re-renders on every line.
+  }, [renderedMode, theme, themeName, stringsKey])
 
   return jsx('span', {
     'aria-hidden': true,
@@ -2080,6 +2079,47 @@ function ThemeProbe({ ctrl }) {
     style: S.probe,
     children: THEME_PROBES.map((style, i) => jsx('span', { style }, i))
   })
+}
+
+/** Run ``work`` in the next animation frame (after the parent effects of this commit); returns a canceller. */
+export function afterPaint(work, raf = globalThis.requestAnimationFrame, cancel = globalThis.cancelAnimationFrame) {
+  if (typeof raf !== 'function') {
+    work()
+
+    return () => {}
+  }
+
+  const id = raf(() => work())
+
+  return () => cancel?.(id)
+}
+
+/** The overlay words in the pane's language, the same i18n copy the pane draws. */
+export function overlayStrings(t) {
+  return {
+    speaker: t('speaker', '{n}'),
+    not_translated: t('overlayNotTranslated'),
+    waiting: t('overlayWaiting'),
+    reconnecting: t('overlayReconnecting')
+  }
+}
+
+/** The POST /overlay/theme body from a ``read(index, property)`` over the THEME_PROBES spans. */
+export function readThemeTokens(read, { renderedMode, themeName }, strings) {
+  const colorCount = Object.keys(OVERLAY_COLOR_TOKENS).length
+  const colors = Object.fromEntries(Object.keys(OVERLAY_COLOR_TOKENS).map((role, i) => [role, read(i, 'color')]))
+
+  return {
+    ...overlayThemePayload({
+      colors,
+      font: read(THEME_PROBES.length - 1, 'fontFamily'),
+      mode: renderedMode,
+      name: themeName,
+      radius: Number.parseFloat(read(THEME_PROBES.length - 2, 'borderTopLeftRadius')) || 0,
+      speakers: SPEAKER_TOKENS.map((_, i) => read(colorCount + i, 'color'))
+    }),
+    strings
+  }
 }
 
 /** One hidden span per token: colours, then --radius-lg, then --dt-font-sans. */

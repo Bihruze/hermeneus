@@ -10,7 +10,7 @@ from __future__ import annotations
 from typing import Optional, Protocol
 
 from ..overlay_settings import OverlaySettings
-from .model import OverlayModel, Run, View, build_view
+from .model import OverlayModel, Run, Strings, View, build_view
 from .placement import Display, Positions, Rect, Spot, display_at, frame_for, spot_for
 
 
@@ -37,6 +37,7 @@ class OverlayApp:
         self.display: Optional[Display] = None
         self.view = View()
         self.visible = False
+        self.strings = Strings()
 
     # -- placement ----------------------------------------------------------------
 
@@ -124,7 +125,7 @@ class OverlayApp:
         s = self.settings
         width = max(0.0, self.frame.w - 2 * self.panel.text_inset())
         view = build_view(self.model, now, width=width, max_lines=s.max_lines, show_speaker=s.show_speaker,
-                          show_original=s.show_original,
+                          show_original=s.show_original, strings=self.strings,
                           measure=lambda text, run: self.panel.measure(text, run, s),
                           original_measure=lambda text, run: self.panel.measure_original(text, s))
         if view != self.view:

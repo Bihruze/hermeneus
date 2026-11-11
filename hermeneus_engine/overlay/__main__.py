@@ -33,6 +33,7 @@ from ..runtime import lock_holder, socket_path
 from . import control, theme
 from .app import OverlayApp
 from .follower import follow
+from .model import Strings
 from .placement import Positions
 
 TICK_S = 0.25
@@ -72,7 +73,9 @@ def _apply_theme(data_dir: Path, panel, overlay, state: dict) -> None:
     if mtime == state["theme_mtime"]:
         return
     state["theme_mtime"] = mtime
-    panel.set_palette(theme.load(path) if mtime else None)
+    sent = theme.load(path) if mtime else None
+    panel.set_palette(sent)
+    overlay.strings = Strings(**dict(sent.strings)) if sent is not None else Strings()
     overlay.repaint()
 
 

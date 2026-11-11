@@ -114,6 +114,8 @@ class Palette:
     font: str = FALLBACK_FONT
     source: str = "fallback"
     failed: Optional[Rgba] = None  # --ui-red; None means the nous value for this mode
+    # The pane's localised overlay words, as (key, text) pairs; empty means the English defaults.
+    strings: tuple[tuple[str, str], ...] = ()
 
     @property
     def failed_color(self) -> Rgba:
@@ -218,7 +220,32 @@ def palette_from_payload(payload: Any) -> Palette:
             raise ThemeError("colors.failed is not a CSS colour")
     name = payload.get("name", "")
     return Palette(dark=mode == "dark", speakers=speaker_colors, radius_px=float(radius), font=font,
-                   source=f"desktop:{name}"[:80] if isinstance(name, str) else "desktop", failed=failed, **parsed)
+                   source=f"desktop:{name}"[:80] if isinstance(name, str) else "desktop", failed=failed,
+                   strings=parse_strings(payload.get("strings")), **parsed)
+
+
+STRING_KEYS = ("speaker", "not_translated", "waiting", "reconnecting")
+_CONTROL = re.compile(r"[\x00-\x1f\x7f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def parse_strings(value: Any) -> tuple[tuple[str, str], ...]:
+    """The pane's localised words: known keys only, plain short text; ``speaker`` must hold ``{n}``."""
+    if value is None:
+        return ()
+    if not isinstance(value, dict):
+        raise ThemeError("strings must be an object")
+    out = []
+    for key in STRING_KEYS:
+        text = value.get(key)
+        if text is None:
+            continue
+        if not isinstance(text, str) or not text.strip() or len(text) > 60:
+            raise ThemeError(f"strings.{key} must be short text")
+        text = _CONTROL.sub("", text).strip()
+        if key == "speaker" and "{n}" not in text:
+            raise ThemeError("strings.speaker must contain {n}")
+        out.append((key, text))
+    return tuple(out)
 
 
 def palette_to_json(p: Palette) -> str:
@@ -232,9 +259,10 @@ def palette_from_json(raw: str) -> Optional[Palette]:
         speakers = tuple(Rgba(**c) for c in data.pop("speakers"))
         colors = {k: Rgba(**data.pop(k)) for k in COLOR_TOKENS}
         failed = Rgba(**data["failed"]) if data.get("failed") else None
+        strings = tuple((str(k), str(v)) for k, v in data.get("strings") or ())
         return Palette(speakers=speakers, dark=bool(data["dark"]), radius_px=float(data.get("radius_px", FALLBACK_RADIUS_PX)),
                        font=str(data.get("font", FALLBACK_FONT)), source=str(data.get("source", "desktop")),
-                       failed=failed, **colors)
+                       failed=failed, strings=strings, **colors)
     except (ValueError, TypeError, KeyError, AttributeError):
         return None
 

@@ -558,3 +558,55 @@ def test_a_failed_line_carries_a_marker():
     assert tok.FALLBACK[False].failed_color == tok.Rgba.hex("#cf2d56")
     assert tok.FALLBACK[True].failed_color == tok.Rgba.hex("#e75e78")
     assert tok.css_vars(tok.FALLBACK[True])["--failed"] == tok.Rgba.hex("#e75e78").css()
+
+
+def test_overlay_words_come_from_the_pane_and_survive_a_roll():
+    # Before: "Speaker N" and "Not translated" were English constants (A3 reaudit2 N8).
+    from hermeneus_engine.overlay.model import Strings
+    tr = Strings(speaker="Konuşmacı {n}", not_translated="Çevrilmedi", waiting="Konuşma bekleniyor",
+                 reconnecting="Yeniden bağlanıyor")
+    m = OverlayModel()
+    m.apply({"type": "hello", "seq": 1, "session": {"state": "live"}}, 0)
+    assert compose(m, 0, show_speaker=True, show_original=False, strings=tr)[2] == "Konuşma bekleniyor"
+    m.apply(line(2, "a", "failed", "Fast talk", "", "s1:speaker_0"), 0)
+    runs, _, _ = compose(m, 0, show_speaker=True, show_original=False, strings=tr)
+    assert [r.text for r in runs] == ["Konuşmacı 1", "Çevrilmedi", "Fast talk"]
+    m.apply(line(3, "b", "translated", "o", "aa bb cc dd ee ff gg", "s1:speaker_0"), 0)
+    view = build_view(m, 0, width=16, measure=chars, max_lines=2, show_speaker=True, show_original=False, strings=tr)
+    assert view.lines[0][0].text.strip() == "Konuşmacı 1"  # the re-added label keeps the pane's words
+
+
+def test_a_translated_line_without_text_shows_as_failed():
+    # One rule for strip and page (A3 reaudit2 N7): its original, with the marker.
+    m = OverlayModel()
+    m.apply(line(1, "a", "translated", "Hello", "  "), 0)
+    runs, _, _ = compose(m, 0, show_speaker=False, show_original=True)
+    assert [(r.text, r.kind) for r in runs] == [("Not translated", MARK), ("Hello", FAILED)]
+
+
+def test_theme_payload_strings_are_checked():
+    base = {"mode": "light", "colors": {"surface": "#ffffff", "text": "#000000", "text_secondary": "#000000bd",
+                                        "text_tertiary": "#0000008a", "stroke": "#00000020", "speakers": ["#0053fd"]}}
+    p = tok.palette_from_payload({**base, "strings": {"speaker": "Konuşmacı {n}", "not_translated": "Çevrilmedi‮",
+                                                      "other": "ignored"}})
+    assert dict(p.strings) == {"speaker": "Konuşmacı {n}", "not_translated": "Çevrilmedi"}
+    assert tok.palette_from_json(tok.palette_to_json(p)).strings == p.strings
+    for bad in ({"speaker": "Konuşmacı"}, {"waiting": ""}, {"reconnecting": "x" * 61}, "text"):
+        with pytest.raises(tok.ThemeError):
+            tok.palette_from_payload({**base, "strings": bad})
+    assert tok.palette_from_payload(base).strings == ()
+
+
+
+def test_a_marker_or_label_never_breaks_across_rows():
+    # Before: "Not translated" could end one row and start the next (A3 reaudit2 renders).
+    runs = [Run("aaaa bbbb", FAILED), Run("Not translated", MARK), Run("cc", FAILED)]
+    rows = wrap(runs, 18, chars, 3)
+    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb", "Not translated cc"]
+
+
+
+def test_a_marker_stays_with_the_first_word_it_introduces():
+    runs = [Run("aaaa bbbb cc", FAILED), Run("Mark", MARK), Run("dddd", FAILED)]
+    rows = wrap(runs, 17, chars, 3)
+    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb cc", "Mark dddd"]
