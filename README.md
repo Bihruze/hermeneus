@@ -74,7 +74,7 @@ Run the doctor first:
 hermes hermeneus doctor
 ```
 
-It checks the macOS version, which capture backends can run, the Multi-Output Device for the fallback, your ElevenLabs key (it prints "set (value not shown)", never the value), and the translation model. It never opens an audio stream and never asks macOS for a permission. Each line that is not `ok` comes with a `fix:` line. `hermes hermeneus doctor --json` prints the same checks as JSON.
+It checks the macOS version, which capture backends can run, the Multi-Output Device for the fallback, your ElevenLabs key (it prints "set (value not shown)", never the value), and the translation model. On a Mac with the process tap it also proves the System Audio Recording permission with real audio. A small separate process plays a short test tone, and the doctor captures that process for about half a second. When BlackHole or VB-Cable is installed the tone plays there, so you hear nothing. Otherwise it plays on your default output at a very low level (-53 dBFS), muted while it is captured; you may still hear a brief quiet tone. The first run asks macOS for the permission. `hermes hermeneus doctor --no-audio-check` skips this check. Each line that is not `ok` comes with a `fix:` line. `hermes hermeneus doctor --json` prints the same checks as JSON.
 
 The first time Hermeneus captures audio through a process tap, macOS asks for the System Audio Recording permission. The prompt names the app that runs Hermes: your terminal app (for example Terminal or iTerm) when you use the CLI, or Hermes when you use Desktop.
 
@@ -85,7 +85,7 @@ The first time Hermeneus captures audio through a process tap, macOS asks for th
 
 A session waits up to 30 seconds for capture to start while the prompt is open.
 
-The doctor cannot read this permission: macOS keeps it in a database that apps can read only by asking for it or with Full Disk Access. The doctor therefore shows the permission line as a warning with the fix above.
+Apps cannot read this permission directly: macOS keeps it in a database that apps can read only by asking for it or with Full Disk Access. The doctor therefore proves it with the test tone above. With `--no-audio-check` it shows the permission line as a warning with the fix above.
 
 > Screenshot placeholder (W16): docs/screenshots/permission-prompt.png, the macOS System Audio Recording prompt.
 >
