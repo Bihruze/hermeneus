@@ -35,8 +35,11 @@ READY_LINE = b"ready\n"
 
 # Where a slash command can open the overlay: surfaces whose user sits at this
 # Mac. A message from a chat platform (Telegram, Discord, ...) may come from
-# anywhere, so it is refused instead of opening a window nobody watches.
-LOCAL_PLATFORMS = frozenset({"", "cli", "tui", "desktop", "local"})
+# anywhere, so it is refused instead of opening a window nobody watches. Every
+# Hermes v0.23.1 dispatch site names its surface (cli.py:1287-1289 "cli",
+# tui_gateway/agent_factory.py:29-39 "tui"/"desktop", gateway/run_inbound_hooks.py:288-291
+# the platform's value), so a caller that names none is not local.
+LOCAL_PLATFORMS = frozenset({"cli", "tui", "desktop", "local"})
 
 
 class OverlayUnavailable(RuntimeError):
