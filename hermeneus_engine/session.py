@@ -81,6 +81,28 @@ FAILURE_MESSAGE_INTERVAL_S = 30.0
 SLOW_MODEL_LINES = 2
 SLOW_MODEL_WINDOW_S = 20.0
 
+# No audio, or only digital silence, for this long while live: the status
+# says so, and silent chunks are no longer sent to speech to text. Scribe
+# closes a socket after about 15 s without speech (A1 logs: reconnects at
+# 15.5 s with a muted source), so this is shorter than that, and much longer
+# than the VAD's end-of-speech pause, so a sentence always commits first.
+NO_AUDIO_S = 10.0
+
+_ZEROS: dict[int, bytes] = {}
+
+
+def _is_silent(pcm: bytes) -> bool:
+    """True for digital silence (every sample zero). A memcmp; real audio differs in its first bytes."""
+    if not pcm:
+        return True
+    zeros = _ZEROS.get(len(pcm))
+    if zeros is None:
+        if len(_ZEROS) > 32:
+            _ZEROS.clear()
+        zeros = _ZEROS.setdefault(len(pcm), bytes(len(pcm)))
+    return pcm == zeros
+
+
 # A spoken translation that starts (playback device, ElevenLabs socket) gets
 # this long before the change is reported as failed.
 SPEAKER_START_TIMEOUT_S = 15.0
@@ -215,6 +237,7 @@ class FrameQueue:
         self.bytes_in = 0
         self.chunks_dropped = 0
         self.bytes_dropped = 0
+        self.last_chunk = b""  # newest chunk handed on; the session samples it to notice silence
 
     def put(self, pcm: bytes, captured_ns: int) -> None:
         """Called from the capture thread."""
@@ -249,6 +272,8 @@ class FrameQueue:
             batch = list(self._chunks)
             self._chunks.clear()
             self._bytes = 0
+        if batch:
+            self.last_chunk = batch[-1][0]
         for pcm, captured_ns in batch:
             try:
                 self._consumer(pcm, captured_ns)
@@ -384,11 +409,16 @@ class TranslationSession:
         self._speaking = False
         self._want_speech = False
         self._settings_lock: Optional[asyncio.Lock] = None
+        self._quiet_since_ns = 0
+        self._last_chunks_in = -1
+        self._no_audio = False      # the no-audio message is showing
+        self._gated = False         # silent chunks are held back from speech to text
         self._applying: list[str] = []
         self._jobs: set[asyncio.Task] = set()
         self.stats: dict[str, int] = {"lines_committed": 0, "lines_translated": 0,
                                       "lines_failed": 0, "speak_errors": 0,
-                                      "sentences_released_early": 0, "settings_changes": 0}
+                                      "sentences_released_early": 0, "settings_changes": 0,
+                                      "silent_chunks_held": 0}
 
     # -- status -----------------------------------------------------------
 
@@ -547,6 +577,7 @@ class TranslationSession:
                 self._fail_soon(messages.capture_stopped(str(failure), self.options.source.label))
                 return
             self._check_speaker_health()
+            self._check_audio()
             # W02 seam: the tap's zero-buffer watchdog reports what it is doing
             # (for example rebuilding a silent tap) in ``status_message``.
             note = str(getattr(self._c.capture, "status_message", "") or "") if self._capture_started else ""
@@ -560,6 +591,61 @@ class TranslationSession:
                 continue
             if self._state in ("live", "reconnecting"):
                 self._publish_status()
+
+    def _check_audio(self) -> None:
+        """Every metrics tick: has the capture delivered sound in the last NO_AUDIO_S seconds?
+
+        No audio path cost while sound flows: the tick looks at the chunk
+        counter and the newest chunk only. Once digital silence has lasted
+        NO_AUDIO_S, the FrameQueue consumer becomes ``_gate_audio``, which
+        drops silent chunks and hands the first chunk with sound straight
+        back to speech to text.
+        """
+        fq = self._frames
+        if fq is None or not self._capture_started or self._gated or self._state not in ("live", "reconnecting"):
+            return
+        count = fq.chunks_in
+        if count == self._last_chunks_in:
+            kind = "none"
+        elif _is_silent(fq.last_chunk):
+            kind = "silent"
+        else:
+            kind = ""
+        self._last_chunks_in = count
+        if not kind:
+            self._quiet_since_ns = 0
+            if self._no_audio:
+                self._audio_back()
+            return
+        now = self._clock()
+        if not self._quiet_since_ns:
+            self._quiet_since_ns = now
+            return
+        if now - self._quiet_since_ns < NO_AUDIO_S * 1e9:
+            return
+        if kind == "silent":
+            self._gated = True
+            fq._consumer = self._gate_audio
+        if not self._no_audio:
+            self._no_audio = True
+            self._publish_status("live", messages.no_audio(self.options.source.label))
+
+    def _gate_audio(self, pcm: bytes, captured_ns: int) -> None:
+        """FrameQueue consumer while the source is silent."""
+        if _is_silent(pcm):
+            self.stats["silent_chunks_held"] += 1
+            return
+        self._gated = False
+        if self._frames is not None:
+            self._frames._consumer = self._c.stt.send_audio
+        self._c.stt.send_audio(pcm, captured_ns)
+        self._audio_back()
+
+    def _audio_back(self) -> None:
+        self._no_audio = False
+        self._quiet_since_ns = 0
+        if self._state in ("live", "reconnecting") and self._message.startswith("No audio from"):
+            self._publish_status("live", "live")
 
     def _ensure_speech_loop(self) -> None:
         if self._speech is None:
@@ -765,6 +851,10 @@ class TranslationSession:
                 self._fail_soon(messages.stt_failed(event.message or "the connection closed", event.error_type))
             return
         mapped = _STT_TO_SESSION.get(event.state)
+        if mapped and self._state not in ("stopping", "idle", "failed") and self._no_audio:
+            # Scribe closes an idle socket; with no sound that is expected, not a lost network.
+            self._publish_status("live", messages.no_audio(self.options.source.label))
+            return
         if mapped and self._state not in ("stopping", "idle", "failed"):
             if mapped == "reconnecting":
                 message = messages.stt_reconnecting(event.message, event.error_type)
@@ -802,7 +892,9 @@ class TranslationSession:
         if done.state == LineState.TRANSLATED:
             timings.setdefault("translated", self._clock())
             self.stats["lines_translated"] += 1
-            if self._failure_message and not self._recently_slow():
+            # A call that succeeded ends a slow-model or failure message at once.
+            self._slow_ns.clear()
+            if self._failure_message:
                 self._failure_message = ""
                 if self._state in ("live", "reconnecting"):
                     self._publish_status(message="")
@@ -814,12 +906,6 @@ class TranslationSession:
         if (line.state == LineState.TRANSLATED and line.translation and self._speaking
                 and self._speech is not None and not self.closed):
             self._speech.put_nowait((line.translation, line.target_language or self.options.target_language))
-
-    def _recently_slow(self) -> bool:
-        now = self._clock()
-        while self._slow_ns and now - self._slow_ns[0] > SLOW_MODEL_WINDOW_S * 1e9:
-            self._slow_ns.popleft()
-        return len(self._slow_ns) >= SLOW_MODEL_LINES
 
     # -- changes while running -----------------------------------------------------
 
