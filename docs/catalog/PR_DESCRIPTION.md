@@ -123,7 +123,7 @@ Validation passed.
 
 On a Mac with macOS 14.2 or later:
 
-1. `hermes plugins install hermeneus` and `hermes config set ELEVENLABS_API_KEY <key>`.
+1. `hermes plugins install hermeneus`, entering the key at its masked `ELEVENLABS_API_KEY` prompt (or later in Hermes Desktop under Settings > Tools & Keys).
 2. `hermes hermeneus doctor` lists each check with a fix for any gap. It plays a short quiet test tone to check capture; `hermes hermeneus doctor --no-audio-check` skips it.
 3. Play speech in any app, then `hermes hermeneus run --to tr`. Allow the System Audio Recording prompt on first use. Translated lines print in the terminal; Ctrl+C stops the session.
 4. In Hermes Desktop, turn on Hermeneus in Capabilities > Plugins, open the pane, pick a source, a language and a mode, and press Start.

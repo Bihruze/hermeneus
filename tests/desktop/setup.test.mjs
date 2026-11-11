@@ -407,3 +407,10 @@ test('Open System Settings calls the backend route directly, never openExternal 
   await ctrl.openPrivacySettings()
   assert.deepEqual(ctx.calls[0], { path: '/setup/open-privacy-settings', method: 'POST', body: {} })
 })
+
+test('the offline hint names the Backend status bar item and its power button (A6-13)', () => {
+  const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+
+  assert.match(source, /click Backend in the status bar, then the power button \(Restart gateway\)/)
+  assert.doesNotMatch(source, /open the gateway item in the status bar/)
+})

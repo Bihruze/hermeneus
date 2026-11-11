@@ -59,3 +59,14 @@ def test_fallback_needs_multi_output_and_missing_key_fails_without_printing_it(m
 def test_secret_value_is_never_printed(monkeypatch):
     report = run(monkeypatch, [Backend("process-tap", True)], secret="sk_live_secret_value")
     assert "sk_live_secret_value" not in report.render() and "sk_live" not in str(report.to_dict())
+
+
+def test_the_key_fix_never_puts_the_key_on_a_command_line():
+    """A6-14: the key goes in through Tools & Keys or the masked install prompt, never `config set <key>`."""
+    def unreadable(name):
+        raise RuntimeError("scope unavailable")
+
+    for getter in (unreadable, lambda name: None):
+        check = doctor._secret(getter)
+        assert check.ok is False and "config set" not in check.fix
+    assert "Tools & Keys" in doctor._secret(unreadable).fix

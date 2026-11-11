@@ -186,7 +186,8 @@ def _secret(get_secret: SecretGetter) -> Check:
         value = get_secret(SECRET_NAME)
     except Exception as exc:
         return Check(SECRET_NAME, False, f"could not be read in this profile: {type(exc).__name__}",
-                     f"run hermes plugins install again or add {SECRET_NAME} with hermes config set")
+                     f"add {SECRET_NAME} in Hermes Desktop under Settings > Tools & Keys, or at the masked prompt of "
+                     "hermes plugins install")
     if value:
         return Check(SECRET_NAME, True, "set (value not shown)")
     return Check(SECRET_NAME, False, "not set",

@@ -214,6 +214,8 @@ async def test_missing_plugin_libraries_ask_for_one_restart_not_a_skip(data_dir)
     state = check.state()
     assert state["state"] == "failed" and "Restart gateway" in state["message"] and "objc" in state["message"]
     assert "status bar" in state["message"] and "Quit and reopen" not in state["message"]
+    # A6-13: v0.23.1 labels the status bar item "Backend"; Restart gateway is its unlabelled power button.
+    assert "Click Backend" in state["message"] and "power button (Restart gateway)" in state["message"]
 
     check, _ = _check([ModuleNotFoundError("No module named 'numpy'", name="numpy")], data_dir)
     check.start()

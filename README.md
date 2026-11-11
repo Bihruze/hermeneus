@@ -22,8 +22,8 @@ This release is tested on macOS with real audio. Windows support is a preview: i
 
 1. **Install.** Open **Capabilities > Plugins** and press **Install from Git**. Enter `https://github.com/Bihruze/hermeneus`, press **Review repository**, then **Install**. Hermes installs the Python libraries Hermeneus needs, turns the plugin on and turns on its pane and status bar item. The pane opens by itself on **Set up live subtitles**. Once the catalog lists Hermeneus, its card's **Install** button does the same without the address.
    > Screenshot placeholder: docs/screenshots/quick-start-1-install.png, the Install plugin dialog.
-2. **Restart the gateway once.** Hermes puts the new libraries in a fresh environment that the gateway it is already running cannot load, so the pane's **System audio** step says the audio libraries are not loaded yet. Open the gateway item in Hermes's status bar (bottom of the window) and click **Restart gateway**. Quitting and reopening Hermes Desktop may not be enough: a gateway running in the background survives it. When the gateway is back, the pane reads the setup again by itself.
-   > Screenshot placeholder: docs/screenshots/quick-start-2-restart.png, Restart gateway in the status bar menu.
+2. **Restart the gateway once.** Hermes puts the new libraries in a fresh environment that the gateway it is already running cannot load, so the pane's **System audio** step says the audio libraries are not loaded yet. Click **Backend** in Hermes's status bar (bottom of the window), then the power button in its menu (its tooltip says **Restart gateway**). Quitting and reopening Hermes Desktop may not be enough: a gateway running in the background survives it. When the gateway is back, the pane reads the setup again by itself.
+   > Screenshot placeholder: docs/screenshots/quick-start-2-restart.png, the power button (Restart gateway) in the Backend menu.
 3. **ElevenLabs key.** Press **Create a key** (your browser opens ElevenLabs; give the key Speech to Text access, plus Text to Speech and Voices read if you want spoken translation). Then press **Add key in Hermes**: Hermes opens **Settings > Tools & Keys**. Click the `ELEVENLABS_API_KEY` field, paste the key and press **Save**; Hermes shows "Credential saved". The key goes into Hermes's own key store, never into a chat or into the pane. Within a few seconds the pane shows the key step as **Done**. (Desktop's own notification about the missing key has **Set it up**, which opens the same page; it may sit under "Show 2 more notifications".)
    > Screenshot placeholder: docs/screenshots/quick-start-3-key.png.
 4. **System audio.** In the pane, press **Allow system audio**. macOS asks for System Audio Recording for Hermes; click **Allow**. Hermeneus starts and stops a short muted test capture and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again**.
@@ -84,7 +84,7 @@ If Hermes installed the plugin disabled, turn it on:
 hermes plugins enable hermeneus
 ```
 
-Then add your ElevenLabs key. `hermes plugins install` asks for it at a masked prompt; to add or change it later, use **Settings > Tools & Keys** in Hermes Desktop. Either way the key does not pass through a chat, a command line or your shell history. (`hermes config set ELEVENLABS_API_KEY <key>` also works, but it leaves the key in your shell history.)
+Then add your ElevenLabs key. `hermes plugins install` asks for it at a masked prompt; to add or change it later, use **Settings > Tools & Keys** in Hermes Desktop. Either way the key does not pass through a chat, a command line or your shell history.
 
 Installed from a terminal, the pane and the status bar item stay off until you turn on the plugin's **Desktop** switch in Hermes Desktop under **Capabilities > Plugins** (press **Rescan** first if the row says "copying..."). Hermes switches the desktop half of a plugin package on only when Desktop's own install dialog installs it. See [Quick start](#quick-start).
 
@@ -334,7 +334,7 @@ Other providers go through the same Hermes route and are untested.
 
 ### Secret
 
-`ELEVENLABS_API_KEY` is declared under `requires_env` and read only through Hermes's secret scope (`agent.secret_scope.get_secret`), which follows the active profile. Set it with `hermes config set ELEVENLABS_API_KEY <key>`.
+`ELEVENLABS_API_KEY` is declared under `requires_env` and read only through Hermes's secret scope (`agent.secret_scope.get_secret`), which follows the active profile. Set it in Hermes Desktop under **Settings > Tools & Keys**, or at the masked prompt of `hermes plugins install`; both keep it off the command line and out of your shell history.
 
 ## Languages
 
@@ -419,7 +419,7 @@ Start with `hermes hermeneus doctor`. Its checks, and what to do when one is not
 | `audio source` | No capture backend can run | See the capture lines above it. |
 | `permission: microphone (virtual device)` | Fallback only; the first start asks macOS | Allow the app that runs Hermes under System Settings > Privacy & Security > Microphone, then start again. |
 | `system sound reaches the virtual device` | Fallback only; system output does not include the virtual device | Create a Multi-Output Device and choose it as the system output (see the next section). |
-| `ELEVENLABS_API_KEY` | Not set in this profile | Create a key at https://elevenlabs.io/app/settings/api-keys and run `hermes config set ELEVENLABS_API_KEY <key>`. |
+| `ELEVENLABS_API_KEY` | Not set in this profile | Create a key at https://elevenlabs.io/app/settings/api-keys and add it in Hermes Desktop under **Settings > Tools & Keys** (or at the masked prompt of `hermes plugins install`). |
 | `translation model` | Warning: `auxiliary.live_translate` has no model | Pick a fast model with `hermes model` (Configure auxiliary models > Live translation). |
 | `ffmpeg` | Never fails | Hermeneus does not need ffmpeg. |
 | `translation model feature` | The `live_translate` provider needs an optional Hermes feature that is not installed | Run the command in the fix line, for example `hermes pm install --extra anthropic`. |

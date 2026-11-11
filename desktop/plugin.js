@@ -1129,7 +1129,7 @@ const EN = {
   subtitlesIn: lang => `subtitles: ${lang}`,
   offline: 'Hermeneus backend unreachable',
   offlineHint:
-    'Turn on Hermeneus in Capabilities > Plugins (its Agent switch), then press Try again. If it stays unreachable, open the gateway item in the status bar and click Restart gateway so it loads the plugin.',
+    'Turn on Hermeneus in Capabilities > Plugins (its Agent switch), then press Try again. If it stays unreachable, click Backend in the status bar, then the power button (Restart gateway), so it loads the plugin.',
   source: 'Source',
   sourcePlaceholder: 'Choose a source',
   refreshSources: 'Refresh sources and devices',

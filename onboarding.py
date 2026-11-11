@@ -69,12 +69,13 @@ FALLBACK_LANGUAGE = "en"
 # Hermes installs plugin dependencies when the plugin is turned on, into a new environment; the
 # backend that was already running cannot import them until it restarts
 # (hermes_cli/plugins_activation.py:75-79). Quitting Desktop is not enough: a detached gateway
-# survives it and is re-attached. Desktop's own control is "Restart gateway", the power button in
-# the menu of the gateway item in its status bar (apps/desktop/src/i18n/en.ts:2433,
-# app/shell/gateway-menu-panel.tsx:194-205).
+# survives it and is re-attached. Desktop's own control is "Restart gateway", an unlabelled power
+# button (the name is only its tooltip) in the menu of the status bar item labelled "Backend"
+# (apps/desktop/src/i18n/en.ts:2433, app/shell/gateway-menu-panel.tsx:194-205,
+# app/shell/hooks/use-statusbar-items.tsx:549-554).
 RESTART_ACTION = "Restart gateway"
-RESTART_MESSAGE = ("Hermeneus's audio libraries ({module}) are not loaded in this Hermes yet. Open the "
-                   "gateway item in Hermes's status bar (bottom of the window), click Restart gateway, "
+RESTART_MESSAGE = ("Hermeneus's audio libraries ({module}) are not loaded in this Hermes yet. Click Backend "
+                   "in Hermes's status bar (bottom of the window), then the power button (Restart gateway), "
                    "wait for it to reconnect, then press Check again.")
 STILL_FINISHING_MESSAGE = ("The last audio check is still finishing in the background. If macOS is showing "
                            "a prompt, answer it, wait a few seconds, then press Check again.")
