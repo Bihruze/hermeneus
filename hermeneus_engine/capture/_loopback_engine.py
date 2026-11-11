@@ -291,19 +291,21 @@ class LoopbackCapture:
             self.stats.sample_format = stream.sample_format
             self.stats.target_pid = target
         if old is not None:
-            self._retire(old)
+            self.stats.teardown_failures.extend(self._retire(old))
 
     def _pump_running(self) -> bool:
         pump = self._pump
         return pump is not None and pump.is_alive() and pump is not threading.current_thread()
 
-    def _retire(self, stream) -> None:
-        """Close ``stream`` now when no pump can be waiting on it, else hand it to the pump."""
+    def _retire(self, stream) -> list[str]:
+        """Close ``stream`` now when no pump can be waiting on it, else hand it to the pump.
+
+        Returns the failures of a close done here (none when the pump will close it)."""
         if self._pump_running():
             with self._lock:
                 self._retired.append(stream)
-            return
-        self.stats.teardown_failures.extend(_close(stream))
+            return []
+        return _close(stream)
 
     def _close_retired(self) -> None:
         """Pump thread, between waits: close the streams other threads took out of service."""
@@ -318,14 +320,16 @@ class LoopbackCapture:
             stream, self._stream = self._stream, None
         if stream is None:
             return []
-        before = len(self.stats.teardown_failures)
-        self._retire(stream)
-        failures = self.stats.teardown_failures[before:]
-        del self.stats.teardown_failures[before:]
-        return failures
+        return self._retire(stream)
 
     def close(self) -> list[str]:
-        """Stop the pump and release the stream. Safe to call more than once; never raises."""
+        """Stop the pump and release the stream. Safe to call more than once; never raises.
+
+        A tick thread that is inside an activation (up to ACTIVATE_TIMEOUT_S per format) is not
+        waited for beyond the join timeout: it keeps running until that activation returns, then
+        closes the stream it got without starting it (``_build``), or until the worker process
+        exits. The worker exits right after this returns, inside the parent's stop window
+        (README, Windows assumptions, R24)."""
         self._stopping.set()
         for t in (self._pump, self._ticker):
             if t is not None and t is not threading.current_thread():
@@ -383,6 +387,7 @@ class LoopbackCapture:
             return
         stream.wait(WAIT_S)  # outside the lock; only this thread ever closes a stream it may wait on
         self._close_retired()
+        out: list = []
         with self._lock:
             if self._stream is not stream:
                 return  # rebuilt while waiting
@@ -398,12 +403,19 @@ class LoopbackCapture:
             now_ns = self._clock_ns()
             qpc_now = self._hal.qpc_now_100ns() if packets else 0
             for p in packets:
-                self._convert(p, now_ns, qpc_now)
+                chunk = self._convert(p, now_ns, qpc_now)
+                if chunk is not None:
+                    out.append(chunk)
+        # Delivered after the lock is released: on_pcm writes to the parent's pipe and may block,
+        # and close() or a rebuild must not wait behind that write.
+        for pcm, ts in out:
+            self._on_pcm(pcm, ts)
 
-    def _convert(self, p, now_ns: int, qpc_now: int) -> None:
+    def _convert(self, p, now_ns: int, qpc_now: int) -> Optional[tuple[bytes, int]]:
+        """Engine PCM and its timestamp for one packet, or None when it yields no output."""
         stream, resampler = self._stream, self._resampler
         if stream is None or resampler is None or p.frames <= 0:
-            return
+            return None
         stats = self.stats
         channels = int(stream.channels)
         rate = int(stream.sample_rate)
@@ -444,7 +456,8 @@ class LoopbackCapture:
         if out.shape[0]:
             ts = now_ns - age_ns + int(round((resampler.output_time(k0) - block_start) * 1e9 / rate))
             stats.samples_out += int(out.shape[0])
-            self._on_pcm(float_to_s16le(out), ts)
+            return float_to_s16le(out), ts
+        return None
 
     # ------------------------------------------------------------------ periodic work
 

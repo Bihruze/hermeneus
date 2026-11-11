@@ -623,3 +623,44 @@ def test_w20_real_sounddevice_has_wasapi_settings_with_auto_convert():
 
     import sounddevice
     assert "auto_convert" in inspect.signature(sounddevice.WasapiSettings).parameters
+
+
+# ---------------------------------------------------------------- O1 to O3 (A4 re-audit 2)
+
+def test_o1_pcm_is_delivered_after_the_lock_is_released():
+    hal = hal_with_tree()
+    in_sink, release = threading.Event(), threading.Event()
+
+    def blocking_sink(pcm, ts):  # like a full stdout pipe to the parent
+        in_sink.set()
+        release.wait(2.0)
+
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), blocking_sink)
+    cap.open(start_pump=False)
+    hal.feed(sine(4800))
+    t = threading.Thread(target=cap.pump_once)
+    t.start()
+    assert in_sink.wait(1.0)
+    got = cap._lock.acquire(timeout=0.2)  # close() and rebuilds take this lock
+    if got:
+        cap._lock.release()
+    release.set()
+    t.join(2.0)
+    cap.close()
+    assert got
+
+
+def test_o2_release_returns_the_close_failure_once():
+    hal = hal_with_tree()
+    hal.close_failures = ["stop audio client: 0x88890004"]
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    cap.stats.teardown_failures.append("earlier failure")
+    assert cap._release() == ["stop audio client: 0x88890004"]
+    assert cap.stats.teardown_failures == ["earlier failure"]
+    cap.close()
+
+
+def test_o3_close_documents_a_tick_thread_inside_activation():
+    doc = LoopbackCapture.close.__doc__ or ""
+    assert "inside an activation" in doc and "R24" in doc
