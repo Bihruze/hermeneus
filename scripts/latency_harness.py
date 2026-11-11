@@ -24,6 +24,7 @@ import os
 import random
 import resource
 import signal
+import stat
 import subprocess
 import sys
 import threading
@@ -40,6 +41,7 @@ if str(ROOT) not in sys.path:
 
 from hermeneus_engine import contracts as c  # noqa: E402
 from hermeneus_engine import metrics as m  # noqa: E402
+from hermeneus_engine.components import SECRET_NAME  # noqa: E402
 
 DEFAULT_OUT = Path.home() / "Desktop" / "agent-reports" / "hermeneus" / "gates"
 G1_MIN_SECONDS = 600.0
@@ -82,8 +84,49 @@ def load_spec(spec: str) -> Any:
     return obj
 
 
-def env_secrets(name: str) -> Optional[str]:
-    return os.environ.get(name) or None
+def no_secrets(name: str) -> Optional[str]:
+    """The default secret getter. Fake-backed runs need no key, and the harness never reads
+    credentials from the process environment."""
+    return None
+
+
+class KeyFileSecrets:
+    """Serves the ElevenLabs key from a file the user names with ``--key-file``.
+
+    The file must be a regular file owned by the user, readable by nobody else (mode 600 or
+    stricter), outside the repository, and hold only the key. A ``NAME=value`` file such as a
+    Hermes ``.env`` is refused: the harness does not parse Hermes secret stores. Every other
+    secret name resolves to None. The value never appears in ``repr`` or in the summary.
+    """
+
+    def __init__(self, path: str | os.PathLike, *, name: str = SECRET_NAME, repo_root: Path = ROOT):
+        p = Path(path).expanduser()
+        try:
+            st = p.stat()
+        except OSError as exc:
+            raise SystemExit(f"--key-file {p}: {exc.strerror}") from None
+        if not stat.S_ISREG(st.st_mode):
+            raise SystemExit(f"--key-file {p}: not a regular file")
+        if st.st_uid != os.getuid():
+            raise SystemExit(f"--key-file {p}: owned by another user")
+        if st.st_mode & 0o077:
+            raise SystemExit(f"--key-file {p}: readable by other users; run chmod 600 {p}")
+        resolved = p.resolve()
+        root = Path(repo_root).resolve()
+        if resolved == root or root in resolved.parents:
+            raise SystemExit(f"--key-file {p}: inside the repository; keep keys outside it")
+        text = p.read_text(encoding="utf-8").strip()
+        if not text or any(ch.isspace() for ch in text) or "=" in text:
+            raise SystemExit(f"--key-file {p}: must hold only the key, on one line, with no NAME= prefix")
+        self.name = name
+        self.path = resolved
+        self._value = text
+
+    def __call__(self, name: str) -> Optional[str]:
+        return self._value if name == self.name else None
+
+    def __repr__(self) -> str:
+        return f"KeyFileSecrets({self.name} from {self.path})"
 
 
 # --------------------------------------------------------------------------
@@ -535,7 +578,7 @@ class RunConfig:
     gap_tolerance_ms: float = 2.0
     context_segments: int = 3
     gate: Optional[str] = None
-    secrets: c.SecretGetter = env_secrets
+    secrets: c.SecretGetter = no_secrets
     extra: dict = field(default_factory=dict)
 
     def describe(self) -> dict:
@@ -560,6 +603,7 @@ class RunConfig:
             "duration_s": self.duration_s,
             "loop": self.loop,
             "gate": self.gate,
+            "secrets": "key-file" if isinstance(self.secrets, KeyFileSecrets) else "none",
         }
 
 
@@ -1104,7 +1148,11 @@ Factory specs are module:attribute, imported from the repo root:
                async start(), send_audio(pcm, capture_ns), async close(), optional stats()
   --translator factory(secrets) -> Translator
   --speaker    factory(secrets) -> Speaker
-Secrets come from environment variables, for example ELEVENLABS_API_KEY.
+Secrets: the harness reads no credentials from environment variables. Runs with
+fake or keyless factories need no key; every factory gets a getter that returns
+None. Real ElevenLabs runs take --key-file PATH: a file you own, mode 600,
+outside the repository, holding only the key. The getter then returns it for
+ELEVENLABS_API_KEY and None for every other name.
 
 Speech output stages: a Speaker reports first audio and playback start with
 hermeneus_engine.metrics.mark_current(Stage.TTS_FIRST_AUDIO) inside speak(), or
@@ -1198,6 +1246,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     r.add_argument("--sample-interval", type=float, default=1.0, help="CPU and RSS sample period in s")
     r.add_argument("--gap-tolerance-ms", type=float, default=2.0, help="capture timestamp slack before a gap counts")
     r.add_argument("--gate", help="G1 requires at least 600 s of audio")
+    r.add_argument("--key-file", help="file holding only the ElevenLabs key (mode 600, outside the repo)")
     r.add_argument("--label", default="run")
     r.add_argument("--out", help=f"output directory (default {DEFAULT_OUT}/<time>-<label>)")
 
@@ -1233,6 +1282,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     if args.gate and args.gate.upper() == "G1" and (args.duration or 0) < G1_MIN_SECONDS:
         raise SystemExit(f"--gate G1 needs --duration {G1_MIN_SECONDS:.0f} or more")
     runs = _matrix(args)
+    if args.key_file:
+        getter = KeyFileSecrets(args.key_file)
+        for cfg in runs:
+            cfg.secrets = getter
     stamp = _dt.datetime.now().strftime("%Y%m%d-%H%M%S")
     out = Path(args.out).expanduser() if args.out else DEFAULT_OUT / f"{stamp}-{args.label}"
     results = asyncio.run(_run_all(runs))
