@@ -284,7 +284,7 @@ def _port_in_use(port: int) -> bool:
 
     The listening socket uses SO_REUSEADDR so that a restart is not blocked by
     connections still in TIME_WAIT. On macOS that option also lets a bind to
-    127.0.0.1 succeed beside another program's 0.0.0.0 listener, so a connect
+    127.0.0.1 succeed beside another program's wildcard (all interfaces) listener, so a connect
     probe finds that program first.
     """
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
@@ -322,6 +322,8 @@ class OverlayPageServer:
                  theme_file: Optional[Callable[[], Optional[Path]]] = None) -> None:
         self.requested_port = port
         self.port = port
+        # (host, port) the listening socket reports once bound; host is always 127.0.0.1.
+        self.bound_address: Optional[tuple] = None
         self.token = token or secrets.token_urlsafe(24)
         self._events = events
         self._settings = settings
@@ -344,7 +346,8 @@ class OverlayPageServer:
     def start(self) -> None:
         """Bind, then serve on a new thread. Raises OverlayPageError (the bind happens here, on the caller)."""
         sock = bind_loopback(self.requested_port)
-        self.port = sock.getsockname()[1]
+        self.bound_address = sock.getsockname()
+        self.port = self.bound_address[1]
         ready = threading.Event()
         failure: list[BaseException] = []
 

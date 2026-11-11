@@ -107,24 +107,28 @@ def server():
 # -- server --------------------------------------------------------------------------
 
 def test_server_binds_loopback_only(server):
-    sock_name = None
-    # The listening address the kernel reports for the server's port.
-    with socket.create_connection(("127.0.0.1", server.port), timeout=2) as c:
-        sock_name = c.getpeername()
-    assert sock_name == ("127.0.0.1", server.port)
+    # The listening socket's own address, as the kernel reports it. No other address is touched.
+    assert server.bound_address == ("127.0.0.1", server.port)
     assert server.url == f"http://127.0.0.1:{server.port}/{server.token}/"
     assert overlay_page.HOST == "127.0.0.1"
-    # Reaching the same port through any non-loopback address of this Mac is refused.
-    # The address of the default route's interface. A UDP connect sends no packet.
+
+
+def test_bind_path_only_ever_names_loopback(monkeypatch):
+    bound = []
+    real_bind = socket.socket.bind
+
+    class Recording(socket.socket):
+        def bind(self, address):
+            bound.append(address)
+            return real_bind(self, address)
+
+    monkeypatch.setattr(overlay_page.socket, "socket", Recording)
+    sock = overlay_page.bind_loopback(0)
     try:
-        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as u:
-            u.connect(("192.0.2.1", 9))
-            lan = u.getsockname()[0]
-    except OSError:
-        lan = None
-    if lan and not lan.startswith("127."):
-        with pytest.raises(OSError):
-            socket.create_connection((lan, server.port), timeout=1).close()
+        assert sock.getsockname()[0] == "127.0.0.1"
+    finally:
+        sock.close()
+    assert bound == [("127.0.0.1", 0)]
 
 
 def test_token_is_required(server):
@@ -308,15 +312,50 @@ def test_resume_uses_last_event_id():
 
 
 def test_a_busy_port_is_an_error_not_another_port():
-    for address in ("127.0.0.1", "0.0.0.0"):
-        with socket.socket() as other:
-            other.bind((address, 0))
-            other.listen(1)
-            port = other.getsockname()[1]
-            srv = overlay_page.OverlayPageServer(port=port, events=fake_events, settings=dict)
-            with pytest.raises(overlay_page.OverlayPageError, match=f"port {port} on 127.0.0.1 is already in use"):
-                srv.start()
-            assert not srv.running
+    with socket.socket() as other:
+        other.bind(("127.0.0.1", 0))
+        other.listen(1)
+        port = other.getsockname()[1]
+        srv = overlay_page.OverlayPageServer(port=port, events=fake_events, settings=dict)
+        with pytest.raises(overlay_page.OverlayPageError, match=f"port {port} on 127.0.0.1 is already in use"):
+            srv.start()
+        assert not srv.running
+
+
+def test_a_listener_found_by_the_probe_stops_the_bind(monkeypatch):
+    # Another program's wildcard listener answers the 127.0.0.1 connect probe. The probe result
+    # is simulated here, so the test never opens a socket on any other address.
+    monkeypatch.setattr(overlay_page, "_port_in_use", lambda port: True)
+    binds = []
+    monkeypatch.setattr(overlay_page.socket.socket, "bind", lambda self, address: binds.append(address))
+    with pytest.raises(overlay_page.OverlayPageError, match="already in use"):
+        overlay_page.bind_loopback(47999)
+    assert binds == []
+
+
+def test_the_probe_connects_to_loopback_only(monkeypatch):
+    seen = []
+
+    class Probe:
+        def __init__(self, *a):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def settimeout(self, t):
+            pass
+
+        def connect_ex(self, address):
+            seen.append(address)
+            return 61
+
+    monkeypatch.setattr(overlay_page.socket, "socket", Probe)
+    assert overlay_page._port_in_use(47999) is False
+    assert seen == [("127.0.0.1", 47999)]
 
 
 def test_restart_on_the_same_port_after_connections(server):
