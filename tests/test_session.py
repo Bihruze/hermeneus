@@ -339,3 +339,21 @@ async def test_model_failure_reason_reaches_the_status_once(data_dir):
             messages.append(e["message"])
     assert messages.count("Translation failed: the model provider reports insufficient credits (nous).") == 1
     await rt.close()
+
+
+async def test_lines_of_a_session_owned_elsewhere_stay_after_it_ends(data_dir):
+    """F27: the pane asks the gateway for /lines?after=<last seq> after a CLI session ended."""
+    from hermeneus_engine.control import Controller
+    rt, rig = await started(data_dir)
+    gateway = Controller(lambda: data_dir, owner="gateway")
+    rig.stt.emit(CommittedTranscript("hello there", segment_index=0))
+    await wait_for(lambda: any(l.state == LineState.TRANSLATED for l in rt.bus.lines()))
+    page = await gateway.lines(None)
+    assert page["reset"] is True and any(e["type"] == "line" for e in page["events"])
+    seen = page["seq"]
+    await rt.close()
+    after = await gateway.lines(seen)
+    assert after["reset"] is False  # the pane keeps the lines it has
+    assert [e["type"] for e in after["events"]] == ["status"] and after["events"][0]["state"] == "idle"
+    fresh = await gateway.lines(None)
+    assert fresh["reset"] is True  # a pane that has nothing gets an empty snapshot

@@ -4,6 +4,7 @@ import io
 import json
 import os
 import signal
+import sys
 import time
 
 import pytest
@@ -252,3 +253,25 @@ async def test_llm_call_turns_provider_errors_into_translation_errors():
     call = pkg.glue.make_llm_call(Failing(), provider="openai")
     with pytest.raises(TranslationError, match="rejected the credentials"):
         await call([{"role": "user", "content": "x"}])
+
+
+def test_install_hint_format_is_pinned():
+    # Same command Hermes prints for a missing extra (pm/extras.py:212-214).
+    assert pkg.glue._install_hint("anthropic") == "hermes pm install --extra anthropic"
+
+
+def test_missing_model_extra_checks_the_sdk_module(monkeypatch):
+    import types
+    glue = pkg.glue
+    fake = types.ModuleType("providers")
+    profiles = {"anthropic": types.SimpleNamespace(api_mode="anthropic_messages"),
+                "bedrock": types.SimpleNamespace(api_mode="bedrock_converse"),
+                "openrouter": types.SimpleNamespace(api_mode="chat_completions")}
+    fake.get_provider_profile = profiles.get
+    monkeypatch.setitem(sys.modules, "providers", fake)
+    present = {"anthropic"}
+    monkeypatch.setattr(glue, "_importable", lambda module: module in present)
+    assert glue.missing_model_extra("anthropic") is None
+    assert glue.missing_model_extra("bedrock") == "bedrock"  # boto3 missing
+    assert glue.missing_model_extra("openrouter") is None
+    assert glue.missing_model_extra("auto") is None
