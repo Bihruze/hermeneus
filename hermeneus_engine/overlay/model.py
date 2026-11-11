@@ -251,15 +251,27 @@ def wrap(runs: list[Run], width: float, measure: Measure, max_lines: int) -> tup
     lines: list[list[tuple[str, Run]]] = [[]]
     used = 0.0
     tokens = _tokens(runs)
+    tags_fit = True
     for index, (word, run) in enumerate(tokens):
         trimmed = word.rstrip()
         need = measure(trimmed, run)
-        # A label or marker stays on the row of the first word it introduces.
-        glued = need
-        if run.kind in (LABEL, MARK) and index + 1 < len(tokens) and tokens[index + 1][1].kind not in (LABEL, MARK):
-            nxt_word, nxt_run = tokens[index + 1]
-            glued = measure(word, run) + measure(nxt_word.rstrip(), nxt_run)
-        if lines[-1] and used + (glued if glued <= width else need) > width:
+        # A speaker label and a marker stay together, on the row of the first word they introduce.
+        # When the three do not fit on one row, the label and marker keep a row and the text breaks.
+        tag = run.kind in (LABEL, MARK)
+        after_tag = index > 0 and tokens[index - 1][1].kind in (LABEL, MARK)
+        breaking = need
+        if tag and not after_tag:
+            group, j = 0.0, index
+            while j < len(tokens) and tokens[j][1].kind in (LABEL, MARK):
+                group += measure(tokens[j][0], tokens[j][1])
+                j += 1
+            tags_only = group - (measure(tokens[j - 1][0], tokens[j - 1][1]) - measure(tokens[j - 1][0].rstrip(), tokens[j - 1][1]))
+            with_word = group + (measure(tokens[j][0].rstrip(), tokens[j][1]) if j < len(tokens) else 0.0)
+            breaking = with_word if with_word <= width else (tags_only if tags_only <= width else need)
+            tags_fit = tags_only <= width
+        elif tag and after_tag and tags_fit:
+            breaking = 0.0  # placed with the label before it
+        if lines[-1] and used + breaking > width:
             lines.append([])
             used = 0.0
         if need > width:
