@@ -25,6 +25,26 @@ from .hermeneus_engine.runtime import SessionBusy, SessionRuntime, lock_holder
 from .hermeneus_engine.ipc import SessionClient, SessionUnavailable
 from .hermeneus_engine.runtime import socket_path
 from .hermeneus_engine.overlay.service import OverlayService, OverlayUnavailable, describe as describe_window
+from .hermeneus_engine.overlay.control import LOCAL_PLATFORMS
+
+REMOTE_START_REFUSED = ("Hermeneus captures audio on this Mac, so start it from the Mac "
+                        "(terminal or Hermes Desktop).")
+
+
+def remote_refusal(platform: Optional[str], settings: dict) -> Optional[str]:
+    """The refusal for a capture request from a chat platform, or None when it may go ahead.
+
+    Hermes passes the caller's surface as the ``platform`` keyword: ``"cli"``
+    from the interactive CLI (cli.py:1287-1289), ``"tui"`` or ``"desktop"``
+    from the TUI gateway (tui_gateway/methods_tools.py:511,
+    tui_gateway/agent_factory.py:29-33), and the messaging platform's name,
+    such as ``"telegram"``, from the messaging gateway
+    (gateway/run_inbound_hooks.py:288-290, gateway/config.py:217-241).
+    The local set is the overlay's (overlay/control.py:39).
+    """
+    if (platform or "") in LOCAL_PLATFORMS or bool(settings.get("allow_remote_start", False)):
+        return None
+    return REMOTE_START_REFUSED
 
 SLASH_USAGE = ("usage: /translate start [--to LANG] [--source NAME] [--speak] "
                "[--device OUTPUT] [--voice VOICE_ID] | /translate set [--to LANG] [--mode subtitles|both|voice] "
@@ -144,6 +164,8 @@ class Plugin:
         except UsageError as exc:
             return f"{exc}\n{SLASH_USAGE}"
         sub, rest = (argv[0].lower(), argv[1:]) if argv else ("status", [])
+        if sub in ("start", "set") and (refusal := self._capture_refusal(sub, rest, context.get("platform"))):
+            return refusal
         if sub == "start":
             try:
                 status = await self.start(Choices.from_namespace(parse_slash_start(rest)),
@@ -172,6 +194,12 @@ class Plugin:
             except VoiceListError as exc:
                 return str(exc)
         return SLASH_USAGE
+
+    def _capture_refusal(self, sub: str, rest: list, platform: Optional[str]) -> Optional[str]:
+        """Start, and a set that changes the source, open audio capture here; refuse them from chat."""
+        if sub == "set" and "--source" not in rest and not any(a.startswith("--source=") for a in rest):
+            return None
+        return remote_refusal(platform, self.settings())
 
     async def slash_overlay(self, rest: list, platform: Optional[str]) -> str:
         action = rest[0].lower() if rest else "status"

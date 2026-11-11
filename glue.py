@@ -35,6 +35,7 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "output_device": "",
     "voice_id": "",
     "context_segments": 3,
+    "allow_remote_start": False,
     overlay_page.KEY_ENABLED: False,
     overlay_page.KEY_PORT: overlay_page.DEFAULT_PORT,
     **overlay_settings.DEFAULTS,

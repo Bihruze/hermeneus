@@ -4,6 +4,7 @@ import io
 import json
 import os
 import signal
+from pathlib import Path
 import sys
 import time
 
@@ -351,3 +352,44 @@ def test_missing_model_extra_checks_the_sdk_module(monkeypatch):
     assert glue.missing_model_extra("bedrock") == "bedrock"  # boto3 missing
     assert glue.missing_model_extra("openrouter") is None
     assert glue.missing_model_extra("auto") is None
+
+
+# -- S4: capture is started only from the Mac unless the user opts in ----------------------
+
+@pytest.mark.parametrize("platform", ["cli", "tui", "desktop"])
+async def test_start_is_allowed_from_the_mac(data_dir, platform):
+    plugin, _ = make_plugin(data_dir)
+    out = await plugin.slash("start --to tr --source BlackHole", platform=platform)
+    assert out.startswith("Translation is"), out
+    await plugin.slash("stop", platform=platform)
+
+
+@pytest.mark.parametrize("platform", ["telegram", "slack", "discord", "api_server"])
+async def test_start_and_source_change_are_refused_from_chat(data_dir, platform):
+    plugin, rig = make_plugin(data_dir)
+    out = await plugin.slash("start --to tr --source BlackHole", platform=platform)
+    assert out == commands.REMOTE_START_REFUSED
+    assert lock_holder(data_dir) is None and rig.scheduler is None  # nothing was captured
+    assert await plugin.slash("set --source BlackHole", platform=platform) == commands.REMOTE_START_REFUSED
+    assert await plugin.slash("set --source=BlackHole", platform=platform) == commands.REMOTE_START_REFUSED
+
+
+async def test_status_and_stop_work_from_chat(data_dir):
+    plugin, _ = make_plugin(data_dir)
+    await plugin.slash("start --to tr --source BlackHole", platform="cli")
+    assert "Translation is" in await plugin.slash("status", platform="telegram")
+    assert await plugin.slash("stop", platform="telegram") == "Translation is off."
+    assert lock_holder(data_dir) is None
+
+
+async def test_allow_remote_start_opts_in(data_dir):
+    plugin, _ = make_plugin(data_dir, settings={"allow_remote_start": True})
+    out = await plugin.slash("start --to tr --source BlackHole", platform="telegram")
+    assert out.startswith("Translation is"), out
+    await plugin.slash("stop", platform="telegram")
+
+
+def test_allow_remote_start_is_declared_off_by_default():
+    entry = (Path(__file__).resolve().parents[1] / "plugin.yaml").read_text().split("  allow_remote_start:\n", 1)[1]
+    assert entry.startswith("    type: bool\n    default: false\n")
+    assert pkg.glue.SETTING_DEFAULTS["allow_remote_start"] is False
