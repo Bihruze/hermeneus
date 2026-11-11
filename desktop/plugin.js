@@ -541,8 +541,31 @@ export const OVERLAY_COLOR_TOKENS = Object.freeze({
   text: '--ui-text-primary',
   text_secondary: '--ui-text-secondary',
   text_tertiary: '--ui-text-tertiary',
-  stroke: '--ui-stroke-secondary'
+  stroke: '--ui-stroke-secondary',
+  // The pane colours a failed line's caption with --ui-red; the overlays mark a failed line with it too.
+  failed: '--ui-red'
 })
+
+/** The look popover's choices: the offered values, plus the current one when it was set elsewhere
+ *  (the CLI or the Settings form take any size from 14 to 64 and any opacity from 0 to 100). */
+export function lookOptions(values, current) {
+  const list = [...values]
+
+  if (typeof current === 'number' && Number.isFinite(current) && !list.includes(current)) {
+    list.push(current)
+  }
+
+  return list.sort((a, b) => a - b)
+}
+
+/** The overlay buttons' tooltip: what a click does now, and while idle whether the overlay is armed. */
+export function overlayButtonLabel(t, running, overlay) {
+  if (running) {
+    return overlay.visible ? t('hideOverlay') : t('showOverlay')
+  }
+
+  return `${t('overlay')}: ${overlay.armed ? t('overlayArmed') : t('overlayNotArmed')}`
+}
 
 /** The body POST /overlay/theme takes, from values resolved on the pane's own element. */
 export function overlayThemePayload({ colors, font, mode, name, radius, speakers }) {
@@ -890,6 +913,7 @@ const EN = {
   statusBar: state => `Hermeneus: ${state}`,
   overlay: 'Subtitle overlay',
   overlayArmed: 'Opens with the next session',
+  overlayNotArmed: 'Off. Click to open it with the next session',
   overlayLook: 'Overlay look',
   overlayTextSize: 'Text size',
   overlayLines: 'Lines',
@@ -1369,7 +1393,7 @@ function Controls({ ctrl }) {
           // Look-and-feel proposal for Seher: while a session runs the button shows or hides the overlay;
           // while idle it arms the overlay for the next session.
           jsx(Tip, {
-            label: running ? t('overlay') : `${t('overlay')}: ${t('overlayArmed')}`,
+            label: overlayButtonLabel(t, running, overlay),
             children: jsx('span', {
               children: jsx(Button, {
                 'aria-label': t('overlay'),
@@ -1978,7 +2002,7 @@ function StatusChip({ ctrl }) {
   const overlay = useValue(ctrl.overlay)
   const running = RUNNING_STATES.has(session)
   const on = running ? overlay.visible : overlay.armed
-  const overlayLabel = running ? (on ? t('hideOverlay') : t('showOverlay')) : `${t('overlay')}: ${t('overlayArmed')}`
+  const overlayLabel = overlayButtonLabel(t, running, overlay)
 
   const chip = jsx(Tip, {
     label: last || t('statusBar', label),
@@ -2022,7 +2046,7 @@ function StatusChip({ ctrl }) {
  *  says to for drawing outside CSS (desktop-plugin-sdk.md:2119-2122), and sends them to the overlays.
  *  It reads nothing of the app's markup: every span below is rendered here. */
 function ThemeProbe({ ctrl }) {
-  const { renderedMode, themeName } = useTheme()
+  const { renderedMode, theme, themeName } = useTheme()
   const ref = useRef(null)
 
   useEffect(() => {
@@ -2047,7 +2071,8 @@ function ThemeProbe({ ctrl }) {
         speakers: SPEAKER_TOKENS.map((_, i) => read(colorCount + i, 'color'))
       })
     )
-  })
+    // Only a theme change re-reads the tokens; the status chip re-renders on every line.
+  }, [renderedMode, theme, themeName])
 
   return jsx('span', {
     'aria-hidden': true,
@@ -2078,7 +2103,10 @@ function OverlayLook({ ctrl }) {
         jsx(SegmentedControl, {
           disabled: overlay.busy,
           onChange: id => void ctrl.setOverlayLook({ [`overlay_${key}`]: Number(id) }),
-          options: values.map(v => ({ id: String(v), label: key === 'opacity' ? t('percent', v) : String(v) })),
+          options: lookOptions(values, look[key]).map(v => ({
+            id: String(v),
+            label: key === 'opacity' ? t('percent', v) : String(v)
+          })),
           value: String(look[key] ?? '')
         })
       ]
