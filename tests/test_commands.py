@@ -104,7 +104,7 @@ def test_slash_parser_never_exits():
 async def test_slash_start_status_stop(data_dir):
     plugin, rig = make_plugin(data_dir)
     out = await plugin.slash("start --to tr --source BlackHole")
-    assert out.startswith("Translation is") and "into tr" in out
+    assert out.startswith("Translation is") and "into Turkish" in out
     await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
     assert "live" in await plugin.slash("status")
     assert "already running" in await plugin.slash("start --to tr --source BlackHole")
@@ -266,12 +266,12 @@ async def test_slash_set_changes_a_running_session_and_refuses_without_one(data_
     await plugin.slash("start --to tr --source BlackHole")
     await wait_for(lambda: plugin.controller.local_bus.status()["state"] == "live")
     text = await plugin.slash("set --to de --speak on --device Speakers --voice v7")
-    assert text == ("Changed: subtitles now go into de from the next sentence. Applying spoken translation in "
+    assert text == ("Changed: subtitles now go into German from the next sentence. Applying spoken translation in "
                     "the background; /translate status shows the result.")
     bus = plugin.controller.local_bus
     await wait_for(lambda: bus.status()["mode"] == "both")
     status = await plugin.slash("status")
-    assert status == ("Translation is live from BlackHole 2ch into de. Spoken translation is on "
+    assert status == ("Translation is live from BlackHole 2ch into German. Spoken translation is on "
                       "(voice v7, output Speakers).")
     assert (await plugin.slash("set --mode voice")) == "Changed: mode is voice only (subtitles hidden)."
     assert (await plugin.slash("set --source 'All system'")).startswith("Applying source")
@@ -320,13 +320,13 @@ def test_start_body_mode_voice_hides_subtitles():
 def test_overlay_commands_refuse_cleanly_without_a_session(data_dir):
     plugin, _rig = make_plugin(data_dir)
     assert asyncio.run(plugin.slash("overlay")) == "The overlay is closed."
-    assert "no translation session" in asyncio.run(plugin.slash("overlay show", platform="cli"))
+    assert "No translation session is running." in asyncio.run(plugin.slash("overlay show", platform="cli"))
     assert "chat platform (telegram)" in asyncio.run(plugin.slash("overlay show", platform="telegram"))
     assert asyncio.run(plugin.slash("overlay sideways")) == commands.SLASH_USAGE
     out, err = io.StringIO(), io.StringIO()
     args = argparse.Namespace(overlay_action="show", json=False)
     assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 1
-    assert "no translation session" in err.getvalue()
+    assert "did not open. No translation session is running." in err.getvalue()
     args = argparse.Namespace(overlay_action="status", json=True)
     assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 0
     assert {k: v for k, v in json.loads(out.getvalue()).items() if k != "settings"} == {"visible": False, "pid": None, "armed": False}

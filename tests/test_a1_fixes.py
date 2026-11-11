@@ -171,3 +171,17 @@ async def test_e7_slash_set_refuses_a_voice_not_on_the_account(tmp_path):
     finally:
         plugin.unload()
         remove_tmpdir(data_dir)
+
+
+# -- E14: refusals are sentences; status names the language -------------------------------------
+
+def test_e14_overlay_refusal_is_a_sentence_and_status_names_the_language(tmp_path):
+    from plugin_loader import load_plugin_package
+    commands = load_plugin_package().commands
+    plugin = commands.Plugin(None, owner="test", settings=lambda: {}, data_dir=lambda: tmp_path,
+                             build=make_rig().build, list_sources=lambda: ([], []))
+    text = asyncio.run(plugin.slash("overlay show", platform="cli"))
+    assert text.startswith("The subtitle overlay did not open. No translation session is running. Start one first")
+    assert text.endswith("session.")
+    assert commands.describe_status({"state": "live", "target_language": "tr"}) == "Translation is live into Turkish."
+    assert commands.describe_status({"state": "live", "target_language": "xx-unknown"}).endswith("into xx-unknown.")

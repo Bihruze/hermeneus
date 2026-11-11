@@ -227,8 +227,17 @@ class Plugin:
             if action == "hide":
                 return describe_window(await self.overlay.hide())
         except OverlayUnavailable as exc:
-            return f"The subtitle overlay did not open: {exc}."
+            return f"The subtitle overlay did not open. {exc}"
         return describe_window(self.overlay.status())
+
+
+def language_name(code: str) -> str:
+    """Turkish for tr; an unknown code stays as it is (E14)."""
+    from .hermeneus_engine import languages
+    try:
+        return languages.get(code).english_name
+    except languages.UnknownLanguageError:
+        return code
 
 
 def describe_status(status: dict) -> str:
@@ -241,7 +250,7 @@ def describe_status(status: dict) -> str:
     if source.get("label"):
         parts.append(f"from {source['label']}")
     if status.get("target_language"):
-        parts.append(f"into {status['target_language']}")
+        parts.append(f"into {language_name(status['target_language'])}")
     text = " ".join(parts) + "."
     if status.get("speak"):
         voice = f" (voice {status['voice_id']}" if status.get("voice_id") else ""
@@ -266,7 +275,7 @@ def describe_set(result: dict) -> str:
     applying = result.get("applying") or []
     parts = []
     if "target_language" in accepted:
-        parts.append(f"subtitles now go into {accepted['target_language']} from the next sentence")
+        parts.append(f"subtitles now go into {language_name(accepted['target_language'])} from the next sentence")
     if "mode" in accepted:
         parts.append(f"mode is {_MODE_TEXT.get(accepted['mode'], accepted['mode'])}")
     if "voice_id" in accepted:
@@ -401,7 +410,7 @@ async def cmd_overlay(plugin: Plugin, args: argparse.Namespace, *, out: TextIO =
         else:
             result = plugin.overlay.status()
     except OverlayUnavailable as exc:
-        print(f"hermeneus: the subtitle overlay did not open: {exc}", file=err)
+        print(f"hermeneus: The subtitle overlay did not open. {exc}", file=err)
         return 1
     print(json.dumps(result) if getattr(args, "json", False) else describe_window(result), file=out)
     return 0
