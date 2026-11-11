@@ -1,7 +1,10 @@
 """``hermes hermeneus doctor``: what this Mac needs, in plain words, with a fix for each gap.
 
-The doctor never opens an audio stream, never prompts for a permission and
-never prints a secret.
+The doctor never prints a secret. Unless ``audio_check`` is off (the
+``--no-audio-check`` flag), it runs one real capture on a Mac with process
+taps: ``capture/tap_doctor.py`` plays a short quiet test tone from a helper
+process and taps it. That check opens an audio stream and, the first time on a
+Mac, makes macOS show the System Audio Recording prompt.
 """
 
 from __future__ import annotations
