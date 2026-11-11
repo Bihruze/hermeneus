@@ -360,13 +360,9 @@ class MacPanel:
         target = NSMakeRect(frame.x, frame.y, frame.w, frame.h)
         current = self.strip.frame()
         moving_only = abs(current.size.height - frame.h) < 0.5 and abs(current.size.width - frame.w) < 0.5
-        if self.strip.isVisible() and self.motion() and not moving_only:
-            def grow(context):
-                context.setDuration_(FADE_S)
-                self.strip.animator().setFrame_display_(target, True)
-            NSAnimationContext.runAnimationGroup_completionHandler_(grow, self._place_handles)
-        else:
-            self.strip.setFrame_display_(target, True)
+        # A height change animates (AppKit's resize animation, about 0.2 s) unless motion is reduced.
+        animate = bool(self.strip.isVisible() and self.motion() and not moving_only)
+        self.strip.setFrame_display_animate_(target, True, animate)
         self._place_handles(frame)
 
     def _place_handles(self, frame: Optional[Rect] = None) -> None:
