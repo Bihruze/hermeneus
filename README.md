@@ -4,9 +4,11 @@
 
 Live translation for Hermes.
 
-In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* means interpreter, a person who carries speech from one language into another. English *hermeneutics*, the study of interpretation, comes from the same word family. The Greeks linked the word to Hermes; modern dictionaries treat its origin as uncertain. Hermes Agent carries the messenger's name. Hermeneus is the interpreter that works beside it: it listens to any voice playing on your computer and gives it to you in your own language, as subtitles or as speech.
+Hermeneus is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/), an open-source AI agent that you use from a terminal, from chat apps or from the Hermes Desktop app.
 
-<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build with the owner. -->
+In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* means interpreter, a person who carries speech from one language into another. English *hermeneutics*, the study of interpretation, comes from the same word family. The Greeks linked the word to Hermes; modern scholars find no agreed origin for it. Hermes Agent carries the messenger's name. Hermeneus is the interpreter that works beside it: it listens to any voice playing on your computer and gives it to you in your own language, as subtitles or as speech.
+
+<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build. -->
 ![The floating subtitle strip translating a live news stream into Turkish](docs/media/strip-live.gif)
 
 <!-- CAPTURE-PENDING: docs/media/pane.png, the Hermeneus pane in Hermes Desktop during a session. -->
