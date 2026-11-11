@@ -33,6 +33,11 @@ def _recording_import(name, globals=None, locals=None, fromlist=(), level=0):
     return _real_import(name, globals, locals, fromlist, level)
 builtins.__import__ = _recording_import
 from hermeneus_engine import components, control, doctor, ipc, options, runtime, session
+from hermeneus_engine.overlay import control as overlay_control
+try:
+    overlay_control.check_available()
+except overlay_control.OverlayUnavailable:
+    pass
 from hermeneus_engine.tts import routing, playback
 names = [b.name for b in components.capture_backends()]
 avail = {{b.name: b.available()[0] for b in components.capture_backends()}}
