@@ -52,9 +52,13 @@ _runtime = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.runtime")
 _contracts = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.contracts")
 _ipc = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.ipc")
 _voice_catalog = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.tts.voice_catalog")
+_onboarding = importlib.import_module(f"{_PACKAGE_NAME}.onboarding")
 
 router = APIRouter()
 plugin = _commands.Plugin(None, owner="gateway")
+# The first-run audio check. It reads the data dir through ``plugin`` at call time, so a test's plugin is used.
+audio_check = _onboarding.AudioCheck(_onboarding.real_check, lambda: plugin.controller.data_dir,
+                                     available=_onboarding.process_tap_available)
 
 
 def _error(status: int, message: str, **extra: Any) -> JSONResponse:
@@ -165,6 +169,46 @@ async def overlay_theme(body: Optional[dict] = Body(default=None)):
         return await asyncio.to_thread(plugin.overlay.set_theme, body)
     except _commands.ThemeError as exc:
         return _error(400, str(exc))
+
+
+@router.get("/setup")
+async def setup(locale: list[str] = Query(default=[])) -> dict:
+    """What the pane's first-run setup shows. ``locale`` is the Desktop app's system languages, in order.
+
+    Answers at once: it reads config and whether the key is set (never its value), and the last audio check.
+    """
+    settings = plugin.settings()
+    language = _onboarding.default_language(saved=settings.get("target_language"),
+                                            hermes_language=_glue.display_language(),
+                                            client_locales=locale, system=_onboarding.system_locale())
+    return _onboarding.setup_state(key_set=_onboarding.key_is_set(_glue.get_secret),
+                                   audio=await asyncio.to_thread(audio_check.state),
+                                   model=_onboarding.model_route(_glue.aux_config(), _glue.main_config()),
+                                   language=language)
+
+
+@router.post("/setup/audio-check")
+async def setup_audio_check(request: Request):
+    """Start and stop the real capture once (the macOS prompt appears the first time). Answers at once;
+    GET /setup reports the result."""
+    if _surface(request) != "desktop":
+        return _error(403, _commands.REMOTE_START_REFUSED)
+    status = await plugin.controller.status()
+    if status.get("state") in ("starting", "live", "reconnecting", "stopping"):
+        return _error(409, "a session is running; stop it first, then check the audio again")
+    return audio_check.start()
+
+
+@router.post("/setup/open-privacy-settings")
+async def setup_open_privacy(request: Request):
+    """Open Screen & System Audio Recording in System Settings on this Mac."""
+    if _surface(request) != "desktop":
+        return _error(403, _commands.REMOTE_START_REFUSED)
+    try:
+        await asyncio.to_thread(_onboarding.open_privacy_settings)
+    except Exception as exc:
+        return _error(500, f"System Settings did not open ({exc}). Open {_onboarding.PRIVACY_PANE} yourself.")
+    return {"ok": True}
 
 
 @router.get("/devices")

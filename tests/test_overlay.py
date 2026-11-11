@@ -41,7 +41,7 @@ def chars(text, run):  # one unit per character; labels are as wide as their tex
 
 def test_settings_defaults_and_clamping():
     s = ovs.from_settings({})
-    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (False, 26, 2, True, 80, True)
+    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (True, 26, 2, True, 80, True)
     s = ovs.from_settings({"overlay_text_size": 200, "overlay_max_lines": 0, "overlay_opacity": "-5",
                            "overlay_show_original": "off", "overlay": "yes", "overlay_show_speaker": 0})
     assert (s.text_size, s.max_lines, s.opacity, s.show_original, s.auto, s.show_speaker) == (64, 1, 0, False, True, False)
@@ -413,8 +413,12 @@ def test_service_auto_opens_only_when_the_setting_is_on(data_dir):
         shown.append(session_running)
         return {"visible": True, "pid": 1, "message": "the overlay is open"}
 
-    off = OverlayService(lambda: data_dir, lambda: {}, status, show_fn=show_fn)
+    off = OverlayService(lambda: data_dir, lambda: {"overlay": False}, status, show_fn=show_fn)
     assert run(off.auto("cli")) == "" and shown == []
+    # Never chosen: on, so the first Start opens the overlay (W29, one-click requirement).
+    default = OverlayService(lambda: data_dir, lambda: {}, status, show_fn=show_fn)
+    assert run(default.auto("cli")) == "The subtitle overlay is open." and shown == [True]
+    shown.clear()
     on = OverlayService(lambda: data_dir, lambda: {"overlay": True}, status, show_fn=show_fn)
     assert run(on.auto("cli")) == "The subtitle overlay is open." and shown == [True]
     assert "did not open" in run(on.auto("discord"))

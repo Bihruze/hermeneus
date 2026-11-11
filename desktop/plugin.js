@@ -15,6 +15,7 @@ import {
   GlyphSpinner,
   host,
   icons,
+  ListRow,
   PANES_AREA,
   Popover,
   PopoverContent,
@@ -37,6 +38,8 @@ import { memo, useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { jsx, jsxs } from 'react/jsx-runtime'
 
 const ID = 'hermeneus'
+// The pane's contribution id as Desktop's pane tree knows it (`<plugin id>:<item id>`).
+const PANE_ID = `${ID}:pane`
 
 // ---------------------------------------------------------------------------
 // Pure subtitle state
@@ -426,6 +429,111 @@ export function chipParts(state) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure first-run setup and one-click start (GET /setup, docs/events.md)
+// ---------------------------------------------------------------------------
+
+/** Each setup step's state: done, todo, running, error or unknown. Null before GET /setup answered. */
+export function setupSteps(setup) {
+  if (!setup || typeof setup !== 'object') {
+    return null
+  }
+
+  const keySet = setup.key?.set
+  const audio = str(setup.audio?.state)
+  const model = setup.model && typeof setup.model === 'object' ? setup.model : {}
+
+  return {
+    key: keySet === true ? 'done' : keySet === false ? 'todo' : 'unknown',
+    audio:
+      audio === 'ok' || audio === 'not_needed'
+        ? 'done'
+        : audio === 'running'
+          ? 'running'
+          : audio === 'denied' || audio === 'failed'
+            ? 'error'
+            : 'todo',
+    // The main Hermes model translates when live_translate is not pinned; only a missing model is a todo.
+    model: model.route === 'auxiliary' || model.ready !== false ? 'done' : 'todo',
+    language: optStr(setup.language?.code) ? 'done' : 'todo'
+  }
+}
+
+/** Whether the pane shows the guided setup: until GET /setup reports it complete. */
+export function setupNeeded(setup) {
+  return Boolean(setup && typeof setup === 'object' && setup.complete !== true)
+}
+
+/** The source the pane preselects when none was chosen: the whole-system tap, else the only source. */
+export function defaultSourceKey(sources) {
+  const list = Array.isArray(sources) ? sources.filter(s => s && typeof s.source_id === 'string') : []
+  const system = list.find(s => (s.backend === 'process-tap' || s.backend === 'process-loopback') && s.source_id === 'system')
+
+  if (system) {
+    return sourceKey(system)
+  }
+
+  return list.length === 1 ? sourceKey(list[0]) : ''
+}
+
+/** The POST /start body for the last settings (the pane's Start and one click on the status bar item).
+ *  An empty source lets the backend pick (system audio with a process tap); an empty language uses the
+ *  setup's default (Hermes display language, else the system language). */
+export function startBody(prefs, defaultLanguage = '') {
+  const p = prefs && typeof prefs === 'object' ? prefs : {}
+  const body = { target_language: str(p.targetLanguage) || str(defaultLanguage) }
+  const key = str(p.source)
+  const split = key.indexOf(':')
+
+  if (split > 0) {
+    body.source = { backend: key.slice(0, split), source_id: key.slice(split + 1) }
+  }
+
+  if (p.speak === true) {
+    body.speak = true
+    body.mode = p.mode === 'voice' ? 'voice' : 'both'
+
+    if (str(p.outputDevice)) {
+      body.output_device = p.outputDevice
+    }
+
+    if (str(p.voiceId)) {
+      body.voice_id = p.voiceId
+    }
+  } else {
+    body.speak = false
+    body.mode = 'subtitles'
+  }
+
+  return body
+}
+
+/** What one click on the status bar item does: stop a running session, else start with the last settings. */
+export function chipClick(status) {
+  const state = status?.state
+
+  if (state === 'stopping' || state === 'starting') {
+    return 'wait'
+  }
+
+  return RUNNING_STATES.has(state) ? 'stop' : 'start'
+}
+
+/** The system languages the Desktop app reports, best first (Electron gives the macOS order). */
+export function clientLocales(nav = globalThis.navigator) {
+  const list = Array.isArray(nav?.languages) ? nav.languages : []
+  const all = [...list, nav?.language].filter(tag => typeof tag === 'string' && tag !== '')
+
+  return [...new Set(all)].slice(0, 5)
+}
+
+/** GET /setup path with the system languages as repeated locale params. */
+export function setupPath(locales) {
+  const query = (Array.isArray(locales) ? locales : []).map(tag => `locale=${encodeURIComponent(tag)}`).join('&')
+
+  return query ? `/setup?${query}` : '/setup'
+}
+
+// ---------------------------------------------------------------------------
 // Controller: socket, resync, polling fallback, control calls
 // ---------------------------------------------------------------------------
 
@@ -578,6 +686,9 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
   const action = atom({ busy: false, error: '' })
   // The native subtitle overlay (hermeneus_engine/overlay), shown and hidden through POST /overlay.
   const overlay = atom({ visible: false, armed: false, settings: null, busy: false, error: '' })
+  // First-run setup (GET /setup): which steps are done, the default language, the audio check.
+  // loadError: GET /setup failed; error: the last setup action failed (kept until the next action).
+  const setup = atom({ data: null, loadError: '', error: '', busy: '' })
   let sentTheme = ''
   const stored = ctx.storage.get('prefs', {})
   const prefs = atom({ ...DEFAULT_PREFS, ...(stored && typeof stored === 'object' ? stored : {}) })
@@ -587,6 +698,7 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
   let pending = []
   let lastFrameAt = 0
   let lastResyncAt = 0
+  let setupTicks = 0
 
   // While a resync is in flight, socket frames wait in `pending` and are
   // replayed after the page, so a live frame can never move the seq past
@@ -675,6 +787,86 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
     if (running || overlay.get().visible) {
       void refreshOverlay()
     }
+
+    // The audio check runs in the backend; its answer is read back here. While setup is open,
+    // a key added in Settings > Tools & Keys shows up within a few seconds.
+    setupTicks += 1
+
+    if (setup.get().data?.audio?.state === 'running' || (setupNeeded(setup.get().data) && setupTicks % 3 === 0)) {
+      void refreshSetup()
+    }
+  }
+
+  async function refreshSetup() {
+    try {
+      const data = await ctx.rest(setupPath(clientLocales()))
+
+      setup.set({ ...setup.get(), data: data && typeof data === 'object' ? data : null, loadError: '' })
+    } catch (error) {
+      setup.set({ ...setup.get(), loadError: errorText(error) })
+    }
+  }
+
+  /** One setup action at a time; its failure stays on screen with the step until the next try. */
+  async function setupAction(name, work) {
+    if (setup.get().busy) {
+      return
+    }
+
+    setup.set({ ...setup.get(), busy: name, error: '' })
+
+    try {
+      await work()
+      setup.set({ ...setup.get(), busy: '' })
+    } catch (error) {
+      setup.set({ ...setup.get(), busy: '', error: errorText(error) })
+    }
+
+    await refreshSetup()
+  }
+
+  /** Start and stop the real capture once in the backend (the macOS prompt shows the first time). */
+  function checkAudio() {
+    return setupAction('audio', async () => {
+      const audio = await ctx.rest('/setup/audio-check', { method: 'POST', body: {} })
+      const data = setup.get().data
+
+      if (data && audio && typeof audio.state === 'string') {
+        setup.set({ ...setup.get(), data: { ...data, audio: { ...data.audio, ...audio } } })
+      }
+    })
+  }
+
+  function openPrivacySettings() {
+    return setupAction('privacy', () => ctx.rest('/setup/open-privacy-settings', { method: 'POST', body: {} }))
+  }
+
+  /** Start with the last settings: the saved choices, else the defaults (system audio, setup's language). */
+  function quickStart() {
+    const language = setup.get().data?.language?.code ?? ''
+
+    return start(startBody(prefs.get(), language))
+  }
+
+  /** Bring the Hermeneus pane forward (the chip's click while setup is not complete). */
+  function revealPane() {
+    try {
+      host.undismissPane?.(PANE_ID)
+      host.revealPane?.(PANE_ID)
+    } catch {
+      // An older Desktop without these doors: the pane stays where it is.
+    }
+  }
+
+  /** One click on the status bar item. */
+  function toggle() {
+    const what = chipClick(store.get().status)
+
+    if (what === 'stop') {
+      return stop()
+    }
+
+    return what === 'start' ? quickStart() : Promise.resolve()
   }
 
   function takeOverlay(result) {
@@ -812,10 +1004,19 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
     })
     void resync()
     void refreshOverlay()
+    void refreshSetup()
   }
 
   return {
     action,
+    checkAudio,
+    os: ctx.os,
+    revealPane,
+    openPrivacySettings,
+    quickStart,
+    refreshSetup,
+    setup,
+    toggle,
     connect,
     link,
     onFrame,
@@ -929,7 +1130,47 @@ const EN = {
   overlayHint: 'Floats the current line above other apps on this Mac',
   showOverlay: 'Show subtitle overlay',
   hideOverlay: 'Hide subtitle overlay',
-  overlayError: error => `Overlay: ${error}`
+  overlayError: error => `Overlay: ${error}`,
+  // First-run setup (W29 proposal for Seher)
+  setupTitle: 'Set up live subtitles',
+  setupIntro: 'Add the key and allow system audio, then Start. The model and the language are already set; change them if you like. Nothing here is typed into a chat.',
+  setupLoading: 'Checking what is already set up',
+  setupError: error => `Could not read the setup: ${error}`,
+  stepDone: 'Done',
+  keyTitle: 'ElevenLabs API key',
+  keyTodo:
+    'Speech to text runs on ElevenLabs. Create a key with Speech to Text access (add Text to Speech and Voices read for spoken translation), then paste it in Hermes under Tools & Keys. The key stays in Hermes; this pane never sees it.',
+  keyDone: 'Added in Hermes. The value is not shown here.',
+  keyUnknown: 'Hermes could not say whether the key is set.',
+  keyCreate: 'Create a key',
+  keyAdd: 'Add key in Hermes',
+  keyRecheck: 'Check again',
+  audioTitle: 'System audio',
+  audioTodo:
+    'Hermeneus listens to the sound your Mac plays. Press the button once: macOS asks for System Audio Recording, and a short muted test checks that real audio arrives.',
+  audioRunning: 'Waiting for macOS and the test capture (up to 30 seconds). Answer the macOS prompt if it shows.',
+  audioDone: 'Real audio arrives.',
+  audioNotNeeded: detail => `No permission needed here${detail ? ` (${detail})` : ''}.`,
+  audioDenied:
+    'macOS gave silence instead of audio, so the permission is off. Open System Settings, turn on Hermes under System Audio Recording Only, then check again.',
+  audioAllow: 'Allow system audio',
+  audioAgain: 'Check again',
+  audioOpenSettings: 'Open System Settings',
+  audioWaiting: 'Checking',
+  modelTitle: 'Translation model',
+  modelMain: model => `Uses your main Hermes model${model ? ` (${model})` : ''}. Nothing to set up.`,
+  modelPinned: model => `Uses ${model} for Live translation.`,
+  modelMissing: 'Hermes has no main model yet. Choose one in Settings > Models.',
+  modelFaster: 'Optional: a small, fast model for Live translation keeps subtitles closer to the speech.',
+  modelChoose: 'Choose a faster model',
+  languageTitle: 'Subtitle language',
+  languageFrom: { setting: 'Your saved choice.', hermes: 'From your Hermes language.', system: 'From your system language.', fallback: 'English until you choose.' },
+  setupStartHint: 'Start opens the floating subtitle overlay too.',
+  setupNotReady: 'Finish the steps above to start.',
+  chipStart: 'Start live subtitles with the last settings',
+  chipStop: 'Stop live subtitles',
+  chipSetup: 'Open Hermeneus to finish setup',
+  chipMenu: 'Live subtitle settings'
 }
 
 const LOCALES = { en: EN }
@@ -978,6 +1219,20 @@ const S = {
     lineHeight: 'var(--conversation-caption-base-line-height)'
   },
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: sp(2) },
+  // In the status bar popover the same row wraps inside a fixed width: source, language, mode, then
+  // voice, overlay and look on one line, Start or Stop at the end.
+  controlsCompact: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: sp(2), width: sp(92) },
+  setup: { display: 'flex', flexDirection: 'column', gap: sp(1), padding: `${sp(1)} 0` },
+  setupScroll: { flex: 1, minHeight: 0, overflowY: 'auto', padding: `0 ${sp(2.5)} ${sp(2.5)}` },
+  setupHead: { display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: sp(2) },
+  setupTitle: { color: 'var(--ui-text-primary)', fontWeight: 'var(--font-weight-medium)' },
+  setupActions: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', justifyContent: 'flex-end', gap: sp(1.5) },
+  setupState: { display: 'inline-flex', alignItems: 'center', gap: sp(1.5), color: 'var(--ui-text-secondary)' },
+  setupDetail: { color: 'var(--ui-text-tertiary)' },
+  setupFoot: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: sp(2), paddingTop: sp(1) },
+  chipButton: { background: 'none', border: 0, cursor: 'pointer', font: 'inherit' },
+  chipMenu: { display: 'flex', flexDirection: 'column', gap: sp(2) },
+  chipMenuPanel: { width: 'auto' },
   field: { display: 'flex', alignItems: 'center', gap: sp(1), minWidth: 0 },
   select: { width: sp(44) },
   popover: { display: 'flex', flexDirection: 'column', gap: sp(2) },
@@ -1213,10 +1468,12 @@ function Picker({ disabled, label, onChange, options, placeholder, value }) {
   })
 }
 
-function Controls({ ctrl }) {
+function Controls({ ctrl, compact = false }) {
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
   const prefs = useValue(ctrl.prefs)
+  // Before the first choice: the setup's default language and the whole-system source.
+  const defaultLanguage = str(useValue(ctrl.setup).data?.language?.code)
   const action = useValue(ctrl.action)
   const overlay = useValue(ctrl.overlay)
   const devices = useQuery({
@@ -1247,20 +1504,22 @@ function Controls({ ctrl }) {
   const languages = Array.isArray(status?.languages) ? status.languages.filter(l => l && typeof l.code === 'string') : []
 
   // While a session runs, show what the backend runs; while idle, show the user's choice.
-  const target = running ? str(status?.target_language) : prefs.targetLanguage
+  const target = running ? str(status?.target_language) : prefs.targetLanguage || defaultLanguage
   const speak = running ? status?.speak === true : prefs.speak
   const mode = running ? str(status?.mode) || (speak ? 'both' : 'subtitles') : prefs.speak ? prefs.mode === 'voice' ? 'voice' : 'both' : 'subtitles'
   const chosenLanguage = languages.find(l => l.code === target)
   const speakable = chosenLanguage ? chosenLanguage.speakable !== false : true
-  const sourceValue = running && status?.source ? sourceKey(status.source) : prefs.source
+  const sourceValue = running && status?.source ? sourceKey(status.source) : prefs.source || defaultSourceKey(sources)
   const source = sources.find(s => sourceKey(s) === sourceValue) ?? null
   const outputValue = running && status?.output_device ? str(status.output_device) : prefs.outputDevice
   const output = outputs.find(o => o && o.device_id === outputValue) ?? null
   const voiceValue = running && status?.voice_id ? str(status.voice_id) : prefs.voiceId
   const applying = running && Array.isArray(status?.applying) ? status.applying : []
 
+  // No source listed (the list failed or is empty): Start still goes, and the backend says what is missing.
   const canStart =
-    !action.busy && source !== null && target !== '' && (!prefs.speak || (speakable && output !== null))
+    !action.busy && (source !== null || sources.length === 0) && target !== '' &&
+    (!prefs.speak || (speakable && output !== null))
 
   // Each control saves the choice; while running it also changes the session (POST /settings).
   const choose = (patch, change) => {
@@ -1280,20 +1539,21 @@ function Controls({ ctrl }) {
     const current = ctrl.prefs.get()
     const speakNow = current.speak && speakable
 
-    void ctrl.start({
-      source: { backend: source.backend, source_id: source.source_id },
-      target_language: current.targetLanguage,
-      speak: speakNow,
-      mode: speakNow ? (current.mode === 'voice' ? 'voice' : 'both') : 'subtitles',
-      output_device: speakNow ? output.device_id : null,
-      ...(speakNow && current.voiceId ? { voice_id: current.voiceId } : {})
-    })
+    void ctrl.start(
+      startBody({
+        ...current,
+        source: source ? sourceKey(source) : '',
+        targetLanguage: target,
+        speak: speakNow,
+        outputDevice: speakNow && output ? output.device_id : ''
+      })
+    )
   }
 
   return jsxs('div', {
     children: [
       jsxs('div', {
-        style: S.controls,
+        style: compact ? S.controlsCompact : S.controls,
         children: [
           jsxs('div', {
             style: S.field,
@@ -1948,10 +2208,211 @@ function DoctorPanel({ ctrl }) {
   })
 }
 
+// First-run setup, shown in the pane until GET /setup reports it complete. Built from Hermes's own
+// settings rows (ListRow) and buttons so it reads like core Settings. Proposal for Seher.
+const KEY_SETTINGS_ROUTE = '/settings?tab=keys&key=ELEVENLABS_API_KEY'
+const LIVE_TRANSLATE_ROUTE = '/settings?tab=config:model&aux=live_translate'
+
+function StepState({ busy, label, tone }) {
+  return jsxs('span', {
+    style: S.setupState,
+    children: [busy ? jsx(GlyphSpinner, { ariaLabel: label }) : jsx(StatusDot, { tone }), jsx('span', { children: label })]
+  })
+}
+
+function SetupPanel({ ctrl, os }) {
+  const t = usePluginI18n(ID)
+  const setup = useValue(ctrl.setup)
+  const state = useValue(ctrl.store)
+  const prefs = useValue(ctrl.prefs)
+  const action = useValue(ctrl.action)
+  const data = setup.data
+  const steps = setupSteps(data)
+
+  if (!steps) {
+    return jsxs('div', {
+      style: S.setup,
+      children: [
+        setup.loadError
+          ? jsx(StateBlock, {
+              tone: 'bad',
+              title: t('setupError', setup.loadError),
+              actions: jsxs(Button, {
+                onClick: () => void ctrl.refreshSetup(),
+                size: 'xs',
+                variant: 'secondary',
+                children: [jsx(icons.RefreshCw, {}), t('retry')]
+              })
+            })
+          : jsx(StateBlock, { busy: true, title: t('setupLoading') })
+      ]
+    })
+  }
+
+  const open = url => {
+    // The OS opens the link; if the desktop shell cannot, the backend opens System Settings itself.
+    void Promise.resolve(os?.openExternal ? os.openExternal(url) : false).then(opened => {
+      if (!opened && url === data.audio?.settings_url) {
+        void ctrl.openPrivacySettings()
+      }
+    })
+  }
+  const busy = setup.busy
+  const done = jsx(StepState, { label: t('stepDone'), tone: 'good' })
+  const languages = Array.isArray(state.status?.languages) ? state.status.languages.filter(l => l && typeof l.code === 'string') : []
+  const language = prefs.targetLanguage || str(data.language?.code)
+  const model = data.model ?? {}
+  const modelName = [str(model.provider) !== 'auto' ? str(model.provider) : '', str(model.model)].filter(Boolean).join('/')
+  const audio = str(data.audio?.state)
+  const ready = steps.key === 'done' && steps.audio === 'done' && language !== ''
+
+  const keyRow = jsx(ListRow, {
+    title: t('keyTitle'),
+    description: steps.key === 'done' ? t('keyDone') : steps.key === 'unknown' ? t('keyUnknown') : t('keyTodo'),
+    action:
+      steps.key === 'done'
+        ? done
+        : jsxs('div', {
+            style: S.setupActions,
+            children: [
+              jsxs(Button, {
+                onClick: () => open(str(data.key?.url)),
+                size: 'xs',
+                variant: 'ghost',
+                children: [jsx(icons.ExternalLink, {}), t('keyCreate')]
+              }),
+              jsxs(Button, {
+                onClick: () => host.navigate(KEY_SETTINGS_ROUTE),
+                size: 'xs',
+                variant: 'secondary',
+                children: [jsx(icons.KeyRound, {}), t('keyAdd')]
+              }),
+              jsx(Button, { onClick: () => void ctrl.refreshSetup(), size: 'xs', variant: 'ghost', children: t('keyRecheck') })
+            ]
+          })
+  })
+
+  let audioText = t('audioTodo')
+  let audioAction = jsxs(Button, {
+    disabled: busy !== '',
+    onClick: () => void ctrl.checkAudio(),
+    size: 'xs',
+    variant: 'secondary',
+    children: [jsx(icons.AudioLines, {}), t('audioAllow')]
+  })
+
+  if (audio === 'ok' || audio === 'not_needed') {
+    audioText = audio === 'ok' ? t('audioDone') : t('audioNotNeeded', str(data.audio?.message))
+    audioAction = done
+  } else if (audio === 'running') {
+    audioText = t('audioRunning')
+    audioAction = jsx(StepState, { busy: true, label: t('audioWaiting') })
+  } else if (audio === 'denied' || audio === 'failed') {
+    audioText = audio === 'denied' ? t('audioDenied') : str(data.audio?.message) || t('audioTodo')
+    audioAction = jsxs('div', {
+      style: S.setupActions,
+      children: [
+        audio === 'denied'
+          ? jsxs(Button, {
+              onClick: () => open(str(data.audio?.settings_url)),
+              size: 'xs',
+              variant: 'secondary',
+              children: [jsx(icons.Settings, {}), t('audioOpenSettings')]
+            })
+          : null,
+        jsxs(Button, {
+          disabled: busy !== '',
+          onClick: () => void ctrl.checkAudio(),
+          size: 'xs',
+          variant: audio === 'denied' ? 'ghost' : 'secondary',
+          children: [jsx(icons.RefreshCw, {}), t('audioAgain')]
+        })
+      ]
+    })
+  }
+
+  const audioRow = jsx(ListRow, { title: t('audioTitle'), description: audioText, action: audioAction })
+
+  const modelRow = jsx(ListRow, {
+    title: t('modelTitle'),
+    description:
+      model.route === 'auxiliary'
+        ? t('modelPinned', modelName)
+        : steps.model === 'todo'
+          ? t('modelMissing')
+          : jsxs('span', { children: [t('modelMain', modelName), ' ', jsx('span', { style: S.setupDetail, children: t('modelFaster') })] }),
+    action:
+      model.route === 'auxiliary'
+        ? done
+        : jsx(Button, {
+            onClick: () => host.navigate(LIVE_TRANSLATE_ROUTE),
+            size: 'xs',
+            variant: 'ghost',
+            children: t('modelChoose')
+          })
+  })
+
+  const languageRow = jsx(ListRow, {
+    title: t('languageTitle'),
+    description: prefs.targetLanguage ? t('languageFrom.setting') : t(`languageFrom.${str(data.language?.from) || 'fallback'}`),
+    action:
+      languages.length > 0
+        ? jsx(Picker, {
+            label: t('target'),
+            onChange: value => ctrl.setPrefs({ targetLanguage: value }),
+            options: languages.map(l => ({ value: l.code, label: typeof l.name === 'string' ? l.name : l.code })),
+            placeholder: t('targetPlaceholder'),
+            value: language
+          })
+        : jsx('span', { style: S.statusPart, children: language })
+  })
+
+  return jsxs('section', {
+    'aria-label': t('setupTitle'),
+    'data-hermeneus-setup': audio || 'unknown',
+    style: S.setup,
+    children: [
+      jsxs('div', {
+        style: S.setupHead,
+        children: [
+          jsxs('div', {
+            children: [
+              jsx('div', { style: S.setupTitle, children: t('setupTitle') }),
+              jsx('div', { style: S.statusMessage, children: t('setupIntro') })
+            ]
+          })
+        ]
+      }),
+      keyRow,
+      audioRow,
+      modelRow,
+      languageRow,
+      setup.error ? jsx('div', { role: 'alert', style: S.alert, children: t('actionError', setup.error) }) : null,
+      action.error ? jsx('div', { role: 'alert', style: S.alert, children: t('actionError', action.error) }) : null,
+      jsxs('div', {
+        style: S.setupFoot,
+        children: [
+          jsx('span', { style: S.statusMessage, children: ready ? t('setupStartHint') : t('setupNotReady') }),
+          jsxs(Button, {
+            disabled: !ready || action.busy,
+            onClick: () => void ctrl.quickStart(),
+            size: 'sm',
+            children: [jsx(icons.Play, {}), t('start')]
+          })
+        ]
+      })
+    ]
+  })
+}
+
 function HermeneusPane({ ctrl }) {
   const t = usePluginI18n(ID)
   const [view, setView] = useState('subtitles')
   const [jump, setJump] = useState(null)
+  // Guided setup until it is complete; a running session always shows its subtitles.
+  const setupData = useValue(ctrl.setup).data
+  const running = RUNNING_STATES.has(useValue(ctrl.store).status?.state)
+  const guided = view === 'subtitles' && !running && setupNeeded(setupData)
 
   return jsxs('div', {
     'data-hermeneus-pane': view,
@@ -1987,12 +2448,14 @@ function HermeneusPane({ ctrl }) {
               })
             ]
           }),
-          jsx(Controls, { ctrl })
+          guided ? null : jsx(Controls, { ctrl })
         ]
       }),
-      view === 'subtitles'
-        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor'), onJumpChange: setJump })
-        : jsx(DoctorPanel, { ctrl })
+      guided
+        ? jsx('div', { style: S.setupScroll, children: jsx(SetupPanel, { ctrl, os: ctrl.os }) })
+        : view === 'subtitles'
+          ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor'), onJumpChange: setJump })
+          : jsx(DoctorPanel, { ctrl })
     ]
   })
 }
@@ -2007,14 +2470,31 @@ function StatusChip({ ctrl }) {
   const on = running ? overlay.visible : overlay.armed
   const overlayLabel = overlayButtonLabel(t, running, overlay)
 
+  const setup = useValue(ctrl.setup)
+  const action = useValue(ctrl.action)
+  const needsSetup = !running && setupNeeded(setup.data)
+  const what = needsSetup ? 'setup' : chipClick(state.status)
+  const clickLabel = what === 'stop' ? t('chipStop') : what === 'setup' ? t('chipSetup') : t('chipStart')
+  // One click: stop a running session, or start one with the last settings. Before setup is
+  // complete the click opens the pane, where the guided setup is.
+  const onClick = () => {
+    if (what === 'setup') {
+      ctrl.revealPane()
+    } else {
+      void ctrl.toggle()
+    }
+  }
+
   const chip = jsx(Tip, {
-    label: last || t('statusBar', label),
-    children: jsxs('span', {
-      'aria-label': t('statusBar', label),
-      role: 'status',
-      style: S.chip,
+    label: action.error ? t('actionError', action.error) : `${last || t('statusBar', label)} · ${clickLabel}`,
+    children: jsxs('button', {
+      'aria-label': `${t('statusBar', label)}. ${clickLabel}`,
+      disabled: action.busy || what === 'wait',
+      onClick,
+      type: 'button',
+      style: { ...S.chip, ...S.chipButton },
       children: [
-        jsx(StatusDot, { tone: statusTone(session) }),
+        jsx(StatusDot, { tone: action.error && !running ? 'bad' : statusTone(session) }),
         jsx('span', { style: S.chipName, children: EN.title }),
         showState ? jsx('span', { children: label }) : null,
         last ? jsx('span', { style: S.chipText, children: truncate(last, 80) }) : null
@@ -2039,6 +2519,36 @@ function StatusChip({ ctrl }) {
           variant: on ? 'secondary' : 'ghost',
           children: jsx(icons.PanelBottom, {})
         })
+      }),
+      // The daily controls (source, language, mode, voice, overlay, start and stop) in a popover.
+      jsxs(Popover, {
+        children: [
+          jsx(Tip, {
+            label: t('chipMenu'),
+            children: jsx('span', {
+              children: jsx(PopoverTrigger, {
+                asChild: true,
+                children: jsx(Button, {
+                  'aria-label': t('chipMenu'),
+                  size: 'icon-xs',
+                  variant: 'ghost',
+                  children: jsx(icons.ChevronUp, {})
+                })
+              })
+            })
+          }),
+          jsx(PopoverContent, {
+            align: 'end',
+            side: 'top',
+            style: S.chipMenuPanel,
+            children: jsx('div', {
+              style: S.chipMenu,
+              children: needsSetup
+                ? jsxs(Button, { onClick: () => ctrl.revealPane(), size: 'sm', variant: 'secondary', children: [jsx(icons.Settings2, {}), t('chipSetup')] })
+                : jsx(Controls, { ctrl, compact: true })
+            })
+          })
+        ]
       }),
       jsx(ThemeProbe, { ctrl })
     ]

@@ -27,7 +27,7 @@ MAX_LINES_MIN, MAX_LINES_MAX = 1, 3
 OPACITY_MIN, OPACITY_MAX = 0, 100
 
 DEFAULTS: dict[str, Any] = {
-    KEY_AUTO: False,
+    KEY_AUTO: True,
     KEY_TEXT_SIZE: 26,
     KEY_MAX_LINES: 2,
     KEY_SHOW_ORIGINAL: True,

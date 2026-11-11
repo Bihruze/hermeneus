@@ -77,9 +77,9 @@ config_schema:
     description: "127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked."
   overlay:
     type: bool
-    default: false
+    default: true
     label: "Subtitle overlay"
-    description: "Open the floating subtitle overlay with every session. It floats above other apps on this Mac and never takes keyboard focus."
+    description: "Open the floating subtitle overlay with every session started on this Mac. It floats above other apps and never takes keyboard focus. Turn it off to keep subtitles in the pane and the terminal only."
   overlay_text_size:
     type: int
     default: 26

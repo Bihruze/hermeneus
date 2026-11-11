@@ -329,7 +329,7 @@ def test_overlay_commands_refuse_cleanly_without_a_session(data_dir):
     assert "did not open. No translation session is running." in err.getvalue()
     args = argparse.Namespace(overlay_action="status", json=True)
     assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 0
-    assert {k: v for k, v in json.loads(out.getvalue()).items() if k != "settings"} == {"visible": False, "pid": None, "armed": False}
+    assert {k: v for k, v in json.loads(out.getvalue()).items() if k != "settings"} == {"visible": False, "pid": None, "armed": True}
 
 
 def test_install_hint_format_is_pinned():
