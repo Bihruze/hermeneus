@@ -325,10 +325,11 @@ def test_check_available_refuses_cleanly():
 
 
 def test_chat_platforms_cannot_open_a_window_on_the_mac():
-    for local in (None, "cli", "tui", "desktop"):
+    for local in ("cli", "tui", "desktop"):
         control.check_platform(local)
-    with pytest.raises(control.OverlayUnavailable, match="telegram"):
-        control.check_platform("telegram")
+    for remote in ("telegram", None, ""):  # a caller that names no surface is not local
+        with pytest.raises(control.OverlayUnavailable):
+            control.check_platform(remote)
 
 
 class FakeChild:

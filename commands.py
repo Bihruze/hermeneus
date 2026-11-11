@@ -186,7 +186,7 @@ class Plugin:
             return describe_status(status) + (f" {note}" if note else "")
         if sub == "set":
             try:
-                result = await self.set(changes_from_namespace(parse_slash_set(rest)))
+                result = await self.set(changes_from_namespace(parse_slash_set(rest)), platform=context.get("platform"))
             except (UsageError, SettingsRefused) as exc:
                 return f"Not changed: {exc}"
             return describe_set(result)
@@ -355,7 +355,7 @@ def cli_handler(plugin: Plugin) -> Callable[[argparse.Namespace], int]:
 def cmd_set(plugin: "Plugin", args: argparse.Namespace, *, out: TextIO = sys.stdout, err: TextIO = sys.stderr) -> int:
     as_json = bool(getattr(args, "json", False))
     try:
-        result = asyncio.run(plugin.set(changes_from_namespace(args)))
+        result = asyncio.run(plugin.set(changes_from_namespace(args), platform="cli"))
     except (UsageError, SettingsRefused) as exc:
         if as_json:
             print(json.dumps({"ok": False, "message": str(exc)}), file=out)
