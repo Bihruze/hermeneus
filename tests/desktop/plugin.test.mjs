@@ -449,3 +449,15 @@ test('register contributes one pane and one status bar item and opens the event 
   assert.equal(contributions[0].data.placement, 'bottom')
   assert.equal(ctx.socketPath, '/events')
 })
+
+test('settings posts the change and applies the status inside the answer', async () => {
+  const reply = { ok: true, accepted: { target_language: 'de' }, applying: ['speak'], status: { state: 'live', target_language: 'de', applying: ['speak'] } }
+  const ctx = fakeCtx({ '/settings': reply })
+  const ctrl = createController(ctx)
+
+  await ctrl.settings({ target_language: 'de', speak: true, output_device: 'Speakers' })
+
+  assert.deepEqual(ctx.calls, [{ path: '/settings', opts: { method: 'POST', body: { target_language: 'de', speak: true, output_device: 'Speakers' } } }])
+  assert.equal(ctrl.store.get().status.target_language, 'de')
+  assert.deepEqual(ctrl.store.get().status.applying, ['speak'])
+})

@@ -347,10 +347,12 @@ export const FONT_SCALES = Object.freeze([0.85, 1, 1.15, 1.3, 1.5, 1.75, 2])
 
 const DEFAULT_PREFS = Object.freeze({
   fontScale: 1,
+  mode: 'subtitles',
   outputDevice: '',
   source: '',
   speak: false,
-  targetLanguage: ''
+  targetLanguage: '',
+  voiceId: ''
 })
 
 // Desktop's REST bridge rejects with "<status>: <body>" (apps/desktop/electron/api-transport.ts:185-186).
@@ -508,9 +510,13 @@ export function createController(ctx, clock = () => Date.now()) {
 
     try {
       const result = await ctx.rest(path, { method: 'POST', body })
+      // POST /start and /stop answer a status; POST /settings answers {accepted, applying, status}.
+      const status = result && typeof result === 'object' && result.status && typeof result.status === 'object'
+        ? result.status
+        : result
 
-      if (result && typeof result === 'object' && typeof result.state === 'string') {
-        store.set(applyEvent(store.get(), { ...result, type: 'status', seq: undefined }))
+      if (status && typeof status === 'object' && typeof status.state === 'string') {
+        store.set(applyEvent(store.get(), { ...status, type: 'status', seq: undefined }))
       }
 
       action.set({ busy: false, error: '' })
@@ -527,13 +533,19 @@ export function createController(ctx, clock = () => Date.now()) {
     return control('/stop', {})
   }
 
+  /** Change the running session (POST /settings). The answer comes at once; background changes
+   *  (speech on, voice, output, source) report through later status events. */
+  function settings(changes) {
+    return control('/settings', changes)
+  }
+
   function connect() {
     ctx.socket('/events', onFrame)
     ctx.setInterval(tick, POLL_TICK_MS)
     void resync()
   }
 
-  return { action, connect, link, onFrame, prefs, resync, rest: ctx.rest, setPrefs, start, stop, store, tick }
+  return { action, connect, link, onFrame, prefs, resync, rest: ctx.rest, setPrefs, settings, start, stop, store, tick }
 }
 
 // ---------------------------------------------------------------------------
