@@ -602,3 +602,10 @@ def test_a_marker_or_label_never_breaks_across_rows():
     runs = [Run("aaaa bbbb", FAILED), Run("Not translated", MARK), Run("cc", FAILED)]
     rows = wrap(runs, 18, chars, 3)
     assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb", "Not translated cc"]
+
+
+
+def test_a_marker_stays_with_the_first_word_it_introduces():
+    runs = [Run("aaaa bbbb cc", FAILED), Run("Mark", MARK), Run("dddd", FAILED)]
+    rows = wrap(runs, 17, chars, 3)
+    assert ["".join(r.text for r in row) for row in rows] == ["aaaa bbbb cc", "Mark dddd"]

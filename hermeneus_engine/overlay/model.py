@@ -250,10 +250,16 @@ def wrap(runs: list[Run], width: float, measure: Measure, max_lines: int) -> tup
         return ()
     lines: list[list[tuple[str, Run]]] = [[]]
     used = 0.0
-    for word, run in _tokens(runs):
+    tokens = _tokens(runs)
+    for index, (word, run) in enumerate(tokens):
         trimmed = word.rstrip()
         need = measure(trimmed, run)
-        if lines[-1] and used + need > width:
+        # A label or marker stays on the row of the first word it introduces.
+        glued = need
+        if run.kind in (LABEL, MARK) and index + 1 < len(tokens) and tokens[index + 1][1].kind not in (LABEL, MARK):
+            nxt_word, nxt_run = tokens[index + 1]
+            glued = measure(word, run) + measure(nxt_word.rstrip(), nxt_run)
+        if lines[-1] and used + (glued if glued <= width else need) > width:
             lines.append([])
             used = 0.0
         if need > width:
