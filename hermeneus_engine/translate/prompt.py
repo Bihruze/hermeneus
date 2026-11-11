@@ -178,36 +178,46 @@ def clean_reply(raw: str, *, original: str, target: Language) -> str:
 
 _I = re.IGNORECASE
 
-# The model talking about its own output. None of these can be a translation of speech in any
-# target: they name the task's own parts (its output, the segment, "the Turkish text").
-_META_STRONG = re.compile(
-    r"\bcorrect(?:ed)?\s+(?:output|translation|version)\b"
+# The model talking about its task. None of these can be a translation of speech in any target:
+# they name the task's own parts (its output, the segment, "the Turkish text").
+_META_TASK = re.compile(
+    r"\bcorrect(?:ed)?\s+output\b"
     r"|\b(?:output|give|provide|write|return|reply\s+with)\s+(?:only|just)\s+the\s+\w+\s+(?:translation|text|version)\b"
-    r"|\bi\s+(?:misread|mistranslated|misunderstood|misheard)\s+the\s+(?:segment|source|text|line|input)\b"
-    r"|\blet\s+me\s+re-?translate\b"
-    r"|\bhere(?:'s|\s+is)\s+(?:the|my)\s+(?:corrected\s+)?translation\b"
-    r"|\bas\s+an\s+ai\b"
+    r"|\bi\s+(?:misread|mistranslated|misunderstood|misheard)\s+the\s+(?:segment|source|input)\b"
+    r"|\blet\s+me\s+re-?translate\b|\bas\s+an\s+ai\b"
     r"|\bdoğru\s+(?:çıktı|çeviri)\b|\bdüzeltilmiş\s+çeviri\b"
     r"|</?(?:segment|context|line|original|translation)\b", _I)
 # English that is commentary in a reply in any other language, but can be ordinary speech in an
-# English one ("Let me correct that."). Not used for an English target.
+# English one ("Let me correct that.", "Here is my translation of the poem."). Not used for an
+# English target.
 _META_FOREIGN = re.compile(
-    r"\bi\s+(?:should|must|need\s+to|will|'ll|am\s+supposed\s+to)\s+(?:only\s+|just\s+)?"
+    r"\bcorrect(?:ed)?\s+(?:translation|version)\b"
+    r"|\bi\s+(?:misread|mistranslated|misunderstood|misheard)\s+the\s+(?:text|line)\b"
+    r"|\bhere(?:'s|\s+is)\s+(?:the|my)\s+(?:corrected\s+)?translation\b"
+    r"|\bi\s+(?:should|must|need\s+to|will|'ll|am\s+supposed\s+to|can)\s+(?:only\s+|just\s+)?"
     r"(?:translate|give|provide|output|return|reply|respond|write)\b"
     r"|\blet\s+me\s+(?:translate|try\s+again|correct|fix)\b"
     r"|\b(?:the|a)\s+\w+\s+(?:translation|text)\s+(?:is|would\s+be)\b"
     r"|\bi\s+(?:cannot|can't|can\s+not)\s+translate\b"
+    r"|\btranslator's\s+note\b"
     r"|\bhmm+\b[\s,.!-]+(?:wait|actually|no)\b|\bwait\s*[,.]\s*(?:i|let|actually|no)\b"
     r"|\b(?:the|this)\s+segment\b|\bliteral\s+translation\b", _I)
 # A label with a colon ("Note:", Turkish "Not:", "Translation:"): commentary unless the speech has a
 # label of its own ("Nota: el horario cambia." -> "Note: the schedule changes.").
 _META_LABEL = re.compile(r"(?:^|[\s(\[])(?:translation|output|note|not|çeviri|nota)\s*[:：]", _I)
 _HAS_LABEL = re.compile(r"(?:^|[\s(\[])\w+\s*[:：]", re.UNICODE)
-# Where a reply says its corrected translation starts: the text after the last one is kept.
+# Where a reply says its corrected translation starts: the text after the last one is kept. For an
+# English target only after a note, since "The final answer: no." can be speech.
 _CORRECTION = re.compile(
     r"(?:correct(?:ed)?\s+(?:output|translation|version)|final\s+(?:output|translation|answer)"
     r"|here(?:'s|\s+is)\s+(?:the|my)\s+(?:corrected\s+)?translation"
+    r"|(?:a\s+)?better\s+translation(?:\s+would\s+be)?"
     r"|doğru\s+(?:çıktı|çeviri)|düzeltilmiş\s+çeviri)\s*[:：]\s*", _I)
+# Web addresses and e-mail addresses carry over unchanged.
+_ADDRESS = re.compile(r"\b(?:https?://\S+|www\.\S+|[\w.+-]+@[\w-]+\.[\w.]+|[\w-]+\.(?:com|org|net|io|gov|edu)\b\S*)", _I)
+# Interjections a reply may keep as they are (the prompt says so for fillers without an equivalent).
+_FILLERS = frozenset("hmm hm mm uh um uhm er ah oh ok okay wow ha haha huh shh".split())
+_SENTENCE = re.compile(r"(?<=[.!?…])\s+")
 
 # Function words of the speech languages most often copied through. A run of words copied from
 # the speech that holds three or more of them is the speech itself, not a name or a title kept as
@@ -331,28 +341,56 @@ def _carried(word: str, source_stop: frozenset) -> bool:
     return word[:1].isupper() and word.lower() not in source_stop
 
 
+def _plain_capital(word: str) -> bool:
+    """Only the first letter is a capital, and no digit: a word that may just start a sentence."""
+    return word[:1].isupper() and not any(ch.isupper() or ch.isdigit() for ch in word[1:])
+
+
+def _echo(reply: str, original: str, target_stop: frozenset) -> bool:
+    """The reply is the speech word for word ("Thanks."), and not only names, interjections or words
+    the target language has too ("No, no, no!" in Spanish)."""
+    a = [w.lower() for w in _WORD.findall(reply.replace("’", "'"))]
+    b = [w.lower() for w in _WORD.findall(original.replace("’", "'"))]
+    if not a or a != b or all(w in _FILLERS or w in target_stop for w in a):
+        return False
+    words = _WORD.findall(reply)
+    return not all(_carried(w, frozenset()) and n > 0 for n, w in enumerate(words)) and not (
+        len(words) > 1 and all(w[:1].isupper() for w in words))
+
+
 def _copy_check(reply: str, original: str, source_stop: frozenset, target_stop: frozenset):
     """(share of the reply's own words copied from the speech, copied word count, edge cut or None).
 
     The edge cut is the character range of a copied run with ``_COPIED_STOPWORDS`` function words
     at the reply's start or end; a run inside the reply gives ``(-1, -1)``."""
-    unquoted = _QUOTED.sub(" ", reply)
+    unquoted = _ADDRESS.sub(" ", _QUOTED.sub(" ", reply))
     matches = [(m.group(0).replace("’", "'"), m.start(), m.end()) for m in _WORD.finditer(unquoted)]
     words = [w for w, _, _ in matches]
-    src = [w.lower() for w in _WORD.findall(original.replace("’", "'"))]
+    src = [w.lower() for w in _WORD.findall(_ADDRESS.sub(" ", original).replace("’", "'"))]
     if not words or not src:
         return 0.0, 0, None
     source_set = set(src)
     titled = _titled(words, source_stop)
+    # A capital that only starts a sentence ("Thank you.") is no name.
+    initial = {n for n, (_, start, _) in enumerate(matches)
+               if not unquoted[:start].strip() or unquoted[:start].rstrip()[-1:] in ".!?…¡¿"}
     own = [n for n, w in enumerate(words)
-           if n not in titled and not _carried(w, source_stop) and w.lower() not in target_stop]
-    copied = [n for n in own if words[n].lower() in source_set]
-    share = len(copied) / len(own) if own else 0.0
-    # The longest copied run (consecutive words of the speech) with its function words.
+           if n not in titled and w.lower() not in target_stop
+           and (not _carried(w, source_stop) or (n in initial and _plain_capital(w)))]
     low = [w.lower() for w in words]
     positions: dict[str, list[int]] = {}
     for j, word in enumerate(src):
         positions.setdefault(word, []).append(j)
+    # A word counts as copied when it is a source function word, or part of two or more words in
+    # the speech's order. A lone shared word is a loanword or a term the target uses as it is
+    # ("pizza", "podcast", "startup").
+    in_run: set[int] = set()
+    for n in range(len(low) - 1):
+        if any(j + 1 < len(src) and src[j + 1] == low[n + 1] for j in positions.get(low[n], ())):
+            in_run.update((n, n + 1))
+    copied = [n for n in own if low[n] in source_set and (low[n] in source_stop or n in in_run)]
+    share = len(copied) / len(own) if own else 0.0
+    # The longest copied run (consecutive words of the speech) with its function words.
     cut = None
     best = 0
     i = 0
@@ -387,7 +425,7 @@ def _script_problem(reply: str, target_code: str) -> str:
     wanted = _SCRIPTS.get(target_code)
     if wanted is not None:
         # Latin names, brands, numbers and abbreviations carry over: only lowercase Latin words count.
-        latin = sum(len(run) for run in _LATIN_RUN.findall(reply) if run.islower() and len(run) > 1)
+        latin = sum(len(run) for run in _LATIN_RUN.findall(_ADDRESS.sub(" ", reply)) if run.islower() and len(run) > 1)
         native = sum(1 for ch in reply if ch.isalpha() and _script(ch) in wanted)
         return SCRIPT if latin >= _SCRIPT_MIN_LETTERS and latin > native else ""
     letters = [ch for ch in reply if ch.isalpha()]
@@ -398,16 +436,27 @@ def _script_problem(reply: str, target_code: str) -> str:
     return ""
 
 
+def _notes(reply: str, original: str, target_code: str) -> list[tuple[int, int]]:
+    """Where the reply talks about its task: spans of note phrases not in the speech itself."""
+    source = " ".join(original.lower().split())
+    patterns = [_META_TASK] + ([_META_FOREIGN] if target_code != "en" else [])
+    spans = [m.span() for pattern in patterns for m in pattern.finditer(reply)
+             if " ".join(m.group(0).lower().split()) not in source]
+    if not _HAS_LABEL.search(original):
+        spans += [m.span() for m in _META_LABEL.finditer(reply)]
+    return spans
+
+
 def _check(reply: str, original: str, target: Language, source_language: Optional[str]) -> Guarded:
     target_code = _iso1(target.code)
-    if _META_STRONG.search(reply) or (target_code != "en" and _META_FOREIGN.search(reply)):
-        return Guarded(reply, NOTES)
-    if _META_LABEL.search(reply) and not _HAS_LABEL.search(original):
+    if _notes(reply, original, target_code):
         return Guarded(reply, NOTES)
     source_code = _iso1(source_language) or "en"
     if source_code != target_code:
         source_stop = _STOPWORDS.get(source_code, frozenset())
         target_stop = _STOPWORDS.get(target_code, frozenset())
+        if _echo(reply, original, target_stop):
+            return Guarded(reply, COPIED)
         share, copied, cut = _copy_check(reply, original, source_stop, target_stop)
         if share >= _ECHO_SHARE and (copied >= _ECHO_MIN_WORDS or (copied >= 2 and share == 1.0)):
             return Guarded(reply, COPIED)
@@ -428,13 +477,24 @@ def guard_reply(reply: str, *, original: str, target: Language, source_language:
     """What of a cleaned reply may go on screen. No model call: string checks only.
 
     A reply that marks its corrected translation ("Correct output: ...") keeps the text after the
-    last mark when that passes. A copied run of the speech at the reply's edge is cut off when the
-    copy is small. Otherwise a reply with notes, copied speech or the wrong script gets a problem."""
+    last mark when that passes (for an English target only when a note comes before the mark). A
+    note in a sentence of its own ("Sorry, I can only translate.") is dropped when the rest passes.
+    A copied run of the speech at the reply's edge is cut off when the copy is small. Otherwise a
+    reply with notes, copied speech or the wrong script gets a problem."""
+    target_code = _iso1(target.code)
     marks = list(_CORRECTION.finditer(reply))
-    if marks:
+    if marks and (target_code != "en" or _notes(reply[:marks[-1].start()], original, target_code)):
         tail = _strip_quotes(reply[marks[-1].end():].strip(), "")
         if tail:
             kept = _check(tail, original, target, source_language)
+            if not kept.problem:
+                return Guarded(kept.text, "", salvaged=True)
+        return Guarded(reply, NOTES)
+    if _notes(reply, original, target_code):
+        sentences = [part for part in _SENTENCE.split(reply.strip()) if part.strip()]
+        rest = [part for part in sentences if not _notes(part, original, target_code)]
+        if rest and len(rest) < len(sentences):
+            kept = _check(" ".join(rest), original, target, source_language)
             if not kept.problem:
                 return Guarded(kept.text, "", salvaged=True)
         return Guarded(reply, NOTES)

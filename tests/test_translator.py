@@ -6,7 +6,7 @@ import pytest
 from hermeneus_engine.contracts import LineState, SubtitleLine, TranslationError, Translator
 from hermeneus_engine.translate import languages
 from hermeneus_engine.translate.llm_translator import LlmTranslator
-from hermeneus_engine.translate.prompt import ContextLine, build_messages, clean_reply, guard_reply, reply_problem
+from hermeneus_engine.translate.prompt import ContextLine, Guarded, build_messages, clean_reply, guard_reply, reply_problem
 from hermeneus_engine.translate.scheduler import TranslationScheduler
 
 TR = languages.resolve_target_language("tr")
@@ -430,7 +430,9 @@ async def test_scheduler_with_llm_translator_end_to_end():
         segment = messages[1]["content"].rsplit(">", 2)[-2].split("<")[0]
         if segment == "boom":
             raise RuntimeError("provider down")
-        return "Translation: " + segment.upper()
+        # A labelled reply; clean_reply takes the label off. (A reply equal to the speech, such as
+        # "BYE" for "bye", would be rejected as copied speech.)
+        return "Translation: " + {"hello there": "merhaba", "bye": "hoşça kal"}[segment]
 
     out = []
     llm = FakeLlm(reply)
@@ -440,9 +442,9 @@ async def test_scheduler_with_llm_translator_end_to_end():
                                   source_language="en"))
     await sched.drain()
     assert [(l.state, l.original, l.translation) for l in out] == [
-        (LineState.TRANSLATED, "hello there", "HELLO THERE"),
+        (LineState.TRANSLATED, "hello there", "merhaba"),
         (LineState.FAILED, "boom", ""),
-        (LineState.TRANSLATED, "bye", "BYE"),
+        (LineState.TRANSLATED, "bye", "hoşça kal"),
     ]
     assert out[1].error == "Translation failed: RuntimeError: provider down"
     assert "hello there" in user_content(llm, 2)
@@ -546,9 +548,7 @@ PROBE = [
 
 @pytest.mark.parametrize("passes,target,source,original,reply,what", PROBE, ids=[c[5] for c in PROBE])
 def test_the_a7_probe_cases(passes, target, source, original, reply, what):
-    problem = reply_problem(reply, original=original, target=languages.resolve_target_language(target),
-                            source_language=source)
-    assert (problem == "") is passes, problem
+    _assert_guard(passes, target, source, original, reply)
 
 
 def test_a_correction_mark_keeps_the_text_after_it_only_when_that_passes():
@@ -584,14 +584,26 @@ def test_the_system_prompt_forbids_notes_and_copied_speech():
     assert "Never add a comment about the task" in system and "Never copy the source-language words" in system
 
 
+def _assert_guard(passes, target, source, original, reply):
+    """A line that must pass goes on screen unchanged. A leak is caught: rejected, or only its clean
+    part is kept (never the reply as it is)."""
+    g = guard_reply(reply, original=original, target=languages.resolve_target_language(target),
+                    source_language=source)
+    if passes:
+        assert (g.problem, g.text) == ("", reply)
+    else:
+        assert g.problem or g.text != reply, "passed unchanged"
+
+
 @pytest.mark.parametrize("reply", [
     "Merhaba dünya. (Note: the speaker is sarcastic.)",
     "Merhaba dünya. Let me translate that again: Selam dünya.",
     "I should only translate the segment. Merhaba.",
     "<segment>Merhaba</segment> dünya",
 ])
-def test_notes_in_a_turkish_reply_are_rejected(reply):
-    assert reply_problem(reply, original="Hello world.", target=TR, source_language="en")
+def test_notes_in_a_turkish_reply_never_reach_the_screen(reply):
+    g = guard_reply(reply, original="Hello world.", target=TR, source_language="en")
+    assert g.problem or ("Note" not in g.text and "translate" not in g.text and "segment" not in g.text)
 
 
 @pytest.mark.parametrize("original,reply,source", [
@@ -614,3 +626,77 @@ def test_a_reply_in_the_wrong_script_is_rejected():
     assert reply_problem("Они сказали, что переговоры возобновятся завтра", original="They said", target=ru,
                          source_language="en") == ""
     assert reply_problem("Переговоры возобновятся завтра в Анкаре", original="x", target=TR, source_language="ru")
+
+
+# The A7 round-3 probe (a7-subtitle-pace/probes/guard_probe_r3.py), case for case.
+PROBE_R3 = [
+    (True, "tr", "en", "Okay.", "Tamam.", "short"),
+    (True, "tr", "en", "Wow.", "Vay.", "very short"),
+    (True, "tr", "en", "Joe Biden, Kamala Harris and Donald Trump.", "Joe Biden, Kamala Harris ve Donald Trump.", "mostly names"),
+    (True, "tr", "en", "Elon Musk, Jeff Bezos, Mark Zuckerberg.", "Elon Musk, Jeff Bezos, Mark Zuckerberg.", "names only, identical"),
+    (True, "tr", "en", "The podcast went viral online.", "Podcast online olarak viral oldu.", "TR loanwords podcast/online/viral"),
+    (True, "tr", "en", "It's a startup with a big marketing budget.", "Büyük bir marketing bütçesi olan bir startup.", "TR loanwords marketing/startup"),
+    (True, "tr", "en", "We had a soft landing, a real win-win.", "Yumuşak iniş yaptık, gerçek bir win-win.", "TR keeps win-win"),
+    (True, "tr", "en", "The CEO of OpenAI spoke at CES 2026.", "OpenAI CEO'su CES 2026'da konuştu.", "acronyms numbers"),
+    (True, "tr", "en", "He tweeted 'game over' at 3 a.m.", "Sabah 3'te 'game over' diye tweet attı.", "quoted English"),
+    (True, "tr", "en", "Breaking news.", "Son dakika.", "short"),
+    (True, "tr", "en", "Thank you so much, everybody!", "Hepinize çok teşekkürler!", "short"),
+    (True, "tr", "en", "Not today.", "Bugün değil.", "word 'Not' in source"),
+    (True, "tr", "en", "Note the date: 5 May.", "Tarihe dikkat: 5 Mayıs.", "label in reply"),
+    (True, "en", "de", "Das ist die korrekte Version der Ereignisse.", "That is the correct version of events.", "EN 'correct version'"),
+    (True, "en", "de", "Ich habe die Textnachricht falsch gelesen.", "I misread the text message.", "EN 'I misread the text'"),
+    (True, "en", "de", "Hier ist meine Übersetzung des Gedichts.", "Here is my translation of the poem.", "EN 'here is my translation'"),
+    (True, "en", "de", "Die endgültige Antwort: nein.", "The final answer: no.", "EN 'final answer:' (salvage?)"),
+    (True, "en", "tr", "Evet, evet.", "Yes, yes.", "EN short from tr"),
+    (True, "de", "en", "He said no, no, no.", "Er sagte nein, nein, nein.", "DE"),
+    (True, "de", "en", "The meeting was in Berlin, so it was easy.", "Das Treffen war in Berlin, also war es einfach.", "DE shared words"),
+    (True, "fr", "en", "He has a dog in Paris.", "Il a un chien à Paris.", "FR 'a'"),
+    (True, "es", "en", "No, no, no!", "¡No, no, no!", "ES no no no"),
+    (True, "es", "en", "It's a hit on Netflix and Spotify.", "Es un éxito en Netflix y Spotify.", "ES brands"),
+    (True, "it", "en", "I love pizza and pasta.", "Amo la pizza e la pasta.", "IT loanword pizza/pasta"),
+    (True, "ja", "en", "It's on YouTube.", "YouTubeで見られる。", "JA brand short"),
+    (True, "ja", "en", "The startup uses machine learning.", "そのスタートアップはmachine learningを使っている。", "JA lowercase English term"),
+    (True, "ar", "en", "Visit www.example.com today.", "تفضلوا بزيارة www.example.com اليوم.", "AR url"),
+    (True, "ru", "en", "He works at Google in Mountain View.", "Он работает в Google в Маунтин-Вью.", "RU"),
+    (True, "ko", "en", "BTS and BLACKPINK on tour.", "BTS와 BLACKPINK 투어 중.", "KO caps"),
+    (True, "hi", "en", "The match is on Star Sports.", "मैच Star Sports पर है।", "HI brand"),
+    (True, "zh", "en", "iPhone sales fell.", "iPhone销量下降。", "ZH"),
+    (True, "tr", "en", "Here's the thing, guys.", "Mesele şu, arkadaşlar.", "TR"),
+    (True, "tr", "en", "I should give him the money.", "Ona parayı vermeliyim.", "TR meta-like source"),
+    (False, "tr", "en", "Thank you.", "Thank you.", "short echo 2 words"),
+    (False, "tr", "en", "Thanks.", "Thanks.", "1-word echo"),
+    (False, "tr", "en", "Look at this.", "Look at this.", "3-word echo"),
+    (False, "tr", "en", "The economy is doing well but inflation is still very high.", "Ekonomi iyi gidiyor but inflation is still very high.", "half echo tail"),
+    (False, "tr", "en", "The economy is doing well but inflation is still very high.", "The economy is doing well ama enflasyon hâlâ çok yüksek.", "half echo head"),
+    (False, "tr", "en", "So we went to the store and bought some milk.", "So we went to the store ve biraz süt aldık.", "half echo head 2"),
+    (False, "tr", "en", "Senators Warren and Sanders said this is unacceptable.", "Senators Warren and Sanders said this is unacceptable.", "echo with names"),
+    (False, "de", "en", "We will see what happens next.", "We will see what happens next.", "DE echo"),
+    (False, "ja", "en", "We will see what happens next.", "We will see what happens next.", "JA echo"),
+    (False, "fr", "en", "This is a disaster for everyone.", "This is a disaster for everyone.", "FR echo"),
+    (False, "tr", "en", "x", "Ekonomi iyi. (Translator's note: idiom)", "translator's note"),
+    (False, "tr", "en", "x", "Ekonomi iyi gidiyor. Actually, a better translation would be: Ekonomi güçlü.", "better translation"),
+    (False, "tr", "en", "x", "Sorry, I can only translate. Ekonomi iyi.", "sorry"),
+    (False, "tr", "en", "x", "Türkçe çeviri: Ekonomi iyi gidiyor.", "Turkish label"),
+    (False, "tr", "en", "x", "Ekonomi iyi gidiyor. Not: Bu deyim.", "Turkish Not:"),
+]
+
+
+@pytest.mark.parametrize("passes,target,source,original,reply,what", PROBE_R3, ids=[c[5] for c in PROBE_R3])
+def test_the_a7_round_3_probe_cases(passes, target, source, original, reply, what):
+    _assert_guard(passes, target, source, original, reply)
+
+
+def test_an_english_target_keeps_speech_that_looks_like_a_note_or_a_mark():
+    en = languages.resolve_target_language("en")
+    for original, reply in [("Die endgültige Antwort: nein.", "The final answer: no."),
+                            ("Hier ist meine Übersetzung des Gedichts.", "Here is my translation of the poem.")]:
+        assert guard_reply(reply, original=original, target=en, source_language="de") == Guarded(reply)
+
+
+def test_a_note_sentence_is_dropped_and_the_translation_kept():
+    g = guard_reply("Sorry, I can only translate. Ekonomi iyi.", original="The economy is fine.", target=TR,
+                    source_language="en")
+    assert (g.text, g.problem, g.salvaged) == ("Ekonomi iyi.", "", True)
+    for reply in ("Thank you.", "Thanks."):  # short everyday echoes
+        assert reply_problem(reply, original=reply, target=TR, source_language="en")
+    assert reply_problem("Hmm.", original="Hmm.", target=TR, source_language="en") == ""  # a filler may stay
