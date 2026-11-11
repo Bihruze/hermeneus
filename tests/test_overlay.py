@@ -538,8 +538,10 @@ def test_original_follows_the_translation_when_it_rolls():
     view = build_view(m, 0, width=20, measure=chars, max_lines=1, show_speaker=False, show_original=True)
     assert "".join(r.text for r in view.lines[0]).endswith("dokuz on")
     assert view.original.startswith("\u2026") and view.original.endswith("eight")
-    # Matching share: 2 of 10 translation words shown, so 2 of 8 original words.
-    assert view.original == "\u2026seven eight"
+    # Matching share: the row holds the newest 4 of 10 translation words, so 4 of 8 original words,
+    # then cut at the front to the width: "...six seven eight".
+    assert "".join(r.text for r in view.lines[0]).strip() == "yedi sekiz dokuz on"
+    assert view.original == "\u2026six seven eight"
     view = build_view(m, 0, width=60, measure=chars, max_lines=1, show_speaker=False, show_original=True)
     assert view.original == "one two three four five six seven eight"  # nothing rolled: the start
     assert fit_tail("the quick brown fox", 8, chars, Run("", PENDING)) == "\u2026fox"
@@ -633,3 +635,43 @@ def test_a_hand_edited_theme_file_with_an_unknown_word_key_still_loads():
     p = tok.palette_from_json(json.dumps(raw))
     assert dict(p.strings) == {"speaker": "Konuşmacı {n}"}
     assert Strings(**dict(p.strings)).label(2) == "Konuşmacı 2"
+
+
+
+def test_one_line_roll_keeps_the_marker_and_fills_the_labels_row():
+    # Before: with Lines = 1 a long failed line lost its marker when the roll dropped the turn's start
+    # (U18), and the row could show a single word because the label and marker took a row of their
+    # own and only the last row was kept (U19).
+    m = OverlayModel()
+    m.apply(line(1, "a", "failed", "one two three four five six seven eight nine ten", "", "s1:speaker_0"), 0)
+    view = build_view(m, 0, width=40, measure=chars, max_lines=1, show_speaker=True, show_original=False)
+    row = view.lines[0]
+    assert len(view.lines) == 1
+    assert [r.kind for r in row[:2]] == [LABEL, MARK]
+    text = "".join(r.text for r in row[2:]).split()
+    assert text[-1] == "ten" and len(text) >= 2  # the newest words, on the label's row
+    assert sum(chars(r.text, r) for r in row) <= 40 + 1
+
+
+def test_one_line_roll_in_another_language_keeps_the_panes_words():
+    from hermeneus_engine.overlay.model import Strings
+    tr = Strings(speaker="Konuşmacı {n}", not_translated="Çevrilmedi")
+    m = OverlayModel()
+    m.apply(line(1, "a", "failed", "bir iki üç dört beş altı yedi sekiz dokuz on", "", "s1:speaker_0"), 0)
+    view = build_view(m, 0, width=36, measure=chars, max_lines=1, show_speaker=True, show_original=False,
+                      strings=tr)
+    texts = [r.text.strip() for r in view.lines[0]]
+    assert texts[:2] == ["Konuşmacı 1", "Çevrilmedi"] and texts[-1].endswith("on")
+
+
+
+def test_one_line_on_a_row_too_narrow_for_the_header_keeps_the_newest_words():
+    # At 320 pt and 44 pt text the label, the marker and a word do not fit together: the label goes
+    # first, then the marker, and the newest words still fill the row.
+    m = OverlayModel()
+    m.apply(line(1, "a", "failed", "aa bb cc dd ee", "", "s1:speaker_0"), 0)
+    view = build_view(m, 0, width=22, measure=chars, max_lines=1, show_speaker=True, show_original=False)
+    texts = [r.text.strip() for r in view.lines[0]]
+    assert texts[0] == "Not translated" and texts[-1].endswith("ee")
+    view = build_view(m, 0, width=10, measure=chars, max_lines=1, show_speaker=True, show_original=False)
+    assert "".join(r.text for r in view.lines[0]).strip() == "cc dd ee"

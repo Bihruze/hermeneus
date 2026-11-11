@@ -352,28 +352,50 @@ def _label_for(turn: list[Run], number: int) -> Run:
 
 def _fit_turn(turn: list[Run], width: float, measure: Measure, max_lines: int,
               show_speaker: bool) -> tuple[tuple[Run, ...], ...]:
-    """One speaker turn in at most ``max_lines`` rows: older lines of the turn leave whole, then the
-    newest rolls. A speaker label that rolls off is shown again at the top."""
+    """One speaker turn in at most ``max_lines`` rows. Older lines of the turn leave whole; then the
+    newest rolls by words, so the rows hold the newest words. Whatever start is shown carries its
+    header again: the speaker label and, for a failed line, the "not translated" marker."""
     groups = _segments(turn)
-    while len(groups) > 1 and _rows([r for g in groups for r in g], width, measure) > max_lines:
+    flat = lambda gs: [r for g in gs for r in g]  # noqa: E731
+    while len(groups) > 1 and _rows(flat(groups), width, measure) > max_lines:
         groups.pop(0)
-        first = groups[0]
-        if show_speaker and first[0].kind != LABEL and first[0].speaker is not None:
-            groups[0] = [_label_for(turn, first[0].speaker)] + first
-    lines = wrap([r for g in groups for r in g], width, measure, max_lines)
-    if show_speaker and lines and lines[0][0].kind != LABEL and lines[0][0].speaker is not None:
-        # Words leave from the front until the label and the rest fit in max_lines.
-        number = lines[0][0].speaker
-        label = _label_for(turn, number)
-        rest = [run for line in lines for run in line]
-        while rest:
-            lines = wrap([label] + rest, width, measure, max_lines + 1)
-            if len(lines) <= max_lines:
-                break
-            _, _, tail = rest[0].text.lstrip().partition(" ")
-            rest = ([Run(tail, rest[0].kind, rest[0].speaker)] if tail.strip() else []) + rest[1:]
-        lines = lines[-max_lines:]
-    return lines
+    speaker = next((r.speaker for r in turn if r.kind not in (LABEL, MARK)), None)
+    label = _label_for(turn, speaker) if show_speaker and speaker is not None else None
+    if label is not None and groups and groups[0][0].kind != LABEL:
+        groups[0] = [label] + groups[0]
+    if _rows(flat(groups), width, measure) <= max_lines:
+        return wrap(flat(groups), width, measure, max_lines)
+    # Roll by words. Each word knows its line's tags; the first word shown gets the label and its
+    # line's marker in front, so a long failed line keeps "not translated" and the text stays on
+    # the label's row (A3 final U18, U19).
+    units: list[tuple[list[Run], list[Run], str, Run]] = []
+    for group in groups:
+        tags = [r for r in group if r.kind in (LABEL, MARK)]
+        first = True
+        for run in group:
+            if run.kind in (LABEL, MARK):
+                continue
+            for word in run.text.split():
+                units.append((tags if first else [], tags, word, run))
+                first = False
+    def build(k: int, use_label: bool, use_marker: bool) -> list[Run]:
+        _, seg_tags, word, run = units[k]
+        runs = ([label] if use_label and label is not None else [])
+        runs += [t for t in seg_tags if t.kind == MARK] if use_marker else []
+        runs.append(Run(word, run.kind, run.speaker))
+        for own, _, later, later_run in units[k + 1:]:
+            runs.extend(t for t in own if t.kind == MARK)
+            runs.append(Run(later, later_run.kind, later_run.speaker))
+        return runs
+
+    # On a row too narrow for the whole header and a word, the label goes first, then the marker:
+    # the newest words always fill the row.
+    for use_label, use_marker in ((True, True), (False, True), (False, False)):
+        for k in range(len(units)):
+            attempt = build(k, use_label, use_marker)
+            if _rows(attempt, width, measure) <= max_lines:
+                return wrap(attempt, width, measure, max_lines)
+    return wrap(build(len(units) - 1, False, False), width, measure, max_lines) if units else ()
 
 
 def layout(runs: list[Run], width: float, measure: Measure, max_lines: int,
