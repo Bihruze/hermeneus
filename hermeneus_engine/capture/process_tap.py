@@ -399,8 +399,8 @@ class ProcessTapBackend:
 def verify_system_audio_capture(timeout_s: float = 30.0) -> tuple[bool, str]:
     """Doctor seam (components "capture.verify_tap_audio"): one real capture of a test tone.
 
-    Plays a short quiet tone with afplay in a separate process, captures it through the
-    full backend and worker, and returns (ok, plain-language detail). The first run on a
+    Plays a short quiet tone from a separate Python player process (``tap_doctor.TonePlayer``,
+    sounddevice), captures it through the full backend and worker, and returns (ok, plain-language detail). The first run on a
     Mac shows the System Audio Recording prompt.
     """
     from .tap_doctor import check_process_tap
