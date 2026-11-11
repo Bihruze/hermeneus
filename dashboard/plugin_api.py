@@ -50,6 +50,8 @@ _doctor = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.doctor")
 _options = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.options")
 _runtime = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.runtime")
 _contracts = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.contracts")
+_ipc = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.ipc")
+_voice_catalog = importlib.import_module(f"{_PACKAGE_NAME}.hermeneus_engine.tts.voice_catalog")
 
 router = APIRouter()
 plugin = _commands.Plugin(None, owner="gateway")
@@ -88,6 +90,26 @@ async def start(body: Optional[dict] = Body(default=None)):
 @router.post("/stop")
 async def stop() -> dict:
     return await plugin.controller.stop()
+
+
+@router.post("/settings")
+async def settings(body: Optional[dict] = Body(default=None)):
+    """Change the running session. Answers at once with the accepted change or a refusal."""
+    try:
+        changes = _options.changes_from_mapping(body or {})
+        return await plugin.set(changes)
+    except _options.UsageError as exc:
+        return _error(400, str(exc))
+    except _ipc.SettingsRefused as exc:
+        return _error(409, str(exc), session=await plugin.controller.status())
+
+
+@router.get("/voices")
+async def voices(refresh: bool = Query(False)):
+    try:
+        return await plugin.voices(refresh=refresh)
+    except _voice_catalog.VoiceListError as exc:
+        return _error(502, str(exc))
 
 
 @router.get("/devices")
