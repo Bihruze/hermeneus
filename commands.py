@@ -148,6 +148,9 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="hermeneus_command", metavar="COMMAND")
     p_doc = sub.add_parser("doctor", help="check what live translation needs on this Mac")
     p_doc.add_argument("--json", action="store_true", help="print the checks as JSON")
+    p_doc.add_argument("--no-audio-check", action="store_true",
+                       help="skip the capture check, which plays a short quiet test tone (on BlackHole or "
+                            "VB-Cable when installed, so you do not hear it)")
     p_doc.add_argument("--test-model", action="store_true",
                        help="also make one tiny call on the live_translate model (spends a few tokens)")
     p_dev = sub.add_parser("devices", help="list audio sources and output devices")
@@ -217,7 +220,8 @@ def model_checks(test_model: bool, llm: Any = None) -> list:
 
 
 def cmd_doctor(args: argparse.Namespace, *, out: TextIO = sys.stdout, plugin: Optional["Plugin"] = None) -> int:
-    report = doctor.run(get_secret=glue.get_secret, aux_config=glue.aux_config())
+    report = doctor.run(get_secret=glue.get_secret, aux_config=glue.aux_config(),
+                        audio_check=not bool(getattr(args, "no_audio_check", False)))
     llm = plugin.ctx.llm if plugin is not None and plugin.ctx is not None else None
     report.checks.extend(model_checks(bool(getattr(args, "test_model", False)), llm))
     if plugin is not None:
