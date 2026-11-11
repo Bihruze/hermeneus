@@ -130,16 +130,19 @@ Measured lag on real audio:
 
 | Clip | Translation ready (p50 / p95 / max) | `read`: first part on screen p50; last part p50 / p95 / max | `live`: first part p50; last part p50 / p95 / max |
 | --- | --- | --- | --- |
-| Al Jazeera English news, 4.2 min, 155 wpm (14.1 characters per second in Turkish) | 2.03 / 3.29 / 4.42 s | 3.6 s; 6.7 / 9.0 / 10.7 s | 2.5 s; 3.8 / 5.3 / 7.3 s |
-| Last Week Tonight (talk show), 3.7 min, 185 wpm (20.0 characters per second in Turkish) | 1.82 / 2.93 / 6.84 s | 21.5 s; 23.9 / 37.9 / 41.8 s | 3.0 s; 4.0 / 9.5 / 13.3 s |
+| Al Jazeera English news, 4.2 min, 155 wpm (14.0 characters per second in Turkish), 44 lines | 2.03 / 3.29 / 4.42 s | 3.6 s; 6.7 / 9.0 / 10.7 s | 2.5 s; 3.8 / 5.3 / 7.3 s |
+| Last Week Tonight (talk show), 3.7 min, 185 wpm (18.9 characters per second in Turkish), 57 lines | 1.82 / 2.93 / 6.84 s | 9.4 s; 11.6 / 25.3 / 29.2 s | 2.8 s; 3.9 / 8.7 / 9.0 s |
+| Late-night talk show monologue, 3.7 min, 162 wpm (15.8 characters per second in Turkish), 69 lines | 2.00 / 2.88 / 4.13 s | 7.0 s; 7.7 / 12.5 / 13.3 s | 3.2 s; 3.6 / 5.2 / 6.2 s |
 
 How it was measured:
 
-- An independent audit ran two real sessions with ElevenLabs Scribe v3 Live and translation into Turkish by `claude-haiku-5-5` (provider `anthropic`), with the audio taken from the player.
-- Each session's time-stamped events were then replayed through the overlay code with an offscreen strip at the default settings, 860 pt wide.
-- Every time runs from the end of a spoken sentence.
+- Three real sessions ran on 2026-11-11 on a MacBook Air (M3) on macOS 27.0.1, with ElevenLabs Scribe v3 Live and translation into Turkish by `claude-haiku-5-5` (provider `anthropic`). The audio was captured from the player app through the process tap.
+- Each session's time-stamped events were then replayed through the overlay code of this release, with an offscreen strip at the default settings, 860 pt wide. Before the replay, every recorded translation went through the current reply check (see [Translation model](#translation-model)). It kept the corrected part of one reply in the news and one in the talk show, and rejected none.
+- Every time runs from the end of a spoken sentence, as the plugin's own `speech_end_ms` timing marks it, to the translated line (first column) or to its first and last part on the strip.
+- p50 and p95 are nearest-rank values without interpolation: the value at position floor(p x n) + 1 in the sorted list of n lines. For 57 lines, p95 is the 55th value.
+- Characters per second are the Turkish characters of all lines divided by the time from the first to the last sentence end.
 
-News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on, while `live` stays within 13.3 s. This is why `live` is the default. Its 13.3 s maximum came on one 404-character line in which the model wrote notes around its translation. The translator now keeps only the corrected part of such a reply (see [Translation model](#translation-model)).
+News at 14 characters per second stays below the Turkish reading speed of 17, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on, by up to 29.2 s, while `live` stays within 9.0 s. This is why `live` is the default.
 
 ### Hermes Desktop pane
 
@@ -477,8 +480,8 @@ Prices change; the ElevenLabs page is the reference.
 - One session runs at a time. A second start reports the running session.
 - The floating strip is macOS only. It was measured above a native full-screen window in its own Space on one built-in display. Several displays and moving between ordinary Spaces were not measured.
 - Your model sets how far subtitles trail the speech and how good they are in a given language.
-- The default `live` pace shows fast speech at up to twice the reading speed. It stayed within 13.3 s of the speech in the talk show measured above.
-- With the `read` pace, which you can choose instead, the strip and the overlay page fall behind fast, continuous speech, by up to 41.8 s in that talk show.
+- The default `live` pace shows fast speech at up to twice the reading speed. It stayed within 9.0 s of the speech in the talk show measured above.
+- With the `read` pace, which you can choose instead, the strip and the overlay page fall behind fast, continuous speech, by up to 29.2 s in that talk show.
 - A line whose translation arrives more than 6 s late can appear on the strip after the lines spoken after it.
 - Speaker labels come from Scribe's diarization. Scribe can merge two labels during a session; Hermeneus relabels the lines it still shows when that happens. When a line already on the strip moves to another speaker, its words move to a new speaker row. This is the one case in which rows on screen change.
 - In voice only mode the pane, the strip and the overlay page still show the lines.
