@@ -32,6 +32,7 @@ from typing import Any, Callable, Optional, Protocol, Sequence
 
 import numpy as np
 
+from ..audio_devices import prefer_one
 from ..contracts import FeedbackRiskError
 from .routing import CaptureGate, RouteVerdict, ensure_route_safe
 
@@ -108,6 +109,17 @@ def _default_query_devices() -> Sequence[dict]:
     return [dict(d) for d in sd.query_devices()]
 
 
+def _default_query_hostapis() -> Sequence[dict]:
+    import sounddevice as sd  # noqa: PLC0415
+    return [dict(a) for a in sd.query_hostapis()]
+
+
+def _default_hostapi() -> Optional[int]:
+    import sounddevice as sd  # noqa: PLC0415
+    value = sd.default.hostapi
+    return value if isinstance(value, int) and value >= 0 else None
+
+
 class PlaybackQueue:
     """Plays mono s16le PCM utterances on one output device, in order."""
 
@@ -117,6 +129,8 @@ class PlaybackQueue:
                  gate_mode: bool = False, gate: Optional[CaptureGate] = None,
                  stream_factory: Callable[..., Any] = _default_stream_factory,
                  query_devices: Callable[[], Sequence[dict]] = _default_query_devices,
+                 query_hostapis: Callable[[], Sequence[dict]] = _default_query_hostapis,
+                 default_hostapi: Callable[[], Optional[int]] = _default_hostapi,
                  clock: Callable[[], int] = time.monotonic_ns,
                  latency: str | float = "low") -> None:
         if gate_mode and gate is None:
@@ -130,6 +144,8 @@ class PlaybackQueue:
         self._gate = gate
         self._stream_factory = stream_factory
         self._query_devices = query_devices
+        self._query_hostapis = query_hostapis
+        self._default_hostapi = default_hostapi
         self._clock = clock
         self._latency = latency
         self._pending: collections.deque[Utterance] = collections.deque()
@@ -202,6 +218,9 @@ class PlaybackQueue:
             folded = self.device_name.casefold()
             exact = [i for i, d in enumerate(devices)
                      if str(d.get("name", "")).casefold() == folded and d.get("max_output_channels", 0) > 0]
+        if len(exact) > 1:
+            # Windows lists one endpoint per host API under one name (audio_devices.prefer_one).
+            exact = prefer_one(exact, devices, self._query_hostapis, self._default_hostapi)
         if len(exact) != 1:
             names = ", ".join(d["name"] for d in devices if d.get("max_output_channels", 0) > 0)
             raise PlaybackError(f"Output device '{self.device_name}' not found. Available outputs: {names}")

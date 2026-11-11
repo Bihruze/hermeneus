@@ -27,6 +27,7 @@ import time
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Callable, Iterable, Optional, Sequence
 
+from ..audio_devices import same_loopback_device
 from ..contracts import ENGINE_CHANNELS, ENGINE_SAMPLE_RATE, ENGINE_SAMPLE_WIDTH, FeedbackRiskError, FrameSink, OutputDevice
 
 if TYPE_CHECKING:
@@ -313,6 +314,10 @@ def check_feedback_risk(output_device_name: str, capture_device_name: Optional[s
         warnings.append(f"Capture device '{capture_device_name}' was not found in the device list.")
         cap = AudioDeviceInfo(name=capture_device_name)
 
+    if cap is not None and out.name != cap.name and same_loopback_device(out.name, cap.name):
+        return verdict(True, CODE_SAME_DEVICE,
+                       f"'{out.name}' plays into '{cap.name}', the other side of the same virtual cable, which is "
+                       "being captured. Spoken translation played there would be captured and translated again.")
     if cap is not None and out.name == cap.name:
         return verdict(True, CODE_SAME_DEVICE,
                        f"'{out.name}' is the device being captured. Spoken translation played there "
