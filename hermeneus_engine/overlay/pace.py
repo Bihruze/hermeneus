@@ -31,17 +31,17 @@ from .model import FAILED, LABEL, MARK, TRANSLATED, Measure, OverlayModel, Run, 
 # -- reading speed -----------------------------------------------------------------
 
 # Characters per second for adult programmes. Netflix Timed Text Style Guides: Turkish I.17 (17),
-# English (USA) I.14 (20), 17 for most other languages, Traditional Chinese 9; ja and ko are
+# English (USA) I.14 and II.17 (20), 17 for most other languages, Traditional Chinese 9; ja and ko are
 # character-based targets with their own, lower, limits.
 READING_CPS = {"tr": 17.0, "en": 20.0, "zh": 9.0, "ja": 4.0, "ko": 12.0}
 DEFAULT_CPS = 17.0
 CPS_MIN, CPS_MAX = 5, 30
 
-MIN_S = 1.0  # minimum time one unit is the newest on screen (Netflix 5/6 s, DCMP 1.33 s, BBC 0.3 s per word)
+MIN_S = 1.0  # minimum time per unit (Netflix 5/6 s; DCMP 40 frames, 1.33 s at 30 fps; BBC 0.3 s per word)
 CHUNK_CHARS = 42  # Netflix characters per line: the unit size when the strip's width is not known
 UNIT_CHARS = 84  # at most a two-line subtitle (2 x 42) goes up as one unit
 
-HOLD_S = 7.0  # the strip clears this long after the last unit had its reading time (Netflix: 7 s per event)
+HOLD_S = 7.0  # the strip clears this long after the last unit went up, once none waits (Netflix: 7 s per event)
 ORDER_WAIT_S = 6.0  # a later translation waits this long at most for an earlier line still being translated
 LIVE_BACKLOG_S = 3.0  # "follow live" speeds up while more reading time than this waits (Ofcom's 3 s)
 LIVE_MAX_SPEEDUP = 2.0  # ... but never to less than half the reading time
@@ -301,6 +301,31 @@ class _Paragraph:
     speaker_id: str
     units: list[Unit]
     label: bool  # the first row carries the speaker label
+    starts: list[bool] = field(default_factory=list)  # per unit: it starts a sentence
+
+
+_SENTENCE_END = re.compile(r"[.!?\u2026:\"\u201d\u00bb)\u3002\uff01\uff1f]$")
+_FIRST = re.compile(r"[^\W_]")  # the first letter or digit
+
+
+def continues_sentence(before: str, text: str) -> bool:
+    """True when ``text`` starts inside a sentence (Netflix Turkish I.5 then wants "\u2026" on it).
+
+    Its first letter or digit decides. A lowercase letter means mid-sentence: the session cut one
+    sentence into two lines, or the model's line picks up mid-sentence. A capital is a sentence start,
+    so "\u2026" never lands on a real one. A digit ("30 yaş ...") or a script without case is mid-sentence
+    only when ``before`` (the same speaker's text just before it, "" when there is none) has no
+    sentence-final mark."""
+    first = _FIRST.search(text.strip())
+    if first is None:
+        return False
+    ch = first.group(0)
+    if ch.islower():
+        return True
+    if ch.isupper():
+        return False
+    before = before.strip()
+    return bool(before) and not _SENTENCE_END.search(before)
 
 
 PARAGRAPH_SENTENCES = 4  # a speaker's turn starts a new row after this many sentences (rows stay put)
@@ -311,14 +336,22 @@ def paragraphs(units: list[Unit], show_speaker: bool) -> list[_Paragraph]:
     subtitles and Netflix (one speaker per line) do, and so does every ``PARAGRAPH_SENTENCES``-th
     sentence of a long turn, so a row never reflows once it is up."""
     out: list[_Paragraph] = []
+    previous: Optional[Unit] = None
     for unit in units:
         last = out[-1] if out else None
-        sentences = sum(1 for u in last.units if u.first) if last else 0
-        if last is None or unit.speaker_id != last.speaker_id or (unit.first and sentences >= PARAGRAPH_SENTENCES):
+        # A line's first unit starts a sentence unless it starts inside one (continues_sentence).
+        same = previous is not None and previous.speaker_id == unit.speaker_id and previous.kind == TRANSLATED
+        starts = unit.first and not (unit.kind == TRANSLATED and
+                                     continues_sentence(previous.text if same else "", unit.text))
+        sentences = sum(1 for s in last.starts if s) if last else 0
+        if last is None or unit.speaker_id != last.speaker_id or (starts and sentences >= PARAGRAPH_SENTENCES):
             turn = last is None or unit.speaker_id != last.speaker_id
-            out.append(_Paragraph(unit.speaker_id, [unit], label=show_speaker and turn and bool(unit.speaker_id)))
+            out.append(_Paragraph(unit.speaker_id, [unit], label=show_speaker and turn and bool(unit.speaker_id),
+                                  starts=[starts]))
         else:
             last.units.append(unit)
+            last.starts.append(starts)
+        previous = unit
     return out
 
 
@@ -333,7 +366,8 @@ def paragraph_runs(par: _Paragraph, number: Optional[int], strings: Strings) -> 
         if unit.kind == FAILED and new_line:
             runs.append((Run(strings.not_translated, MARK, number), True, k))
         if unit.text:
-            runs.append((Run(unit.text, unit.kind, number), unit.first, k))
+            starts = par.starts[k] if k < len(par.starts) else unit.first
+            runs.append((Run(unit.text, unit.kind, number), starts, k))
         previous = unit
     return runs
 
@@ -394,9 +428,11 @@ def wrap_rows(pairs: list[tuple[Run, bool, int]], width: float, measure: Measure
                 if break_before(before[0].strip(), after[0].strip()) and row_width(row[:k]) >= 0.6 * width:
                     cut = k
                     break
-            if cut == len(row) and (start is None or start == 0):
+            if cut == len(row) and start == 0:
                 # A plain break inside the unit. When the rest of the unit fits one row, even the two
                 # rows out, so no row holds one short word (Netflix: "Avoid having one short word").
+                # Only when this row holds nothing but this unit's words: a row that also holds an
+                # earlier unit is on screen already and never changes (A7-1).
                 tail = [t for t in tokens[index:] if t[4] == unit]
                 if row_width(tail) <= width:
                     best, best_gap = cut, None

@@ -240,7 +240,7 @@ def test_only_a_word_wider_than_the_strip_is_split_and_it_carries_a_hyphen():
 
 
 def test_the_top_row_says_when_it_continues_a_sentence():
-    model, q = queue_with("bir iki üç dört beş altı yedi sekiz dokuz on.", limit=60)
+    model, q = queue_with("Bir iki üç dört beş altı yedi sekiz dokuz on.", limit=60)
     run_until(q, model, 10)
     rows = rows_of(q.shown(), model, 12)
     assert not rows[0].continues and rows[1].continues
@@ -436,3 +436,60 @@ def test_a_unit_over_two_rows_is_split_evenly_not_with_one_word_left():
     pairs = [(Run("Başkentteki hastaneler şu", TRANSLATED), True, 0)]
     rows = pace.wrap_rows(pairs, 22, chars)
     assert ["".join(r.text for r in row.runs) for row in rows] == ["Başkentteki", "hastaneler şu"]
+
+
+_FUZZ_WORDS = ("salgın mayıs ayında başladı ve virüs ülkenin sekiz bölgesine yayıldı ama yetkililer durumun kontrol "
+               "altında olduğunu söyledi çünkü aşılama kampanyası hızla ilerliyor için kadar göre sonra, büyük. "
+               "küçük; bakanlık").split()
+
+
+@pytest.mark.parametrize("width", [24, 32, 42, 60])
+def test_a_new_unit_never_moves_words_already_on_screen(width):
+    # A7-1: the balancing step moved the last words of a row already on screen down when the next unit
+    # arrived (a news row ending "... için bir son haber var." became "... için bir" + "son haber
+    # var. ..."). Every row of the view before a unit arrived must be unchanged after it, the bottom one
+    # only growing.
+    import random
+    limit = int(max(16, min(pace.UNIT_CHARS, 0.85 * 2 * width)))
+    model = OverlayModel()
+    model.speakers = {"a": 1}
+    for trial in range(150):
+        rng = random.Random(trial * 7 + width)
+        units = []
+        for li in range(rng.randint(2, 7)):
+            text = " ".join(rng.choice(_FUZZ_WORDS) for _ in range(rng.randint(2, 30))).capitalize() + "."
+            units += [pace.Unit(f"l{li}", i, part, TRANSLATED, "a", 0.0, i == 0, "tr")
+                      for i, part in enumerate(pace.split_phrases(text, limit))]
+        before = None
+        for n in range(1, len(units) + 1):
+            rows = rows_of(units[:n], model, width, show_speaker=True)
+            if before is not None:
+                assert rows[:len(before) - 1] == before[:-1], (trial, n)
+                old = " ".join(r.text for r in before[-1].runs).split()
+                assert " ".join(r.text for r in rows[len(before) - 1].runs).split()[:len(old)] == old, (trial, n)
+            before = rows
+
+
+def test_a_sentence_split_across_two_lines_takes_an_ellipsis_on_its_top_row():
+    # A7-5: the session cut one sentence into two lines; the second line's top row read
+    # "telefonla Ankara'dan ..." with no sign that it carries on.
+    model, q = queue_with("Bakan bu sabah", "telefonla Ankara'dan konuştu.", "Yeni bir cümle başlıyor.")
+    run_until(q, model, 30)
+    rows = rows_of(q.shown(), model, 40)
+    by_start = {"".join(r.text for r in row.runs).split()[0]: row for row in rows}
+    for k in range(1, len(rows) + 1):
+        top = pace.window(rows[:k], 1)[0]
+        first = top[0].text
+        word = first.lstrip(pace.ELLIPSIS).split()[0]
+        assert first.startswith(pace.ELLIPSIS) == by_start[word].continues
+    narrow = rows_of(q.shown(), model, 16)  # each line starts its own rows at this width
+    tops = [pace.window(narrow[:k], 1)[0][0].text for k in range(1, len(narrow) + 1)]
+    assert pace.ELLIPSIS + "telefonla" in [t.split()[0] for t in tops]
+    assert "Yeni" in [t.split()[0] for t in tops]  # a real sentence start never takes one
+    assert "Bakan" in [t.split()[0] for t in tops]
+    assert pace.continues_sentence("Bakan bu sabah", "telefonla")
+    assert pace.continues_sentence("bildirdi.", "onunla hükümet kurma")  # real news: a lowercase start after a full stop
+    assert not pace.continues_sentence("ama", "Mira Tal")  # a capital may start a new sentence: no ellipsis
+    assert not pace.continues_sentence("bitti.", "30 yaş altı")  # a digit start: punctuation decides
+    assert pace.continues_sentence("yaklaşık", "30 yaş altı")
+    assert pace.continues_sentence("他说", "我们") and not pace.continues_sentence("他说。", "我们")  # no case: punctuation

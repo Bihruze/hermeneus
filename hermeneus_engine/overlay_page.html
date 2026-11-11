@@ -82,11 +82,17 @@ html, body {
   line-height: 1.25;
   vertical-align: 0.15em;
 }
+/* "Translating": one small dot in a faint ring on a spot of its own below the lines, as on the native
+   strip, so it never reads as a "..." continuation of the text. */
 #pending {
   color: var(--text-tertiary, var(--text-secondary));
-  font-size: 0.6em;
-  letter-spacing: 0.15em;
-  line-height: 1;
+  width: 0.32em;
+  height: 0.32em;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 0 0.12em var(--surface), 0 0 0 0.2em currentColor;
+  opacity: 0.85;
+  margin-top: 0.15em;
 }
 /* Under 50% background the video shows through: light text with a thin dark edge in every theme, as TV
    subtitles are (the native strip's theme.see_through). */
@@ -138,6 +144,10 @@ html, body {
   var ORDER_WAIT_S = 6.0
   var LIVE_BACKLOG_S = 3.0
   var LIVE_MAX_SPEEDUP = 2.0
+  // A paced unit (pace.py UNIT_CHARS, CHUNK_CHARS): a sentence that fits max_lines rows, or even phrase
+  // units of a longer one. The page measures its row width (unitCharsFor); this is the fallback.
+  var UNIT_CHARS = 84
+  var UNIT_MIN_CHARS = 16
   // banner: the opt-in overlay_style colours (overlay_tokens.BANNER); the server setting picks it as the default.
   var THEMES = ['auto', 'light', 'dark', 'banner']
   var LINE_STATES = ['partial', 'committed', 'translated', 'failed']
@@ -313,9 +323,68 @@ html, body {
     if (line.state === 'translated' && line.translation.trim() !== '') return line.translation
     return settings.show_original ? line.original : ''
   }
-  /** Lines waiting for their turn on screen, in speech order. A line still being translated holds
+  // Phrase boundaries, as in pace.py: after punctuation, before a conjunction or preposition, after a
+  // Turkish postposition.
+  var ENDS_PHRASE = /[,;:.!?\u2026\u2014\u2013)\]"\u201d\u00bb]$/
+  var BREAK_BEFORE = ('and but or nor so yet because although though while whereas which who whom whose where when if unless ' +
+    'until since than that as after before about with without from into for of on in at to by between during ' +
+    've ama fakat ancak lakin oysa halbuki veya ya yahut yoksa \u00e7\u00fcnk\u00fc zira e\u011fer ' +
+    'et mais ou donc car que qui dont o\u00f9 quand si y pero porque aunque und aber oder weil dass wenn als ' +
+    'e ma perch\u00e9 quando').split(' ')
+  var BREAK_AFTER = ('gibi kadar i\u00e7in sonra \u00f6nce ra\u011fmen kar\u015f\u0131n g\u00f6re beri dolay\u0131 do\u011fru itibaren').split(' ')
+  function bare(word) {
+    return word.replace(/^["'\u201c\u201d\u00ab\u00bb()]+|["'\u201c\u201d\u00ab\u00bb()]+$/g, '').toLowerCase()
+  }
+  function breakBefore(prev, word) {
+    if (!prev || !word) return false
+    if (ENDS_PHRASE.test(prev)) return true
+    return BREAK_BEFORE.indexOf(bare(word)) !== -1 || BREAK_AFTER.indexOf(bare(prev)) !== -1
+  }
+  /** pace.split_phrases: the fewest units of at most `limit` characters, of about even length, each cut
+   *  at the phrase boundary nearest that length, never inside a word. Joined with spaces they give the
+   *  text back word for word. */
+  function splitPhrases(value, limit) {
+    var words = String(value).split(/\s+/).filter(function (w) { return w !== '' })
+    if (words.length === 0) return ['']
+    var units = []
+    var total = Math.max(1, Math.ceil(words.join(' ').length / limit))
+    while (words.length) {
+      var rest = words.join(' ')
+      if (rest.length <= limit) { units.push(rest); break }
+      var parts = Math.max(total - units.length, Math.ceil(rest.length / limit))
+      var target = rest.length / parts
+      var best = 1
+      var bestScore = null
+      for (var k = 1; k < words.length; k++) {
+        var size = words.slice(0, k).join(' ').length
+        if (size > limit) break
+        var score = Math.abs(size - target) - (breakBefore(words[k - 1], words[k]) ? limit * 0.4 : 0)
+        if (bestScore === null || score < bestScore) { best = k; bestScore = score }
+      }
+      units.push(words.slice(0, best).join(' '))
+      words = words.slice(best)
+    }
+    return units
+  }
+  /** The unit size for a row width of `rowChars` characters (app.py _unit_chars). */
+  function unitCharsFor(rowChars, maxLines) {
+    if (!(rowChars > 0)) return UNIT_CHARS
+    return Math.floor(Math.max(UNIT_MIN_CHARS, Math.min(UNIT_CHARS, 0.85 * maxLines * rowChars)))
+  }
+  function unitKey(line, index) {
+    return index === 0 ? line.line_id : line.line_id + '#' + index
+  }
+  /** A line's paced units: {key, index, text, line}. The first keeps the line id, so a short line is one
+   *  unit under its own id. A line that was not translated is one unit (its marker, and its original
+   *  only with show_original). */
+  function unitsOf(line, settings) {
+    var value = shownText(line, settings)
+    var parts = value.trim() === '' ? [''] : splitPhrases(value, settings.unit_chars || UNIT_CHARS)
+    return parts.map(function (part, index) { return { key: unitKey(line, index), index: index, text: part, line: line } })
+  }
+  /** Units waiting for their turn on screen, in speech order. A line still being translated holds
    *  the ones after it for at most ORDER_WAIT_S; partial lines (words still being spoken) never enter. */
-  function waiting(state, now) {
+  function waiting(state, now, settings) {
     var out = []
     var blocked = false
     for (var i = 0; i < state.lines.length; i++) {
@@ -325,9 +394,13 @@ html, body {
         if (now - (has(state.seen, line.line_id) ? state.seen[line.line_id] : now) < ORDER_WAIT_S) blocked = true
         continue
       }
-      if (has(state.shown, line.line_id) || blocked) continue
       if (line.state === 'translated' && line.translation === '' && line.original === '') continue
-      out.push(line)
+      var units = unitsOf(line, settings)
+      for (var u = 0; u < units.length; u++) {
+        if (has(state.shown, units[u].key)) continue
+        if (blocked && !has(state.shown, line.line_id)) break // the line has not started: it waits its turn
+        out.push(units[u])
+      }
     }
     return out
   }
@@ -339,29 +412,30 @@ html, body {
     var lastShown = state.lastShown
     var changed = false
     for (;;) {
-      var queue = waiting(Object.assign({}, state, { shown: shown }), now)
+      var queue = waiting(Object.assign({}, state, { shown: shown }), now, settings)
       if (queue.length === 0) break
-      var line = queue[0]
+      var unit = queue[0]
+      var line = unit.line
       var start = Math.max(has(state.ready, line.line_id) ? state.ready[line.line_id] : now, freeAt)
       if (start > now + 1e-9) break
       if (now - start > 0.5) start = now // the page slept: no burst of stale lines
       var cps = readingCps(line.target_language, settings.reading_cps)
-      var dwell = readingTime(shownText(line, settings), cps)
+      var dwell = readingTime(unit.text, cps)
       if (settings.pace === 'live') {
         var backlog = 0
         for (var k = 0; k < queue.length; k++) {
-          backlog += readingTime(shownText(queue[k], settings), readingCps(queue[k].target_language, settings.reading_cps))
+          backlog += readingTime(queue[k].text, readingCps(queue[k].line.target_language, settings.reading_cps))
         }
         if (backlog > LIVE_BACKLOG_S) dwell = Math.max(MIN_S, dwell / LIVE_MAX_SPEEDUP, dwell * LIVE_BACKLOG_S / backlog)
       }
       if (!changed) shown = Object.assign({}, shown)
-      shown[line.line_id] = start
+      shown[unit.key] = start
       freeAt = start + dwell
       lastShown = start
       changed = true
     }
     var clearedAt = state.clearedAt
-    if (lastShown !== null && clearedAt < lastShown && waiting(Object.assign({}, state, { shown: shown }), now).length === 0 &&
+    if (lastShown !== null && clearedAt < lastShown && waiting(Object.assign({}, state, { shown: shown }), now, settings).length === 0 &&
         now > Math.max(lastShown, state.activeAt) + HOLD_S && now > freeAt) {
       clearedAt = now
       changed = true
@@ -370,46 +444,79 @@ html, body {
     return Object.assign({}, state, { shown: shown, freeAt: freeAt, lastShown: lastShown, clearedAt: clearedAt })
   }
   /** Every final line on screen at once, ignoring time (tests and a first look at a stream). */
-  function settle(state) {
+  function settle(state, settings) {
+    settings = settings || DEFAULTS
     var shown = Object.assign({}, state.shown)
     var lastShown = state.lastShown
     for (var i = 0; i < state.lines.length; i++) {
-      if (isFinal(state.lines[i]) && !has(shown, state.lines[i].line_id)) { shown[state.lines[i].line_id] = 0; lastShown = 0 }
+      if (!isFinal(state.lines[i])) continue
+      var units = unitsOf(state.lines[i], settings)
+      for (var u = 0; u < units.length; u++) {
+        if (!has(shown, units[u].key)) { shown[units[u].key] = 0; lastShown = 0 }
+      }
     }
     return Object.assign({}, state, { shown: shown, lastShown: lastShown, clearedAt: -Infinity })
   }
-  /** Speech was heard whose translation is not on screen yet: the page shows three small dots. */
+  /** Speech was heard whose translation is not on screen yet: the page shows its small "translating" dot. */
   function pendingIndicator(state) {
     if (state.status !== null && RUNNING.indexOf(state.status) === -1) return false
     return state.lines.some(function (line) {
       return line.state === 'committed' || (line.state === 'partial' && line.original !== '')
     })
   }
-  /** What the page draws: the lines the queue put up (target language only unless show_original), newest
+  /** pace.continues_sentence: the text starts inside a sentence: with a lowercase letter, or, in a
+   *  script without case, after the same speaker's text `before` left the sentence open. */
+  var SENTENCE_END = /[.!?\u2026:"\u201d\u00bb)\u3002\uff01\uff1f]$/
+  function continuesSentence(before, value) {
+    var start = String(value || '').trim().match(/[\p{L}\p{N}]/u)
+    if (!start) return false
+    var ch = start[0]
+    var lower = ch.toLowerCase()
+    var upper = ch.toUpperCase()
+    if (ch === lower && ch !== upper) return true
+    if (ch === upper && ch !== lower) return false
+    before = String(before || '').trim()
+    return before !== '' && !SENTENCE_END.test(before)
+  }
+  /** What the page draws: the units the queue put up (target language only unless show_original), newest
    *  last; fit() then keeps them to max_lines rendered rows. One rule with the native strip (overlay/pace.py):
-   *  a line that was not translated shows its marker, and its original only with show_original. */
+   *  a long line goes up in units that each fit the rows, so every word is shown; a line that was not
+   *  translated shows its marker, and its original only with show_original. */
   function visibleLines(state, settings, words) {
     words = words || WORDS
     if (state.status !== null && RUNNING.indexOf(state.status) === -1) return []
-    var shown = state.lines.filter(function (line) {
-      return has(state.shown, line.line_id) && state.shown[line.line_id] >= state.clearedAt && isFinal(line) &&
-        !(line.state === 'translated' && line.translation === '' && line.original === '')
-    })
+    var shown = []
+    for (var i = 0; i < state.lines.length; i++) {
+      var line = state.lines[i]
+      if (!isFinal(line) || (line.state === 'translated' && line.translation === '' && line.original === '')) continue
+      var units = unitsOf(line, settings)
+      var lineUnits = units.filter(function (u) { return has(state.shown, u.key) && state.shown[u.key] >= state.clearedAt })
+      for (var j = 0; j < lineUnits.length; j++) {
+        lineUnits[j].last = j === lineUnits.length - 1
+        shown.push(lineUnits[j])
+      }
+    }
     var kept = shown.slice(-settings.max_lines)
-    return kept.map(function (line, index) {
+    return kept.map(function (unit, index) {
+      var line = unit.line
       var translated = line.state === 'translated' && line.translation !== ''
       var number = line.speaker_id !== null && has(state.speakers, line.speaker_id) ? state.speakers[line.speaker_id] : null
-      // Only a new turn carries the label (the line before it, shown or gone, had another speaker).
+      // Only a new turn carries the label (the unit before it, shown or gone, had another speaker).
       var before = shown[shown.length - kept.length + index - 1]
-      if (before && before.speaker_id === line.speaker_id) number = number === null ? null : -number
+      if (before && before.line.speaker_id === line.speaker_id) number = number === null ? null : -number
       var failed = !translated
+      // The unit starts inside a sentence: a later unit of its line, or a line that starts inside one.
+      var same = before !== undefined && before.line.speaker_id === line.speaker_id && before.line.state === 'translated'
+      var continues = unit.index > 0 || (!failed && continuesSentence(same ? before.text : '', unit.text))
       return {
-        id: line.line_id,
-        text: shownText(line, settings),
+        id: unit.key,
+        text: unit.text,
         pending: false,
         failed: failed,
-        marker: failed ? words.not_translated : '',
-        original: settings.show_original && translated && line.original !== '' ? line.original : '',
+        continues: continues,
+        marker: failed && unit.index === 0 ? words.not_translated : '',
+        // The original rides on the line's newest unit on screen.
+        original: settings.show_original && translated && line.original !== '' && unit.last ? line.original : '',
         // Compact: the speaker's number in a pill of the speaker's colour (the full words are its title).
         speaker: settings.show_speaker && number !== null && number > 0 ? String(number) : '',
         speakerTitle: settings.show_speaker && number !== null ? words.speaker.replace('{n}', String(Math.abs(number))) : '',
@@ -494,6 +601,9 @@ html, body {
     settle: settle,
     pendingIndicator: pendingIndicator,
     readingCps: readingCps,
+    splitPhrases: splitPhrases,
+    unitCharsFor: unitCharsFor,
+    continuesSentence: continuesSentence,
     tokensOf: tokensOf,
     fitRows: fitRows
   }
@@ -550,7 +660,25 @@ html, body {
 
   // Each line keeps its element while it changes, so a partial is replaced in place by its
   // translation and nothing is torn down and rebuilt.
+  // How many characters one row holds at this width and text size, measured on a hidden line, so a
+  // paced unit always fits max_lines rows and is never cut (app.py _unit_chars on the strip).
+  var SAMPLE = 'Bu c\u00fcmle sat\u0131r\u0131n ka\u00e7 harf ald\u0131\u011f\u0131n\u0131 \u00f6l\u00e7er ve sonra devam eder. '
+  function measureUnitChars() {
+    var probe = makeNode()
+    probe.root.style.visibility = 'hidden'
+    probe.root.style.position = 'absolute'
+    var value = ''
+    while (value.length < 400) value += SAMPLE
+    value = value.trim()
+    probe.text.textContent = value
+    container.appendChild(probe.root)
+    var rows = rowsIn(probe.main)
+    probe.root.remove()
+    return unitCharsFor(rows > 0 ? value.length / rows : 0, settings.max_lines)
+  }
+
   function render() {
+    if (!settings.unit_chars) settings.unit_chars = measureUnitChars()
     var views = visibleLines(state, settings, words)
     var keep = {}
     for (var i = 0; i < views.length; i++) {
@@ -584,7 +712,6 @@ html, body {
   var pendingEl = document.createElement('div')
   pendingEl.id = 'pending'
   pendingEl.setAttribute('aria-hidden', 'true')
-  pendingEl.textContent = '\u2022\u2022\u2022'
   pendingEl.hidden = true
 
   function rowsIn(el) {
@@ -630,6 +757,12 @@ html, body {
       })
     for (var i = 0; i < list.length; i++) list[i].node.root.hidden = i < result.first
     var newest = list[list.length - 1]
+    var top = list[result.first]
+    if (top.view.continues && top.view.text !== '' && !(top === newest && result.cut > 0)) {
+      // The top unit starts inside a sentence (a later unit of its line, or a line that carries on the
+      // one before): an ellipsis says so (Netflix Turkish I.5), as on the native strip.
+      top.node.text.textContent = '\u2026' + top.view.text
+    }
     if (result.cut > 0) {
       // The line starts mid-sentence on screen: an ellipsis says so.
       newest.node.text.textContent = '\u2026' + newest.tokens.parts.slice(result.cut).join(newest.tokens.joiner)
@@ -681,7 +814,7 @@ html, body {
   }, 100)
 
   // The width decides the wrapping, so the row limit is applied again when it changes.
-  root.addEventListener('resize', function () { render() })
+  root.addEventListener('resize', function () { settings.unit_chars = 0; render() })
 
   var lostTimer = null
   var source = new EventSource('events')

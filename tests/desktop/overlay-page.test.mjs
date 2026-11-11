@@ -281,3 +281,46 @@ test('text without spaces rolls by characters; a line is never emptied', () => {
 function plainFit(v) {
   return JSON.parse(JSON.stringify(v))
 }
+
+test('a long line is split into units the way the native strip splits it (pace.split_phrases)', () => {
+  // Expected values come from hermeneus_engine/overlay/pace.py split_phrases on the same input.
+  const cases = [
+    ['Komite bulgularını gelecek bahar her üye devleti, bölgesel bankaları ve bağımsız denetçileri dinledikten sonra yayımlayacak.', 48,
+      ['Komite bulgularını gelecek bahar her üye', 'devleti, bölgesel bankaları', 've bağımsız denetçileri dinledikten sonra', 'yayımlayacak.']],
+    ['Belediye meclisi yeni bütçeyi onayladığı için yarın sabah bir basın toplantısı yapılacak ve ayrıntılar açıklanacak', 42,
+      ['Belediye meclisi yeni bütçeyi onayladığı', 'için yarın sabah bir basın toplantısı', 'yapılacak ve ayrıntılar açıklanacak']],
+    ['Kısa.', 42, ['Kısa.']]
+  ]
+  for (const [text, limit, want] of cases) assert.deepEqual(JSON.parse(JSON.stringify(O.splitPhrases(text, limit))), want)
+  assert.equal(O.unitCharsFor(80, 2), 84) // a wide page: a two-line subtitle
+  assert.equal(O.unitCharsFor(30, 2), 51)
+  assert.equal(O.unitCharsFor(10, 1), 16)
+  assert.equal(O.unitCharsFor(30, 6), 84) // more rows never make a unit longer than 84
+})
+
+test('the page paces a long line unit by unit, each its own reading time, and shows every word', () => {
+  const settings = Object.assign(O.resolveSettings({ max_lines: 2 }, ''), { unit_chars: 42 })
+  const text = 'Belediye meclisi yeni bütçeyi onayladığı için yarın sabah bir basın toplantısı yapılacak ve ayrıntılar açıklanacak'
+  let s = O.applyEvent(O.createState(), { type: 'line', seq: 1, line: { line_id: 'a', state: 'translated', original: 'x', translation: text, speaker_id: null, target_language: 'tr' } }, 0)
+  const seen = []
+  for (let t = 0; t < 10; t = Math.round((t + 0.05) * 100) / 100) {
+    s = O.advance(s, t, settings)
+    for (const v of O.shownNow(s, settings)) if (!seen.includes(v.text)) seen.push(v.text)
+  }
+  assert.deepEqual(seen, ['Belediye meclisi yeni bütçeyi onayladığı', 'için yarın sabah bir basın toplantısı', 'yapılacak ve ayrıntılar açıklanacak'])
+  assert.deepEqual(Object.keys(s.shown), ['a', 'a#1', 'a#2'])
+  assert.ok(Math.abs(s.shown['a#1'] - 40 / 17) < 0.06) // the first unit's 40 characters at 17 cps
+  assert.ok(Math.abs(s.shown['a#2'] - s.shown['a#1'] - 37 / 17) < 0.06)
+  const views = O.shownNow(s, settings)
+  assert.deepEqual(views.map(v => [v.id, v.continues]), [['a#1', true], ['a#2', true]])
+})
+
+test('a top unit that starts mid-sentence is marked to take an ellipsis; a sentence start is not', () => {
+  assert.equal(O.continuesSentence('Bakan bu sabah', "telefonla Ankara'dan"), true)
+  assert.equal(O.continuesSentence('bildirdi.', 'onunla hükümet kurma'), true)
+  assert.equal(O.continuesSentence('ama', 'Mira Tal'), false)
+  assert.equal(O.continuesSentence('bitti.', '30 yaş altı'), false)
+  assert.equal(O.continuesSentence('yaklaşık', '30 yaş altı'), true)
+  assert.equal(O.continuesSentence('他说', '我们'), true)
+  assert.equal(O.continuesSentence('他说。', '我们'), false)
+})
