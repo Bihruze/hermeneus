@@ -1,12 +1,13 @@
 """One process tap session: tap, private aggregate device, IOProc and conversion.
 
 This runs inside the capture worker process (see ``_tap_worker``). Two readers
-exist. The default, ``portaudio``, opens the private aggregate as a PortAudio
-input and drains it with blocking reads, so no Python code runs on the realtime
-thread (see ``_pa_reader``). The ``ioproc`` reader installs an IOProc through
-PyObjC whose Python block only copies each buffer into a queue; it is kept as
-the fallback when sounddevice is not importable. Either way a converter thread
-resamples to engine format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
+exist. The default, ``ioproc``, installs an IOProc through PyObjC whose Python
+block only copies each buffer into a queue; the worker is otherwise idle, so the
+block gets the GIL at once. The ``portaudio`` reader opens the private aggregate
+as a PortAudio input and drains it without a Python callback (see
+``_pa_reader``); it measured worse in the worker (see ``_tap_worker.main``) and
+stays available on request. Either way a converter thread resamples to engine
+format and hands PCM to ``on_pcm``. Once per ``refresh_interval`` the
 converter thread also:
 
 * follows the processes the tap should cover (app helpers that start later,
@@ -58,6 +59,8 @@ STATUS_NO_AUDIO = "no-audio"          # never received audio while a process pla
 STATUS_STALLED = "stalled"            # audio stopped and rebuilding did not bring it back
 STATUS_RECOVERED = "recovered"        # audio is back after a no-audio or stalled report
 STATUS_FORMAT_CHANGED = "format-changed"
+STATUS_DEVICES_CHANGED = "devices-changed"   # default output or device list changed; tap rebuilt
+STATUS_REATTACHED = "reattached"             # the tapped app restarted and the tap follows its new processes
 
 READER_PORTAUDIO = "portaudio"
 READER_IOPROC = "ioproc"
@@ -116,6 +119,8 @@ class TapStats:
     rebuilds: int = 0
     silent_rebuilds: int = 0
     format_rebuilds: int = 0
+    device_rebuilds: int = 0
+    reattaches: int = 0
     sample_rate: float = 0.0
     tapped_objects: list = field(default_factory=list)
     last_status: str = ""
@@ -208,6 +213,7 @@ class TapCapture:
         self._silent_since: Optional[float] = None
         self._attempts = 0
         self._reported = ""
+        self._devices: Optional[tuple] = None  # (default output, device list) seen at the last build
         self.stats = TapStats(reader=reader)
 
     # ------------------------------------------------------------------ lifecycle
@@ -304,7 +310,7 @@ class TapCapture:
             sample_time = 0.0
             while not stop.is_set():
                 try:
-                    x, overflowed = stream.read()
+                    x, overflowed = stream.read(stop=stop)
                 except Exception:
                     if not stop.is_set():
                         log.warning("PortAudio read failed; the watchdog will rebuild the tap")
@@ -331,15 +337,20 @@ class TapCapture:
         hal = self._hal
         failures = []
         if self._pa_stream is not None:
+            # Stop the drain thread first (it polls, so it returns within one poll interval),
+            # then close the stream it was reading.
             self._pa_stop.set()
+            thread = self._pa_thread
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    log.error("process tap teardown: the PortAudio drain thread did not stop")
+                    failures.append("PortAudio drain thread did not stop")
             try:
                 self._pa_stream.close()
             except Exception as exc:
                 log.error("process tap teardown: closing the PortAudio stream failed: %s", exc)
                 failures.append(f"close PortAudio stream: {exc}")
-            thread = self._pa_thread
-            if thread is not None and thread is not threading.current_thread():
-                thread.join(timeout=2.0)
             self._pa_stream = None
             self._pa_thread = None
         steps = []
@@ -381,6 +392,8 @@ class TapCapture:
                 self.stats.silent_rebuilds += 1
             elif reason == "format":
                 self.stats.format_rebuilds += 1
+            elif reason == "devices":
+                self.stats.device_rebuilds += 1
         return True
 
     # ------------------------------------------------------------------ converter
@@ -440,6 +453,7 @@ class TapCapture:
             return
         now = self._clock() if now is None else now
         self.refresh()
+        self._check_devices()
         self._check_format()
         self._watchdog(now)
 
@@ -450,6 +464,38 @@ class TapCapture:
                 self._on_status(code, message, details)
             except Exception:
                 log.exception("status callback failed")
+
+    def _device_snapshot(self) -> Optional[tuple]:
+        try:
+            return (self._hal.default_output_device(), tuple(sorted(self._hal.device_ids())))
+        except Exception as exc:
+            log.warning("process tap: reading the device list failed: %s", exc)
+            return None
+
+    def _check_devices(self) -> None:
+        """Rebuild when the default output or the set of audio devices changed.
+
+        Polled once per tick (two property reads) instead of a HAL listener block, because a
+        listener block registered through PyObjC cannot be removed reliably (removal needs the
+        same block object, which PyObjC does not guarantee). The first tick only records the state.
+        """
+        snap = self._device_snapshot()
+        if snap is None:
+            return
+        if self._devices is None:
+            self._devices = snap
+            return
+        if snap == self._devices:
+            return
+        old = self._devices
+        self._devices = snap
+        if self.rebuild("devices"):
+            name = self._hal.device_name(snap[0]) if snap[0] != old[0] else ""
+            text = (f"The output device changed to {name}; capture was rebuilt." if name
+                    else "The list of audio devices changed; capture was rebuilt.")
+            self._status(STATUS_DEVICES_CHANGED, text, default_output_changed=snap[0] != old[0],
+                         devices_added=len(set(snap[1]) - set(old[1])),
+                         devices_removed=len(set(old[1]) - set(snap[1])))
 
     def _check_format(self) -> None:
         tap_id = self.tap_id
@@ -535,7 +581,12 @@ class TapCapture:
             except Exception as exc:
                 log.warning("process tap refresh: updating the tap failed: %s", exc)
                 return False
+            previous = self._objects
             self._objects = objects
             self.stats.tap_updates += 1
             self.stats.tapped_objects = list(objects)
+        if self._spec.mode == "app" and previous and objects and not set(previous) & set(objects):
+            self.stats.reattaches += 1
+            self._status(STATUS_REATTACHED, f"{self._spec.bundle_id} restarted; capture follows it again.",
+                         processes=len(objects))
         return True
