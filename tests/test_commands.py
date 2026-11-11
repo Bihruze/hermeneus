@@ -313,3 +313,18 @@ def test_start_body_mode_voice_hides_subtitles():
     assert (opts.speak, opts.subtitles, opts.mode) == (True, False, "voice")
     with pytest.raises(UsageError, match="mode must be"):
         resolve(Choices(to="tr", source="BlackHole", mode="loud"), {}, [SOURCE])
+
+
+def test_overlay_commands_refuse_cleanly_without_a_session(data_dir):
+    plugin, _rig = make_plugin(data_dir)
+    assert asyncio.run(plugin.slash("overlay")) == "The overlay is closed."
+    assert "no translation session" in asyncio.run(plugin.slash("overlay show", platform="cli"))
+    assert "chat platform (telegram)" in asyncio.run(plugin.slash("overlay show", platform="telegram"))
+    assert asyncio.run(plugin.slash("overlay sideways")) == commands.SLASH_USAGE
+    out, err = io.StringIO(), io.StringIO()
+    args = argparse.Namespace(overlay_action="show", json=False)
+    assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 1
+    assert "no translation session" in err.getvalue()
+    args = argparse.Namespace(overlay_action="status", json=True)
+    assert asyncio.run(commands.cmd_overlay(plugin, args, out=out, err=err)) == 0
+    assert json.loads(out.getvalue()) == {"visible": False, "pid": None}

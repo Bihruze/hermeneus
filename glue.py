@@ -13,6 +13,7 @@ import re
 from pathlib import Path
 from typing import Any, Optional, Sequence
 
+from .hermeneus_engine import overlay_page, overlay_settings
 from .hermeneus_engine.components import HermesServices
 from .hermeneus_engine.contracts import ChatMessage, TranslationError
 from .hermeneus_engine.messages import MODEL_FIX
@@ -34,6 +35,9 @@ SETTING_DEFAULTS: dict[str, Any] = {
     "output_device": "",
     "voice_id": "",
     "context_segments": 3,
+    overlay_page.KEY_ENABLED: False,
+    overlay_page.KEY_PORT: overlay_page.DEFAULT_PORT,
+    **overlay_settings.DEFAULTS,
 }
 
 

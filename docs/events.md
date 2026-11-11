@@ -81,6 +81,8 @@ Nothing is written to disk. The owner keeps the last 200 lines in memory.
 | `POST /settings` | change the running session. Body: any of `{"mode": "subtitles\|both\|voice", "speak": bool, "target_language", "voice_id", "output_device", "source": {"backend", "source_id"} or a name}`. Answers at once with `{"type": "set", "ok": true, "accepted": {...}, "applying": [...], "status": {...}}`: `accepted` holds what is in effect already (target language, mode when speech stays on or turns off), `applying` what runs in the background (speech on, a new voice, a new output device, a new source). Errors: 400 unknown field or source, 409 no session or the change is refused (the body's `session` holds the status). |
 | `GET /voices?refresh=` | the voices on the ElevenLabs account: `{"voices": [{"voice_id", "name", "category", "flash_languages": [...], "is_default"}], "default_voice_id", "fetched_at"}`, from `GET https://api.elevenlabs.io/v2/voices`, cached 60 s. `flash_languages` are the account's verified languages for `eleven_flash_v2_5`. Error: 502 with a plain `detail`. |
 | `GET /devices?backend=&source_id=` | `{"sources": [{backend, source_id, label, detail}], "outputs": [{device_id, label}], "unavailable": [...], "outputs_note": ""}`. `outputs` are the devices that are safe for spoken translation with the named source, or with every listed source when none is named. |
+| `GET /overlay` | `{"visible": bool, "pid": <int or null>}`: whether the native subtitle overlay is open. |
+| `POST /overlay` | body `{"visible": bool}`. Opens or closes the overlay and answers `GET /overlay` plus `message`. Errors: 400 the body is not that shape, 409 the overlay cannot open (no session running, not macOS, no desktop session, PyObjC missing, or the request is not from this machine). |
 | `GET /doctor` | `{"ok": bool, "checks": [{"id", "label", "state": "ok\|warn\|fail", "detail", "fix"?}]}` |
 | `WS /events?after=<seq>` | `hello`, then events as above. It does not end when a session ends; it falls back to idle heartbeats and attaches to the next session. |
 
@@ -98,7 +100,9 @@ The owner listens on `<HERMES_HOME>/plugin-data/hermeneus/run/sock` (mode
 <seq or null>}` (a stream as above), `{"op": "stop"}` (answers `{"type":
 "ok"}`), `{"op": "set", "changes": {...}}` (the fields of `POST /settings`,
 with `source` as the full `{backend, source_id, label, detail}`; answers the
-`set` object above or `{"type": "error", "ok": false, "message"}`).
+`set` object above or `{"type": "error", "ok": false, "message"}`), `{"op": "overlay", "on": <true, false or null>, "port": <int or null>}`
+(switches the overlay page, null only asks; answers `{"type": "overlay",
+"running", "url", "port", "error"}`).
 
 ## Changes while running
 
@@ -109,3 +113,14 @@ with `source` as the full `{backend, source_id, label, detail}`; answers the
 | speech off (`--speak off`, mode `subtitles`) | at once | nothing new is queued; the speaker closes in the background, which stops its playback and its ElevenLabs socket |
 | speech on, new voice, new output device | background | a new speaker starts (playback opens after the feedback route check, the socket pre-connects), then the old one closes; when the new one fails the old one stays |
 | source | background | a new capture backend starts next to the old one with a sink that drops audio, the old one stops, then audio flows; the STT session is the same. When speech is on, the route check runs against the new source first. When the new source cannot start, the old one keeps running |
+
+## Overlay page
+
+With the overlay page on, the session owner serves `http://127.0.0.1:<port>/<token>/`
+and `GET /<token>/events`, a Server-Sent Events stream. Each SSE `data:` line
+is one event from the list above, cut down to what the page draws: `hello`
+and `status` keep only `state`, `line` keeps `line_id`, `state`, `original`,
+`translation` and `speaker_id`; `relabel` and `reset` are unchanged. Line,
+relabel and status events carry their `seq` as the SSE `id`, so a reconnect
+resumes from `Last-Event-ID`. A first connection gets every stored line
+(`after` 0). The stream reads the session through `Controller.subscribe`.

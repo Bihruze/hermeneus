@@ -123,7 +123,11 @@ def _microphone_permission() -> Check:
                  "then start again", required=False)
 
 
-def _capture(verify: Callable[[], tuple[bool, str]]) -> list[Check]:
+_AUDIO_CHECK_SKIPPED = ("skipped with --no-audio-check. Without it the doctor plays a short quiet test tone "
+                        "(on BlackHole or VB-Cable when installed, so you do not hear it) and checks that it arrives.")
+
+
+def _capture(verify: Optional[Callable[[], tuple[bool, str]]]) -> list[Check]:
     checks = []
     backends = components.capture_backends()
     if not backends:
@@ -146,7 +150,10 @@ def _capture(verify: Callable[[], tuple[bool, str]]) -> list[Check]:
         checks.append(Check(f"capture: {backend.name}", ok, reason, fix, required=False))
     tap = next((c for c in checks if c.name == "capture: process-tap"), None)
     if tap is not None and tap.ok:
-        checks.append(_tap_permission(verify))
+        if verify is None:
+            checks.append(Check("permission: system audio recording", None, _AUDIO_CHECK_SKIPPED, required=False))
+        else:
+            checks.append(_tap_permission(verify))
     checks.append(Check("audio source", any_ok,
                         "at least one capture backend can run" if any_ok else "no capture backend can run",
                         "" if any_ok else "see the capture lines above"))
@@ -205,12 +212,13 @@ def _ffmpeg(which: Callable[[str], Optional[str]]) -> Check:
 def run(*, get_secret: SecretGetter, aux_config: Optional[dict],
         mac_ver: Callable[[], tuple] = platform.mac_ver,
         which: Callable[[str], Optional[str]] = shutil.which,
-        verify_tap_audio: Callable[[], tuple[bool, str]] = components.verify_tap_audio) -> DoctorReport:
+        verify_tap_audio: Callable[[], tuple[bool, str]] = components.verify_tap_audio,
+        audio_check: bool = True) -> DoctorReport:
     """Process tap first. The virtual-device and Multi-Output lines describe the fallback and
     never fail the report while the process tap works."""
     report = DoctorReport()
     report.checks.append(_macos(mac_ver))
-    capture = _capture(verify_tap_audio)
+    capture = _capture(verify_tap_audio if audio_check else None)
     report.checks.extend(capture)
     tap_ok = any(c.name == "capture: process-tap" and c.ok for c in capture)
     perm = next((c for c in capture if c.name == "permission: system audio recording"), None)

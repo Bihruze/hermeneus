@@ -216,3 +216,13 @@ def test_api_voices_lists_the_account_and_reports_errors(api, monkeypatch):
     plugin.voice_catalog = VoiceCatalog(lambda: None)
     r = client.get("/api/plugins/hermeneus/voices")
     assert r.status_code == 502 and r.json()["detail"].startswith("Voices: no ElevenLabs API key is set.")
+
+
+def test_api_overlay_routes(api):
+    client, module, plugin, _rig = api
+    assert client.get("/api/plugins/hermeneus/overlay").json() == {"visible": False, "pid": None}
+    assert client.post("/api/plugins/hermeneus/overlay", json={"visible": "yes"}).status_code == 400
+    # The test client is not on 127.0.0.1, so it is a remote Desktop: the overlay is refused, not opened there.
+    answer = client.post("/api/plugins/hermeneus/overlay", json={"visible": True})
+    assert answer.status_code == 409 and "chat platform" in answer.json()["detail"]
+    assert client.post("/api/plugins/hermeneus/overlay", json={"visible": False}).json()["visible"] is False

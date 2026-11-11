@@ -94,11 +94,23 @@ def macos_version() -> Optional[tuple[int, ...]]:
 WORKER_ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
 
 
-def worker_env(parent: Optional[dict] = None) -> dict:
-    """Minimal environment for the capture worker; never carries API keys, tokens or secrets."""
+def worker_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
+    """Minimal environment for the capture worker; never carries API keys, tokens or secrets.
+
+    PYTHONPATH carries this package and every directory on the parent's ``sys.path``. Hermes
+    puts a plugin's dependencies on ``sys.path`` at runtime, from an environment the bare
+    interpreter does not know (measured: inside Hermes, CoreAudio and numpy import from
+    ``~/.hermes/installs/.../venv/lib/python3.14/site-packages`` while ``python3 -c "import
+    CoreAudio"`` with the same interpreter fails), so the worker needs the same search path.
+    """
     parent = os.environ if parent is None else parent
+    path = sys.path if path is None else path
     env = {k: parent[k] for k in WORKER_ENV_ALLOWLIST if k in parent}
-    env["PYTHONPATH"] = str(_PACKAGE_ROOT)
+    dirs = [str(_PACKAGE_ROOT)]
+    for p in path:
+        if p and p not in dirs and os.path.isdir(p):
+            dirs.append(p)
+    env["PYTHONPATH"] = os.pathsep.join(dirs)
     env["PYTHONUNBUFFERED"] = "1"
     return env
 
@@ -142,7 +154,7 @@ class ProcessTapBackend:
         self._lock = threading.RLock()
         self._run: Optional[_Run] = None
         self.on_status = on_status
-        self._reader = reader  # None lets the worker choose (PortAudio when sounddevice is present)
+        self._reader = reader  # None uses the worker default (the IOProc reader); "portaudio" on request
         # Silence tapped app or pid sources on their device while tapped (the doctor's test tone).
         self._mute_tapped = mute_tapped
         self._responsible_app = responsible_app or responsible_app_name
@@ -409,6 +421,7 @@ def verify_system_audio_capture(timeout_s: float = 30.0) -> tuple[bool, str]:
 
     result = check_process_tap(timeout_s=timeout_s)
     return result.ok, result.message
+
 
 
 def permission_message(app: Optional[str]) -> str:

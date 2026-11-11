@@ -12,8 +12,6 @@
 import {
   atom,
   Button,
-  EmptyState,
-  ErrorState,
   GlyphSpinner,
   icons,
   PANES_AREA,
@@ -333,6 +331,97 @@ export function truncate(text, max) {
 }
 
 // ---------------------------------------------------------------------------
+// Pure view decisions (tested under node --test)
+// ---------------------------------------------------------------------------
+
+/** What the subtitle area shows. `body` is one designed state, or 'lines' when
+ *  there are lines to show. `notice` is a row shown beside the lines:
+ *  'offline' (backend unreachable), 'reconnecting' (session reconnecting to
+ *  the speech service), 'failed' (session failed), 'stopped' (session over,
+ *  lines kept), or null. */
+export function subtitleView(state, link) {
+  const session = state.status?.state ?? null
+  const hasLines = state.lines.length > 0
+
+  let body = 'lines'
+
+  if (!hasLines) {
+    if (link.state === 'offline') {
+      body = 'offline'
+    } else if (session === null) {
+      body = 'connecting'
+    } else if (session === 'failed') {
+      body = 'failed'
+    } else if (session === 'starting') {
+      body = 'starting'
+    } else if (session === 'live' || session === 'stopping') {
+      body = 'listening'
+    } else if (session === 'reconnecting') {
+      body = 'reconnecting'
+    } else {
+      body = 'idle'
+    }
+  }
+
+  let notice = null
+
+  if (hasLines) {
+    if (link.state === 'offline') {
+      notice = 'offline'
+    } else if (session === 'reconnecting') {
+      notice = 'reconnecting'
+    } else if (session === 'failed') {
+      notice = 'failed'
+    } else if (session === 'idle') {
+      notice = 'stopped'
+    }
+  }
+
+  return { body, notice }
+}
+
+/** True when line `index` starts a new speaker turn, so its row shows the speaker name.
+ *  Following lines of the same speaker leave the name column empty. */
+export function startsTurn(lines, index) {
+  if (index <= 0) {
+    return true
+  }
+
+  return lines[index - 1].speaker_id !== lines[index].speaker_id
+}
+
+/** Lines below the one the reader paused at. `anchorId` is the newest line id when
+ *  following stopped; an id that has been evicted counts every line as new. */
+export function unseenCount(lines, anchorId) {
+  if (anchorId === null || anchorId === undefined) {
+    return 0
+  }
+
+  const index = lines.findIndex(line => line.line_id === anchorId)
+
+  return index === -1 ? lines.length : lines.length - 1 - index
+}
+
+/** Pixels from the bottom that still count as following the newest line; the core Logs
+ *  pane uses the same stick-to-bottom slack (apps/desktop/src/app/contrib/panes.tsx:37). */
+export const FOLLOW_SLACK_PX = 48
+
+/** Whether a scroll position counts as following the newest line. */
+export function atLiveEdge({ scrollHeight, scrollTop, clientHeight }, slack = FOLLOW_SLACK_PX) {
+  return scrollHeight - scrollTop - clientHeight <= slack
+}
+
+/** Status bar text: the plugin name, then the state, then the newest translation while a
+ *  session runs. Idle shows the name alone so the item is still recognisable. */
+export function chipParts(state) {
+  const session = state.status?.state ?? null
+  const running = RUNNING_STATES.has(session)
+  const last = running && state.lastTranslated ? state.lastTranslated.translation : ''
+
+  return { session, showState: session !== null && session !== 'idle' && !(session === 'live' && last), last }
+}
+
+// ---------------------------------------------------------------------------
 // Controller: socket, resync, polling fallback, control calls
 // ---------------------------------------------------------------------------
 
@@ -402,6 +491,8 @@ export function createController(ctx, clock = () => Date.now()) {
   const store = atom(createSubtitleState())
   const link = atom({ state: 'connecting', error: '' })
   const action = atom({ busy: false, error: '' })
+  // The native subtitle overlay (hermeneus_engine/overlay), shown and hidden through POST /overlay.
+  const overlay = atom({ visible: false, busy: false, error: '' })
   const stored = ctx.storage.get('prefs', {})
   const prefs = atom({ ...DEFAULT_PREFS, ...(stored && typeof stored === 'object' ? stored : {}) })
 
@@ -493,6 +584,38 @@ export function createController(ctx, clock = () => Date.now()) {
     if (quiet >= (running ? QUIET_WHILE_RUNNING_MS : QUIET_WHILE_IDLE_MS)) {
       void resync()
     }
+
+    // The overlay closes by itself when the session stops or from its own menu.
+    if (running || overlay.get().visible) {
+      void refreshOverlay()
+    }
+  }
+
+  async function refreshOverlay() {
+    try {
+      const result = await ctx.rest('/overlay')
+
+      if (result && typeof result.visible === 'boolean' && !overlay.get().busy) {
+        overlay.set({ ...overlay.get(), visible: result.visible })
+      }
+    } catch {
+      // The next tick asks again.
+    }
+  }
+
+  async function setOverlay(visible) {
+    if (overlay.get().busy) {
+      return
+    }
+
+    overlay.set({ ...overlay.get(), busy: true, error: '' })
+
+    try {
+      const result = await ctx.rest('/overlay', { method: 'POST', body: { visible } })
+      overlay.set({ visible: result?.visible === true, busy: false, error: '' })
+    } catch (error) {
+      overlay.set({ ...overlay.get(), busy: false, error: errorText(error) })
+    }
   }
 
   function setPrefs(patch) {
@@ -545,7 +668,24 @@ export function createController(ctx, clock = () => Date.now()) {
     void resync()
   }
 
-  return { action, connect, link, onFrame, prefs, resync, rest: ctx.rest, setPrefs, settings, start, stop, store, tick }
+  return {
+    action,
+    connect,
+    link,
+    onFrame,
+    overlay,
+    prefs,
+    refreshOverlay,
+    resync,
+    rest: ctx.rest,
+    setOverlay,
+    setPrefs,
+    settings,
+    start,
+    stop,
+    store,
+    tick
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -590,11 +730,29 @@ const EN = {
   devicesError: error => `Could not list sources: ${error}`,
   actionError: error => `Request failed: ${error}`,
   emptyTitle: 'No subtitles yet',
-  emptyDescription: 'Press Start and play audio on this Mac.',
+  emptyDescription: 'Choose a source and a subtitle language, then press Start.',
+  connectingTitle: 'Connecting to Hermeneus',
+  connectingDescription: 'Reading the session state from the Hermes gateway.',
+  startingTitle: 'Starting',
+  startingDescription: 'Opening the audio source and the speech service.',
+  listeningTitle: 'Listening',
+  listeningDescription: 'Subtitles appear here as soon as someone speaks.',
+  reconnectingTitle: 'Reconnecting',
+  reconnectingDescription: 'The speech service connection dropped. Hermeneus is reconnecting.',
+  failedTitle: 'The session stopped with an error',
+  failedFallback: 'Open Doctor to see which check fails and how to fix it.',
+  openDoctor: 'Open Doctor',
+  retry: 'Try again',
+  lastError: error => `Last error: ${error}.`,
+  noticeOffline: error => `Hermes gateway unreachable${error ? ` (${error})` : ''}. Retrying.`,
+  noticeReconnecting: 'Reconnecting to the speech service. New lines continue when it is back.',
+  noticeFailed: message => `Session failed${message ? `: ${message}` : '.'}`,
+  noticeStopped: 'Session stopped. These lines stay until the next Start.',
   speaker: n => `Speaker ${n}`,
   translating: 'translating',
-  failedLine: error => (error ? `translation failed: ${error}` : 'translation failed'),
-  jumpToLatest: 'Jump to latest',
+  failedLine: error => (error ? `Translation failed: ${error}. Original shown.` : 'Translation failed. Original shown.'),
+  jumpToLive: 'Jump to live',
+  newLines: n => (n === 1 ? '1 new line' : `${n} new lines`),
   smaller: 'Smaller subtitles',
   larger: 'Larger subtitles',
   scale: percent => `${percent}%`,
@@ -603,7 +761,12 @@ const EN = {
   doctorError: error => `Doctor failed: ${error}`,
   doctorShape: 'Doctor returned an answer this pane cannot read.',
   check: { ok: 'ok', warn: 'warning', fail: 'failed' },
-  statusBar: state => `Hermeneus: ${state}`
+  statusBar: state => `Hermeneus: ${state}`,
+  overlay: 'Subtitle overlay',
+  overlayHint: 'Floats the current line above other apps on this Mac',
+  showOverlay: 'Show subtitle overlay',
+  hideOverlay: 'Hide subtitle overlay',
+  overlayError: error => `Overlay: ${error}`
 }
 
 const LOCALES = { en: EN }
@@ -661,13 +824,8 @@ const S = {
     fontSize: 'var(--conversation-caption-base-size)',
     color: 'var(--ui-text-secondary)'
   },
-  toolbar: {
-    display: 'flex',
-    alignItems: 'center',
-    justifyContent: 'space-between',
-    gap: sp(2),
-    padding: `${sp(1)} ${sp(3)}`
-  },
+  topRow: { display: 'flex', alignItems: 'center', gap: sp(3), minWidth: 0 },
+  topStatus: { flex: 1, minWidth: 0 },
   fontControls: { display: 'flex', alignItems: 'center', gap: sp(0.5) },
   fontScale: {
     minWidth: sp(10),
@@ -676,12 +834,78 @@ const S = {
     color: 'var(--ui-text-tertiary)',
     fontVariantNumeric: 'tabular-nums'
   },
-  listWrap: { position: 'relative', flex: 1, minHeight: 0 },
-  list: { height: '100%', overflowY: 'auto', overflowAnchor: 'auto', padding: `${sp(1)} ${sp(3)} ${sp(3)}` },
+  listWrap: { position: 'relative', display: 'flex', flexDirection: 'column', flex: 1, minHeight: 0 },
+  // scroll-fade-y is the app's own edge fade for scrollers (apps/desktop/src/styles.css:1175-1194);
+  // --scroll-fade-pad matches the top padding so the fade starts at the first line.
+  list: {
+    flex: 1,
+    minHeight: 0,
+    overflowY: 'auto',
+    overflowAnchor: 'auto',
+    overscrollBehavior: 'contain',
+    padding: `${sp(1)} ${sp(3)} ${sp(3)}`,
+    '--scroll-fade-pad': sp(1)
+  },
+  // The glide moves `content` with a transform, which neither reflows nor counts as a layout shift.
+  // A transform still adds to the scroller's scrollable overflow, which would read as "the user
+  // scrolled up" mid-glide; `overflow: clip` on the box around it keeps the scroll height true.
+  // What it clips is the part below the scroll end, which is off screen anyway.
+  contentClip: { overflow: 'clip' },
+  content: { willChange: 'transform' },
   row: { display: 'grid', gridTemplateColumns: '6.5em minmax(0, 1fr)', columnGap: sp(3), padding: `${sp(1)} 0` },
+  turnGap: { paddingTop: sp(2.5) },
   speaker: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 },
-  primary: { overflowWrap: 'anywhere' },
-  secondary: { overflowWrap: 'anywhere' },
+  // Long lines wrap at word boundaries first; a single unbroken token (a URL) still breaks
+  // instead of widening the pane. `lang` on the row lets hyphenation pick the right rules.
+  text: { overflowWrap: 'anywhere', hyphens: 'auto', textWrap: 'pretty' },
+  langTag: { color: 'var(--ui-text-quaternary)', fontWeight: 500, marginRight: sp(1.5), letterSpacing: '0.04em' },
+  state: {
+    display: 'flex',
+    flex: 1,
+    minHeight: 0,
+    flexDirection: 'column',
+    alignItems: 'center',
+    justifyContent: 'center',
+    gap: sp(2),
+    padding: `${sp(3)} ${sp(4)}`,
+    textAlign: 'center'
+  },
+  stateTitle: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: sp(2),
+    color: 'var(--ui-text-primary)',
+    fontSize: 'var(--conversation-text-base-size)',
+    lineHeight: 'var(--conversation-base-line-height)',
+    fontWeight: 500
+  },
+  stateDescription: {
+    maxWidth: '36rem',
+    color: 'var(--ui-text-tertiary)',
+    fontSize: 'var(--conversation-caption-base-size)',
+    lineHeight: 'var(--conversation-caption-base-line-height)'
+  },
+  stateActions: { display: 'flex', justifyContent: 'center', gap: sp(2), marginTop: sp(1) },
+  notice: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: sp(2),
+    margin: `${sp(1)} ${sp(3)} 0`,
+    padding: `${sp(1.5)} ${sp(2.5)}`,
+    borderRadius: 'var(--radius-md)',
+    background: 'var(--ui-bg-tertiary)',
+    color: 'var(--ui-text-secondary)',
+    fontSize: 'var(--conversation-caption-base-size)',
+    lineHeight: 'var(--conversation-caption-base-line-height)'
+  },
+  noticeText: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' },
+  endMarker: {
+    padding: `${sp(3)} 0 ${sp(1)}`,
+    textAlign: 'center',
+    color: 'var(--ui-text-quaternary)',
+    fontSize: 'var(--conversation-caption-base-size)',
+    lineHeight: 'var(--conversation-caption-base-line-height)'
+  },
   jump: { position: 'absolute', right: sp(4), bottom: sp(3) },
   doctor: { flex: 1, minHeight: 0, overflowY: 'auto', padding: `${sp(2)} ${sp(3)}` },
   doctorHead: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: sp(2), marginBottom: sp(2) },
@@ -695,14 +919,19 @@ const S = {
   chip: {
     display: 'inline-flex',
     alignItems: 'center',
-    gap: sp(1),
+    gap: sp(1.5),
     height: '100%',
     padding: `0 ${sp(1.5)}`,
     // The core status bar's own item size and gaps (apps/desktop/src/app/shell/statusbar-controls.tsx:31).
     fontSize: '0.6875rem',
     color: 'var(--ui-text-tertiary)'
   },
-  chipText: { maxWidth: sp(64), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
+  chipGroup: { display: 'inline-flex', alignItems: 'center', gap: sp(1) },
+  chipName: { color: 'var(--ui-text-secondary)' },
+  // A fixed width while a session shows text: the status bar's right cluster is laid out from the
+  // right edge, so a width that followed each translation would push Smart and the version
+  // sideways on every line (measured as layout shift in the status bar).
+  chipText: { width: sp(64), overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' },
   visuallyHidden: {
     position: 'absolute',
     width: '1px',
@@ -787,9 +1016,10 @@ function StatusLine({ ctrl }) {
           ...parts.map((part, index) => jsx('span', { style: S.statusPart, children: `· ${part}` }, index))
         ]
       }),
-      status?.message ? jsx('div', { style: S.statusMessage, children: status.message }) : null,
-      link.state === 'offline' && state.lines.length > 0
-        ? jsx('div', { role: 'alert', style: S.alert, children: `${t('offline')}: ${link.error}. ${t('offlineHint')}` })
+      // Starting, reconnecting and failed messages are shown in the subtitle area. A live
+      // session's message is shown here only when it says more than "live" (a capture note).
+      status?.state === 'live' && status.message && status.message.trim().toLowerCase() !== 'live'
+        ? jsx('div', { style: S.statusMessage, children: status.message })
         : null,
       action.error ? jsx('div', { role: 'alert', style: S.alert, children: t('actionError', action.error) }) : null
     ]
@@ -815,6 +1045,7 @@ function Controls({ ctrl }) {
   const state = useValue(ctrl.store)
   const prefs = useValue(ctrl.prefs)
   const action = useValue(ctrl.action)
+  const overlay = useValue(ctrl.overlay)
   const devices = useQuery({
     // Outputs depend on the source: the backend lists only the outputs that are safe to
     // speak into with that source (docs/events.md, GET /devices).
@@ -945,6 +1176,21 @@ function Controls({ ctrl }) {
               t('speak')
             ]
           }),
+          // Look-and-feel proposal for Seher: the overlay switch sits with the session controls.
+          jsxs('label', {
+            style: S.switchLabel,
+            title: t('overlayHint'),
+            children: [
+              jsx(Switch, {
+                'aria-label': t('overlay'),
+                checked: running && overlay.visible,
+                disabled: !running || overlay.busy,
+                onCheckedChange: on => void ctrl.setOverlay(on),
+                size: 'xs'
+              }),
+              t('overlay')
+            ]
+          }),
           jsx(Picker, {
             disabled: !speakable,
             label: t('mode'),
@@ -992,37 +1238,99 @@ function Controls({ ctrl }) {
         : null,
       voicesQuery.isError
         ? jsx('div', { role: 'alert', style: S.alert, children: t('voicesError', errorText(voicesQuery.error)) })
-        : null
+        : null,
+      overlay.error ? jsx('div', { role: 'alert', style: S.alert, children: t('overlayError', overlay.error) }) : null
     ]
   })
 }
 
-const LineRow = memo(function LineRow({ color, line, number, scale, t }) {
-  const speaker = line.speaker_id === null ? '' : number === null ? line.speaker_id : t('speaker', number)
+// Motion: short and functional (apps/desktop/DESIGN.md:490-491). The glide eases out on
+// the curve the HUD uses to arrive (apps/desktop/src/styles.css:3046). Reduced motion
+// settles instantly. Web Animations are not covered by the app's CSS reduced-motion
+// override (styles.css:24-33), so the check is made here.
+const GLIDE_MS = 180
+const FADE_MS = 140
+const EASE_ENTER = 'cubic-bezier(0.16, 1, 0.3, 1)'
+
+function reducedMotion() {
+  return typeof matchMedia === 'function' && matchMedia('(prefers-reduced-motion: reduce)').matches
+}
+
+function translateYOf(el) {
+  const transform = getComputedStyle(el).transform
+
+  if (!transform || transform === 'none') {
+    return 0
+  }
+
+  const match = /matrix(3d)?\(([^)]+)\)/.exec(transform)
+
+  if (!match) {
+    return 0
+  }
+
+  const values = match[2].split(',').map(Number)
+
+  return match[1] ? values[13] || 0 : values[5] || 0
+}
+
+const LineRow = memo(function LineRow({ color, enter, line, number, scale, showSpeaker, t }) {
+  const primaryRef = useRef(null)
+  const rowRef = useRef(null)
+  const shownState = useRef(line.state)
   const translated = line.state === 'translated'
+  const speaker =
+    !showSpeaker || line.speaker_id === null ? '' : number === null ? line.speaker_id : t('speaker', number)
+
+  // A line that arrives after the first paint fades in where it lands; it never slides
+  // other lines (opacity only, so no layout shift).
+  useLayoutEffect(() => {
+    if (enter && rowRef.current && !reducedMotion()) {
+      rowRef.current.animate([{ opacity: 0 }, { opacity: 1 }], { duration: FADE_MS, easing: 'ease-out' })
+    }
+  }, [])
+
+  // The partial line is replaced in place by its translation: same row, same box, the
+  // new text fades up from the old one.
+  useLayoutEffect(() => {
+    const before = shownState.current
+    shownState.current = line.state
+
+    if (before !== 'translated' && translated && primaryRef.current && !reducedMotion()) {
+      primaryRef.current.animate([{ opacity: 0.35 }, { opacity: 1 }], { duration: FADE_MS, easing: 'ease-out' })
+    }
+  }, [line.state, translated])
 
   let primaryText = line.original
   let primaryColor = 'var(--ui-text-secondary)'
-  let secondaryText = ' '
-  let secondaryColor = 'var(--ui-text-tertiary)'
+  let caption = null
+  let captionColor = 'var(--ui-text-tertiary)'
 
   if (translated) {
+    // Translation on top in the primary text colour; the original underneath, smaller and
+    // dimmer, tagged with the language it was heard in.
     primaryText = line.translation
     primaryColor = 'var(--ui-text-primary)'
-    secondaryText = line.original
+    caption = [
+      line.source_language
+        ? jsx('span', { style: S.langTag, children: line.source_language.toUpperCase() }, 'tag')
+        : null,
+      jsx('span', { lang: line.source_language ?? undefined, children: line.original }, 'text')
+    ]
   } else if (line.state === 'partial') {
     primaryColor = 'var(--ui-text-tertiary)'
   } else if (line.state === 'committed') {
-    secondaryText = t('translating')
-    secondaryColor = 'var(--ui-text-quaternary)'
+    caption = t('translating')
+    captionColor = 'var(--ui-text-quaternary)'
   } else if (line.state === 'failed') {
-    secondaryText = t('failedLine', line.error)
-    secondaryColor = 'var(--ui-red)'
+    caption = t('failedLine', line.error)
+    captionColor = 'var(--ui-red)'
   }
 
   return jsxs('div', {
+    ref: rowRef,
     'data-line-state': line.state,
-    style: S.row,
+    style: showSpeaker ? { ...S.row, ...S.turnGap } : S.row,
     children: [
       jsx('div', {
         style: {
@@ -1038,20 +1346,21 @@ const LineRow = memo(function LineRow({ color, line, number, scale, t }) {
         lang: translated ? line.target_language ?? undefined : line.source_language ?? undefined,
         children: [
           jsx('div', {
-            style: { ...S.primary, color: primaryColor, fontSize: TEXT_SIZE(scale), lineHeight: TEXT_LINE(scale) },
+            ref: primaryRef,
+            style: { ...S.text, color: primaryColor, fontSize: TEXT_SIZE(scale), lineHeight: TEXT_LINE(scale) },
             children: primaryText
           }),
-          // Always rendered, one caption line at least, so a partial line does not grow when it is translated.
+          // Always one caption line at least, so a partial line keeps its height when the
+          // caption fills in.
           jsx('div', {
-            lang: translated ? line.source_language ?? undefined : undefined,
             style: {
-              ...S.secondary,
-              color: secondaryColor,
+              ...S.text,
+              color: captionColor,
               fontSize: CAPTION_SIZE(scale),
               lineHeight: CAPTION_LINE(scale),
               minHeight: CAPTION_LINE(scale)
             },
-            children: secondaryText
+            children: caption ?? ' '
           })
         ]
       })
@@ -1059,71 +1368,281 @@ const LineRow = memo(function LineRow({ color, line, number, scale, t }) {
   })
 })
 
-/** Pixels from the bottom that still count as following the newest line; the core Logs
- *  pane uses the same stick-to-bottom slack (apps/desktop/src/app/contrib/panes.tsx:37). */
-const FOLLOW_SLACK_PX = 48
+function StateBlock({ actions, busy, description, title, tone }) {
+  return jsxs('div', {
+    style: S.state,
+    children: [
+      jsxs('div', {
+        style: S.stateTitle,
+        children: [
+          busy ? jsx(GlyphSpinner, { ariaLabel: title }) : tone ? jsx(StatusDot, { tone }) : null,
+          jsx('span', { children: title })
+        ]
+      }),
+      description ? jsx('div', { style: S.stateDescription, children: description }) : null,
+      actions ? jsx('div', { style: S.stateActions, children: actions }) : null
+    ]
+  })
+}
 
-function SubtitleList({ ctrl }) {
+function EmptyBody({ ctrl, kind, link, onDoctor, status, t }) {
+  switch (kind) {
+    case 'connecting':
+      return jsx(StateBlock, { busy: true, title: t('connectingTitle'), description: t('connectingDescription') })
+    case 'starting':
+      return jsx(StateBlock, { busy: true, title: t('startingTitle'), description: status?.message || t('startingDescription') })
+    case 'listening':
+      return jsx(StateBlock, { tone: 'good', title: t('listeningTitle'), description: t('listeningDescription') })
+    case 'reconnecting':
+      return jsx(StateBlock, {
+        busy: true,
+        title: t('reconnectingTitle'),
+        description: status?.message || t('reconnectingDescription')
+      })
+    case 'offline':
+      return jsx(StateBlock, {
+        tone: 'bad',
+        title: t('offline'),
+        description: link.error ? `${t('offlineHint')} ${t('lastError', link.error)}` : t('offlineHint'),
+        actions: jsxs(Button, {
+          onClick: () => void ctrl.resync(),
+          size: 'xs',
+          variant: 'secondary',
+          children: [jsx(icons.RefreshCw, {}), t('retry')]
+        })
+      })
+    case 'failed':
+      return jsx(StateBlock, {
+        tone: 'bad',
+        title: t('failedTitle'),
+        description: status?.message || t('failedFallback'),
+        actions: jsxs(Button, {
+          onClick: onDoctor,
+          size: 'xs',
+          variant: 'secondary',
+          children: [jsx(icons.Wrench, {}), t('openDoctor')]
+        })
+      })
+    default:
+      return jsx(StateBlock, { tone: 'muted', title: t('emptyTitle'), description: t('emptyDescription') })
+  }
+}
+
+function Notice({ ctrl, kind, link, onDoctor, status, t }) {
+  if (kind === null || kind === 'stopped') {
+    return null
+  }
+
+  const look = {
+    offline: { tone: 'bad', text: t('noticeOffline', link.error) },
+    reconnecting: { tone: 'warn', text: status?.message || t('noticeReconnecting') },
+    failed: { tone: 'bad', text: t('noticeFailed', status?.message) }
+  }[kind]
+
+  return jsxs('div', {
+    role: kind === 'reconnecting' ? 'status' : 'alert',
+    style: S.notice,
+    children: [
+      jsx(StatusDot, { tone: look.tone }),
+      jsx('span', { style: S.noticeText, children: look.text }),
+      kind === 'offline'
+        ? jsx(Button, { onClick: () => void ctrl.resync(), size: 'xs', variant: 'ghost', children: t('retry') })
+        : null,
+      kind === 'failed'
+        ? jsx(Button, { onClick: onDoctor, size: 'xs', variant: 'ghost', children: t('openDoctor') })
+        : null
+    ]
+  })
+}
+
+function SubtitleList({ ctrl, onDoctor }) {
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
   const link = useValue(ctrl.link)
   const { fontScale } = useValue(ctrl.prefs)
   const listRef = useRef(null)
+  const contentRef = useRef(null)
+  const followRef = useRef(true)
+  const jumpingRef = useRef(false)
+  const lastTopRef = useRef(0)
+  const glideRef = useRef(null)
+  const paintedRef = useRef(false)
+  const listElRef = useRef(null)
   const [follow, setFollow] = useState(true)
+  const [anchorId, setAnchorId] = useState(null)
+  const view = subtitleView(state, link)
+  const lines = state.lines
 
+  const setFollowing = (on, el) => {
+    if (followRef.current === on) {
+      return
+    }
+
+    followRef.current = on
+    setFollow(on)
+    setAnchorId(on ? null : lines.length > 0 ? lines[lines.length - 1].line_id : null)
+
+    if (!on && glideRef.current) {
+      glideRef.current.cancel()
+      glideRef.current = null
+    }
+
+    if (el) {
+      lastTopRef.current = el.scrollTop
+    }
+  }
+
+  // Follow the newest line. The scroll position jumps to the bottom before paint, so it is
+  // always truthful for the scroll handler; the content wrapper then glides from where it
+  // was on screen to its new place with a transform. A second change during a glide starts
+  // from wherever the first one had got to, so a burst of updates reads as one movement.
   useLayoutEffect(() => {
     const el = listRef.current
+    const content = contentRef.current
 
-    if (follow && el) {
-      el.scrollTop = el.scrollHeight
+    if (!el || !content) {
+      return
     }
-  }, [state.lines, follow, fontScale])
+
+    if (!followRef.current) {
+      lastTopRef.current = el.scrollTop
+
+      return
+    }
+
+    // A list element that just mounted (first lines of a session) has no previous position.
+    const fresh = listElRef.current !== el
+    listElRef.current = el
+    const before = fresh ? el.scrollTop : lastTopRef.current
+    let residual = 0
+
+    if (glideRef.current) {
+      residual = translateYOf(content)
+      glideRef.current.cancel()
+      glideRef.current = null
+    }
+
+    el.scrollTop = el.scrollHeight
+    const after = el.scrollTop
+    lastTopRef.current = after
+    const shift = after - before + residual
+
+    if (!fresh && paintedRef.current && Math.abs(shift) >= 0.5 && Math.abs(shift) < el.clientHeight && !reducedMotion()) {
+      const glide = content.animate([{ transform: `translateY(${shift}px)` }, { transform: 'translateY(0)' }], {
+        duration: GLIDE_MS,
+        easing: EASE_ENTER
+      })
+      glide.onfinish = () => {
+        if (glideRef.current === glide) {
+          glideRef.current = null
+        }
+      }
+      glideRef.current = glide
+    }
+
+    paintedRef.current = true
+  }, [lines, fontScale, view.notice, follow])
 
   const onScroll = () => {
     const el = listRef.current
 
+    if (!el) {
+      return
+    }
+
+    const live = atLiveEdge(el)
+
+    if (jumpingRef.current) {
+      // A smooth jump to live is under way: only its arrival counts.
+      if (live) {
+        jumpingRef.current = false
+        lastTopRef.current = el.scrollTop
+      }
+
+      return
+    }
+
+    setFollowing(live, el)
+    lastTopRef.current = el.scrollTop
+  }
+
+  // Any direct input ends a jump in progress, so the reader can stop it halfway.
+  const onUserInput = () => {
+    jumpingRef.current = false
+  }
+
+  const jumpToLive = () => {
+    const el = listRef.current
+
+    followRef.current = true
+    setFollow(true)
+    setAnchorId(null)
+
     if (el) {
-      setFollow(el.scrollHeight - el.scrollTop - el.clientHeight <= FOLLOW_SLACK_PX)
+      jumpingRef.current = !reducedMotion()
+      el.scrollTo({ top: el.scrollHeight, behavior: reducedMotion() ? 'auto' : 'smooth' })
     }
   }
 
   const live = state.lastTranslated
+  const unseen = follow ? 0 : unseenCount(lines, anchorId)
 
   return jsxs('div', {
     style: S.listWrap,
     children: [
-      jsx('div', {
-        ref: listRef,
-        onScroll,
-        style: S.list,
-        children:
-          state.lines.length === 0
-            ? link.state === 'offline'
-              ? jsx(ErrorState, { title: t('offline'), description: `${t('offlineHint')} (${link.error})` })
-              : jsx(EmptyState, { title: t('emptyTitle'), description: t('emptyDescription') })
-            : state.lines.map(line =>
-                jsx(
-                  LineRow,
-                  {
-                    color: speakerColor(state, line.speaker_id),
-                    line,
-                    number: speakerNumber(state, line.speaker_id),
-                    scale: fontScale,
-                    t
-                  },
-                  line.line_id
-                )
-              )
-      }),
-      follow
+      jsx(Notice, { ctrl, kind: view.notice, link, onDoctor, status: state.status, t }),
+      view.body === 'lines'
+        ? jsx('div', {
+            ref: listRef,
+            className: 'scroll-fade-y',
+            onKeyDown: onUserInput,
+            onPointerDown: onUserInput,
+            onScroll,
+            onTouchStart: onUserInput,
+            onWheel: onUserInput,
+            role: 'log',
+            'aria-label': t('subtitles'),
+            style: S.list,
+            tabIndex: 0,
+            children: jsx('div', {
+              style: S.contentClip,
+              children: jsxs('div', {
+                ref: contentRef,
+                style: S.content,
+                children: [
+                  ...lines.map((line, index) =>
+                    jsx(
+                      LineRow,
+                      {
+                        color: speakerColor(state, line.speaker_id),
+                        enter: paintedRef.current,
+                        line,
+                        number: speakerNumber(state, line.speaker_id),
+                        scale: fontScale,
+                        showSpeaker: startsTurn(lines, index),
+                        t
+                      },
+                      line.line_id
+                    )
+                  ),
+                  view.notice === 'stopped' ? jsx('div', { style: S.endMarker, children: t('noticeStopped') }, 'end') : null
+                ]
+              })
+            })
+          })
+        : jsx(EmptyBody, { ctrl, kind: view.body, link, onDoctor, status: state.status, t }),
+      follow || view.body !== 'lines'
         ? null
         : jsx('div', {
             style: S.jump,
             children: jsxs(Button, {
-              onClick: () => setFollow(true),
+              onClick: jumpToLive,
               size: 'xs',
               variant: 'secondary',
-              children: [jsx(icons.ArrowBarToDown, {}), t('jumpToLatest')]
+              children: [
+                jsx(icons.ArrowBarToDown, {}),
+                unseen > 0 ? `${t('jumpToLive')} · ${t('newLines', unseen)}` : t('jumpToLive')
+              ]
             })
           }),
       // Screen readers hear each new translation once; partial updates stay silent.
@@ -1243,24 +1762,34 @@ function HermeneusPane({ ctrl }) {
   const [view, setView] = useState('subtitles')
 
   return jsxs('div', {
+    'data-hermeneus-pane': view,
     style: S.pane,
     children: [
-      jsxs('div', { style: S.header, children: [jsx(StatusLine, { ctrl }), jsx(Controls, { ctrl })] }),
       jsxs('div', {
-        style: S.toolbar,
+        style: S.header,
         children: [
-          jsx(SegmentedControl, {
-            onChange: setView,
-            options: [
-              { id: 'subtitles', label: t('subtitles') },
-              { id: 'doctor', label: t('doctor') }
-            ],
-            value: view
+          // One row for where things stand and how to look at them, so the lines keep the height.
+          jsxs('div', {
+            style: S.topRow,
+            children: [
+              jsx('div', { style: S.topStatus, children: jsx(StatusLine, { ctrl }) }),
+              view === 'subtitles' ? jsx(FontSize, { ctrl }) : null,
+              jsx(SegmentedControl, {
+                onChange: setView,
+                options: [
+                  { id: 'subtitles', label: t('subtitles') },
+                  { id: 'doctor', label: t('doctor') }
+                ],
+                value: view
+              })
+            ]
           }),
-          view === 'subtitles' ? jsx(FontSize, { ctrl }) : null
+          jsx(Controls, { ctrl })
         ]
       }),
-      view === 'subtitles' ? jsx(SubtitleList, { ctrl }) : jsx(DoctorPanel, { ctrl })
+      view === 'subtitles'
+        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor') })
+        : jsx(DoctorPanel, { ctrl })
     ]
   })
 }
@@ -1268,22 +1797,49 @@ function HermeneusPane({ ctrl }) {
 function StatusChip({ ctrl }) {
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
-  const status = state.status?.state
-  const label = stateLabel(t, status)
-  const last = RUNNING_STATES.has(status) && state.lastTranslated ? state.lastTranslated.translation : ''
+  const { session, showState, last } = chipParts(state)
+  const label = stateLabel(t, session)
+  const overlay = useValue(ctrl.overlay)
+  const running = RUNNING_STATES.has(session)
+  const overlayLabel = overlay.visible ? t('hideOverlay') : t('showOverlay')
 
-  return jsx(Tip, {
+  const chip = jsx(Tip, {
     label: last || t('statusBar', label),
     children: jsxs('span', {
       'aria-label': t('statusBar', label),
       role: 'status',
       style: S.chip,
       children: [
-        jsx(StatusDot, { tone: statusTone(status) }),
-        jsx('span', { children: label }),
+        jsx(StatusDot, { tone: statusTone(session) }),
+        jsx('span', { style: S.chipName, children: EN.title }),
+        showState ? jsx('span', { children: label }) : null,
         last ? jsx('span', { style: S.chipText, children: truncate(last, 80) }) : null
       ]
     })
+  })
+
+  if (!running) {
+    return chip
+  }
+
+  // Look-and-feel proposal for Seher: one icon button next to the chip shows or hides the overlay.
+  return jsxs('span', {
+    style: S.chipGroup,
+    children: [
+      chip,
+      jsx(Tip, {
+        label: overlayLabel,
+        children: jsx(Button, {
+          'aria-label': overlayLabel,
+          'aria-pressed': overlay.visible,
+          disabled: overlay.busy,
+          onClick: () => void ctrl.setOverlay(!overlay.visible),
+          size: 'icon-xs',
+          variant: overlay.visible ? 'secondary' : 'ghost',
+          children: jsx(icons.PanelBottom, {})
+        })
+      })
+    ]
   })
 }
 

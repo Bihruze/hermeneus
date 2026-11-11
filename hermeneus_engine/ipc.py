@@ -17,6 +17,9 @@ reads JSON lines back:
 ``{"op": "set", "changes": {"mode"?, "speak"?, "target_language"?, "voice_id"?, "output_device"?, "source"?}}``
     ``{"type": "set", "ok": true, "accepted": {...}, "applying": [...], "status": {...}}`` at once, or
     ``{"type": "error", "ok": false, "message": "<why, and the fix>"}``.
+``{"op": "overlay", "on": <true, false or null>, "port": <int or null>}``
+    switches the 127.0.0.1 overlay page (null only asks) and answers
+    ``{"type": "overlay", "running", "url", "port", "error"}``.
 
 Event shapes are documented in ``docs/events.md``.
 """
@@ -29,7 +32,7 @@ import json
 import logging
 import os
 from pathlib import Path
-from typing import Any, AsyncIterator, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from .bus import SubtitleBus
 
@@ -59,11 +62,13 @@ def _encode(event: dict) -> bytes:
 
 class BusServer:
     def __init__(self, path: Path, bus: SubtitleBus, *, on_stop: Callable[[], None],
-                 on_set: Optional[SetHandler] = None) -> None:
+                 on_set: Optional[SetHandler] = None,
+                 on_overlay: Optional[Callable[[Optional[bool], Optional[int]], Awaitable[dict]]] = None) -> None:
         self.path = Path(path)
         self._bus = bus
         self._on_stop = on_stop
         self._on_set = on_set
+        self._on_overlay = on_overlay
         self._server: Optional[asyncio.AbstractServer] = None
         self._clients: set[asyncio.Task] = set()
 
@@ -132,6 +137,14 @@ class BusServer:
             return
         elif op == "set":
             writer.write(_encode(self._set(request.get("changes"))))
+        elif op == "overlay":
+            on, port = request.get("on"), request.get("port")
+            if self._on_overlay is None:
+                writer.write(_encode({"type": "error", "message": "this session has no overlay page"}))
+            elif on not in (True, False, None) or not (port is None or type(port) is int):
+                writer.write(_encode({"type": "error", "message": "bad overlay request"}))
+            else:
+                writer.write(_encode(await self._on_overlay(on, port)))
         else:
             writer.write(_encode({"type": "error", "message": f"unknown op {op!r}"}))
         await writer.drain()
@@ -226,6 +239,13 @@ class SessionClient:
         reply = await self._request({"op": "set", "changes": changes})
         if reply.get("type") != "set":
             raise SettingsRefused(str(reply.get("message") or reply))
+        return reply
+
+    async def overlay(self, on: Optional[bool] = None, port: Optional[int] = None) -> dict:
+        """Switch the overlay page (None only asks). Raises SessionUnavailable when the owner cannot."""
+        reply = await self._request({"op": "overlay", "on": on, "port": port})
+        if reply.get("type") != "overlay":
+            raise SessionUnavailable(str(reply.get("message") or reply))
         return reply
 
     async def subscribe(self, after: Optional[int] = None) -> AsyncIterator[dict]:
