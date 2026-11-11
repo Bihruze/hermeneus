@@ -18,6 +18,8 @@ from hermeneus_engine.capture.process_tap import ProcessTapBackend
 from hermeneus_engine.contracts import CaptureBackend, CaptureError, CaptureSource
 
 OWN_PID = 4242
+# Capture stamps are shifted back by the resampler's group delay (0.99 ms at 48 kHz).
+DELAY_NS = int(round(StreamingResampler(48000, 16000).delay_seconds * 1e9))
 OPEN_ORDER = ["create_tap", "tap_format", "create_aggregate", "create_ioproc", "start"]
 CLOSE_ORDER = ["stop", "destroy_ioproc", "destroy_aggregate", "destroy_tap"]
 
@@ -90,7 +92,7 @@ def test_capture_converts_to_engine_pcm_and_tears_down_in_order():
     assert pcm.size == -(-94 * 512 // 3)
     assert abs(np.sqrt(np.mean(pcm[2000:] ** 2)) - 0.5 / np.sqrt(2)) < 0.005
     stamps = [ts for _, ts in got]
-    assert stamps == sorted(stamps) and stamps[0] == 1_000_000
+    assert stamps == sorted(stamps) and stamps[0] == 1_000_000 - DELAY_NS
     assert cap.stats.gaps == 0
     assert cap.close() == []  # second close is a no-op
 
@@ -251,7 +253,7 @@ def test_worker_protocol_round_trip():
     assert kind == _tap_worker.KIND_READY and json.loads(payload)["sample_rate"] == 48000.0
     hal.feed(0, sine(440, 480), host_time=123)
     kind, ts, pcm = _tap_worker.read_frame(w.stdout)
-    assert kind == _tap_worker.KIND_AUDIO and ts == 123 and len(pcm) == 160 * 2
+    assert kind == _tap_worker.KIND_AUDIO and ts == 123 - DELAY_NS and len(pcm) == 160 * 2
     w.stdin.close()
     kind, _, payload = _tap_worker.read_frame(w.stdout)
     assert kind == _tap_worker.KIND_STATS and json.loads(payload)["teardown_failures"] == []
@@ -313,7 +315,7 @@ def test_backend_start_delivers_pcm_and_stop_tears_down():
         b.start(src, lambda pcm, ts: None)
     hal.feed(0, sine(440, 4800), host_time=55)
     assert wait_for(lambda: len(got) == 1)
-    assert got[0][1] == 55 and len(got[0][0]) == 3200
+    assert got[0][1] == 55 - DELAY_NS and len(got[0][0]) == 3200
     b.stop()
     assert hal.clean
     assert b.last_stats["buffers"] == 1 and b.last_stats["worker_exit_code"] == 0
@@ -483,6 +485,29 @@ def test_watchdog_rebuilds_a_stalled_tap_then_reports_after_the_cap():
     assert statuses[-1] == eng.STATUS_RECOVERED
     cap.close()
     assert hal.clean
+
+
+def test_converter_runs_at_time_constraint_priority():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None, refresh_interval=1000)
+    cap.open()
+    assert wait_for(lambda: cap.stats.converter_policy != "")
+    cap.close()
+    expected = "time_constraint" if sys.platform == "darwin" else "default (not macOS)"
+    assert cap.stats.converter_policy == expected
+
+
+def test_housekeeping_runs_off_the_converter_thread():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    threads = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None, refresh_interval=0.02)
+    cap.tick = lambda now=None: threads.append(threading.current_thread().name)
+    cap.open()
+    assert wait_for(lambda: len(threads) >= 3)
+    cap.close()
+    assert set(threads) == {"hermeneus-tap-housekeeping"}
 
 
 def test_rate_change_rebuilds_with_a_new_resampler():
