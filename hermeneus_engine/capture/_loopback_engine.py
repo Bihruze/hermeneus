@@ -200,6 +200,13 @@ def audio_expected(hal, spec: LoopbackSpec, target_pid: int) -> bool:
 
 # ---------------------------------------------------------------------------- capture
 
+def _close(stream) -> list[str]:
+    try:
+        return list(stream.close())
+    except Exception as exc:
+        return [f"close stream: {exc}"]
+
+
 class LoopbackCapture:
     def __init__(self, hal, spec: LoopbackSpec, on_pcm: PcmCallback, *,
                  on_status: Optional[StatusCallback] = None, refresh_interval: float = 1.0,
@@ -224,6 +231,11 @@ class LoopbackCapture:
         # Held while the pump reads and converts, and while a rebuild swaps the stream.
         # The tick thread reads processes and sessions without it.
         self._lock = threading.RLock()
+        # Streams taken out of service while the pump may be waiting on their event.
+        # Only the pump closes them, after its wait returns: closing a handle during a
+        # pending WaitForSingleObject is undefined (learn.microsoft.com WaitForSingleObject,
+        # hHandle). See _retire.
+        self._retired: list = []
         self.stats = LoopbackStats()
         # watchdog state, touched only by the tick thread (and by tick() in tests); the pump writes _window_peak
         self._window_peak = 0.0
@@ -255,35 +267,62 @@ class LoopbackCapture:
             self._ticker.start()
 
     def _build(self, target: int, include: bool) -> None:
+        """Activate and start a stream without the lock (activation can take seconds), then swap it in."""
         stream = self._hal.open_loopback(target, include)
-        if self._stopping.is_set():
-            # close() ran while the activation was in flight: never start a stream after teardown.
-            self.stats.teardown_failures.extend(stream.close())
-            raise LoopbackSetupError("capture is stopping")
         try:
             if stream.sample_format not in ("float32", "int16") or stream.channels < 1 or stream.sample_rate <= 0:
                 raise LoopbackSetupError("The loopback stream reported a format this backend does not read.")
-            stream.start()
+            if not self._stopping.is_set():
+                stream.start()
         except BaseException:
-            self.stats.teardown_failures.extend(stream.close())
+            self.stats.teardown_failures.extend(_close(stream))
             raise
-        self._stream = stream
-        self._target = target
-        self._resampler = PolyphaseResampler(int(stream.sample_rate), ENGINE_SAMPLE_RATE)
-        self.stats.sample_rate = int(stream.sample_rate)
-        self.stats.channels = int(stream.channels)
-        self.stats.sample_format = stream.sample_format
-        self.stats.target_pid = target
+        resampler = PolyphaseResampler(int(stream.sample_rate), ENGINE_SAMPLE_RATE)
+        with self._lock:
+            if self._stopping.is_set():
+                # close() ran while the activation was in flight: never keep a stream after teardown.
+                self.stats.teardown_failures.extend(_close(stream))
+                raise LoopbackSetupError("capture is stopping")
+            old, self._stream = self._stream, stream
+            self._target = target
+            self._resampler = resampler
+            self.stats.sample_rate = int(stream.sample_rate)
+            self.stats.channels = int(stream.channels)
+            self.stats.sample_format = stream.sample_format
+            self.stats.target_pid = target
+        if old is not None:
+            self._retire(old)
+
+    def _pump_running(self) -> bool:
+        pump = self._pump
+        return pump is not None and pump.is_alive() and pump is not threading.current_thread()
+
+    def _retire(self, stream) -> None:
+        """Close ``stream`` now when no pump can be waiting on it, else hand it to the pump."""
+        if self._pump_running():
+            with self._lock:
+                self._retired.append(stream)
+            return
+        self.stats.teardown_failures.extend(_close(stream))
+
+    def _close_retired(self) -> None:
+        """Pump thread, between waits: close the streams other threads took out of service."""
+        with self._lock:
+            retired, self._retired = self._retired, []
+        for stream in retired:
+            self.stats.teardown_failures.extend(_close(stream))
 
     def _release(self) -> list[str]:
+        """Take the current stream out of service. Returns failures when it was closed here."""
         with self._lock:
             stream, self._stream = self._stream, None
         if stream is None:
             return []
-        try:
-            return list(stream.close())
-        except Exception as exc:
-            return [f"close stream: {exc}"]
+        before = len(self.stats.teardown_failures)
+        self._retire(stream)
+        failures = self.stats.teardown_failures[before:]
+        del self.stats.teardown_failures[before:]
+        return failures
 
     def close(self) -> list[str]:
         """Stop the pump and release the stream. Safe to call more than once; never raises."""
@@ -291,8 +330,19 @@ class LoopbackCapture:
         for t in (self._pump, self._ticker):
             if t is not None and t is not threading.current_thread():
                 t.join(timeout=2.0)
+        pump_left = self._pump is not None and self._pump.is_alive()
         self._pump = self._ticker = None
-        failures = self._release()
+        with self._lock:
+            stream, self._stream = self._stream, None
+            retired, self._retired = self._retired, []
+        streams = retired + ([stream] if stream is not None else [])
+        failures: list[str] = []
+        if pump_left:
+            # The pump did not leave its wait in time; closing its handle now would be undefined.
+            failures = [f"capture pump did not stop; {len(streams)} stream(s) left to process exit"]
+        else:
+            for s in streams:
+                failures.extend(_close(s))
         self.stats.teardown_failures.extend(failures)
         return failures
 
@@ -326,11 +376,13 @@ class LoopbackCapture:
             self.stats.tick_ns_max = max(self.stats.tick_ns_max, dt)
 
     def pump_once(self) -> None:
+        self._close_retired()
         stream = self._stream
         if stream is None:
             self._stopping.wait(WAIT_S)
             return
-        stream.wait(WAIT_S)
+        stream.wait(WAIT_S)  # outside the lock; only this thread ever closes a stream it may wait on
+        self._close_retired()
         with self._lock:
             if self._stream is not stream:
                 return  # rebuilt while waiting
@@ -367,7 +419,7 @@ class LoopbackCapture:
             mono = x.reshape(-1, channels).mean(axis=1, dtype=np.float32) if channels > 1 else x
             if mono.shape[0]:
                 peak = float(np.max(np.abs(mono)))
-                if peak > self._window_peak:
+                if peak > self._window_peak:  # under self._lock (pump_once); the tick swaps it under the lock too
                     self._window_peak = peak
         if p.discontinuity:
             stats.discontinuities += 1
@@ -420,16 +472,14 @@ class LoopbackCapture:
             target, include = resolve_target(self._hal, self._spec)  # process list read outside the lock
         except Exception as exc:
             log.warning("process loopback: rebuild after %s failed: %s", reason, exc)
-            with self._lock:
-                self.stats.teardown_failures.extend(self._release())
-            return False
-        with self._lock:
             self.stats.teardown_failures.extend(self._release())
-            try:
-                self._build(target, include)
-            except Exception as exc:
-                log.warning("process loopback: rebuild after %s failed: %s", reason, exc)
-                return False
+            return False
+        self.stats.teardown_failures.extend(self._release())
+        try:
+            self._build(target, include)
+        except Exception as exc:
+            log.warning("process loopback: rebuild after %s failed: %s", reason, exc)
+            return False
         self.stats.rebuilds += 1
         return True
 
@@ -467,7 +517,8 @@ class LoopbackCapture:
         return True
 
     def _watchdog(self, now: float) -> None:
-        peak, self._window_peak = self._window_peak, 0.0
+        with self._lock:
+            peak, self._window_peak = self._window_peak, 0.0
         if peak > 0.0:
             if self._reported in (STATUS_NO_AUDIO, STATUS_STALLED):
                 self._status(STATUS_RECOVERED, "Audio is arriving again.")

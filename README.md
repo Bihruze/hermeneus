@@ -495,6 +495,9 @@ From the A4 review (COM and WASAPI), R1 to R19:
 - R17 `msvcrt.locking` raises EACCES when another handle holds the byte, and truncating at offset 0 works while the byte at 1 GiB is locked.
 - R18 Ctrl+C, Ctrl+Break and closing the console window stop `hermes hermeneus run` cleanly.
 - R19 Hermes `ctx.llm`, `get_secret`, the Desktop pane and the TCP session client behave as on macOS.
+- R20 QueryInterface(IID_IMarshal) on the completion handler returns the free-threaded marshaler's IMarshal (custom routing in `_wasapi.marshal_query`), and activation still completes.
+- R21 Repeated rebuilds (silence, app restart, stream errors) never hang or crash the pump. Only the pump closes a stream it may be waiting on, after its wait returns; WaitForSingleObject's behaviour is undefined when its handle closes during the wait.
+- R22 Worst-case start time when the first format is refused, which costs a second activation.
 
 From the A5 review (parity and packaging):
 
