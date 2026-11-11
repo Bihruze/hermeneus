@@ -26,13 +26,14 @@ from __future__ import annotations
 
 import collections
 import enum
+import sys
 import time
 from dataclasses import dataclass
 from typing import Any, Callable, Optional, Protocol, Sequence
 
 import numpy as np
 
-from ..audio_devices import prefer_one
+from ..audio_devices import WASAPI_HOSTAPI_NAME, prefer_one
 from ..contracts import FeedbackRiskError
 from .routing import CaptureGate, RouteVerdict, ensure_route_safe
 
@@ -114,6 +115,11 @@ def _default_query_hostapis() -> Sequence[dict]:
     return [dict(a) for a in sd.query_hostapis()]
 
 
+def _default_wasapi_settings() -> Any:
+    import sounddevice as sd  # noqa: PLC0415
+    return sd.WasapiSettings(auto_convert=True)
+
+
 def _default_hostapi() -> Optional[int]:
     import sounddevice as sd  # noqa: PLC0415
     value = sd.default.hostapi
@@ -131,6 +137,7 @@ class PlaybackQueue:
                  query_devices: Callable[[], Sequence[dict]] = _default_query_devices,
                  query_hostapis: Callable[[], Sequence[dict]] = _default_query_hostapis,
                  default_hostapi: Callable[[], Optional[int]] = _default_hostapi,
+                 wasapi_settings: Callable[[], Any] = _default_wasapi_settings,
                  clock: Callable[[], int] = time.monotonic_ns,
                  latency: str | float = "low") -> None:
         if gate_mode and gate is None:
@@ -146,6 +153,8 @@ class PlaybackQueue:
         self._query_devices = query_devices
         self._query_hostapis = query_hostapis
         self._default_hostapi = default_hostapi
+        self._wasapi_settings = wasapi_settings
+        self._device_hostapi: Optional[int] = None
         self._clock = clock
         self._latency = latency
         self._pending: collections.deque[Utterance] = collections.deque()
@@ -172,9 +181,11 @@ class PlaybackQueue:
             ensure_route_safe(self.verdict, gate_mode=self._gate_mode)
         index, channels = self._resolve_device()
         self._channels = channels
+        extra = self._windows_extra_settings()
         try:
             stream = self._stream_factory(device=index, samplerate=self.sample_rate, channels=channels,
-                                          dtype="int16", latency=self._latency, callback=self._callback)
+                                          dtype="int16", latency=self._latency, callback=self._callback,
+                                          **extra)
             stream.start()
         except FeedbackRiskError:
             raise
@@ -210,6 +221,21 @@ class PlaybackQueue:
                 utt.end_ns = now
         self._pending.clear()
 
+    def _windows_extra_settings(self) -> dict:
+        """WASAPI shared mode plays only at the mixer rate unless PortAudio converts: sounddevice's
+        WasapiSettings says auto_convert "is in particular required for streams not matching the
+        system mixer sample rate". Speech is 24 kHz, so a WASAPI device gets it. Nothing on macOS."""
+        if sys.platform != "win32" or self._device_hostapi is None:
+            return {}
+        try:
+            apis = list(self._query_hostapis())
+            name = str(apis[self._device_hostapi].get("name", ""))
+        except Exception:
+            return {}
+        if name != WASAPI_HOSTAPI_NAME:
+            return {}
+        return {"extra_settings": self._wasapi_settings()}
+
     def _resolve_device(self) -> tuple[int, int]:
         devices = list(self._query_devices())
         exact = [i for i, d in enumerate(devices)
@@ -225,6 +251,8 @@ class PlaybackQueue:
             names = ", ".join(d["name"] for d in devices if d.get("max_output_channels", 0) > 0)
             raise PlaybackError(f"Output device '{self.device_name}' not found. Available outputs: {names}")
         idx = exact[0]
+        hostapi = devices[idx].get("hostapi")
+        self._device_hostapi = hostapi if isinstance(hostapi, int) else None
         # Mono speech is copied to both channels of a stereo device; a mono
         # stream on a stereo device plays on the first channel only.
         return idx, min(2, int(devices[idx]["max_output_channels"]))

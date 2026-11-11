@@ -551,3 +551,75 @@ def test_w21_numbered_and_truncated_cables_stay_apart():
     assert audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE-A Output (VB-Audio Cable")
     assert not audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE Output (VB-Audio Virtual ")
     assert not audio_devices.same_loopback_device("Cable Modem Output", "Cable Modem Input")
+
+
+# ---------------------------------------------------------------- W20 WASAPI shared mode at 24 kHz
+
+class FakeStream:
+    def __init__(self, **kwargs):
+        self.kwargs = kwargs
+
+    def start(self):
+        pass
+
+    def stop(self):
+        pass
+
+    def close(self):
+        pass
+
+
+def playback_for(name, devices, apis, *, asked=None):
+    made = []
+
+    def factory(**kwargs):
+        made.append(kwargs)
+        return FakeStream(**kwargs)
+
+    def hostapis():
+        if asked is not None:
+            asked.append(1)
+        return apis
+
+    q = PlaybackQueue(name, sample_rate=24000, stream_factory=factory, query_devices=lambda: devices,
+                      query_hostapis=hostapis, default_hostapi=lambda: 0,
+                      wasapi_settings=lambda: ("WasapiSettings", {"auto_convert": True}))
+    return q, made
+
+
+def test_w20_wasapi_output_gets_auto_convert_on_windows(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "win32")
+    q, made = playback_for("Speakers (Realtek(R) Audio)", WINDOWS_DEVICES, WINDOWS_HOSTAPIS)
+    q.start()
+    assert made[0]["device"] == 3 and made[0]["samplerate"] == 24000
+    assert made[0]["extra_settings"] == ("WasapiSettings", {"auto_convert": True})
+    q.stop()
+
+
+def test_w20_other_host_apis_on_windows_get_no_extra_settings(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "win32")
+    devices = [{"name": "Speakers (MME only)", "hostapi": 0, "max_output_channels": 2}]
+    q, made = playback_for("Speakers (MME only)", devices, WINDOWS_HOSTAPIS)
+    q.start()
+    assert "extra_settings" not in made[0]
+    q.stop()
+
+
+def test_w20_macos_stream_arguments_are_unchanged(monkeypatch):
+    from hermeneus_engine.tts import playback
+    monkeypatch.setattr(playback.sys, "platform", "darwin")
+    asked = []
+    devices = [{"name": "MacBook Air Speakers", "hostapi": 0, "max_output_channels": 2}]
+    q, made = playback_for("MacBook Air Speakers", devices, [{"name": "Core Audio"}], asked=asked)
+    q.start()
+    assert set(made[0]) == {"device", "samplerate", "channels", "dtype", "latency", "callback"} and asked == []
+    q.stop()
+
+
+def test_w20_real_sounddevice_has_wasapi_settings_with_auto_convert():
+    import inspect
+
+    import sounddevice
+    assert "auto_convert" in inspect.signature(sounddevice.WasapiSettings).parameters
