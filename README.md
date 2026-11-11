@@ -22,7 +22,7 @@ In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* m
 - The translation appears as a subtitle in a floating strip, in a Hermes Desktop pane, on a local page for OBS and in your terminal.
 - Spoken translation is optional. When you turn it on, ElevenLabs Flash v2.5 reads each translated line aloud on an output device you choose.
 
-This release is tested on macOS with real audio. Windows support is a preview: it is implemented and reviewed against documentation, and has not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). Linux support is planned.
+This release is tested on macOS with real audio. Windows support is a preview that has not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). Linux support is planned.
 
 ## Quick start
 
@@ -39,7 +39,7 @@ You need:
 
    ![The setup in the Hermeneus pane: the ElevenLabs API key step and the System audio step](docs/media/setup-pane.png)
 
-2. **Restart the gateway once.** Hermes puts the new libraries in a fresh environment that the running gateway cannot load yet, so the pane's **System audio** step says the audio libraries are not loaded. Click **Backend** in Hermes's status bar at the bottom of the window, then the power button in its menu (its tooltip says **Restart gateway**). Quitting and reopening Hermes Desktop may not be enough, because a gateway running in the background survives it. When the gateway is back, the pane reads the setup again by itself.
+2. **Restart the gateway once.** The gateway is the Hermes process in the background that serves Hermes Desktop, `hermes chat` and your chat apps. Hermes puts the new libraries in a fresh environment that the running gateway cannot load yet, so the pane's **System audio** step says the audio libraries are not loaded. Click **Backend** in Hermes's status bar at the bottom of the window, then the power button in its menu (its tooltip says **Restart gateway**). Quitting and reopening Hermes Desktop may not be enough, because a gateway running in the background survives it. When the gateway is back, the pane reads the setup again by itself.
 3. **Add your ElevenLabs key.** Press **Create a key**. Your browser opens ElevenLabs. Give the key Speech to Text access, and also Text to Speech and Voices read if you want spoken translation. Back in the pane, press **Add key in Hermes**. Hermes opens **Settings > Tools & Keys**. Click the `ELEVENLABS_API_KEY` field, paste the key and press **Save**. Hermes shows "Credential saved", and within a few seconds the pane shows the key step as **Done**. The key goes into Hermes's own key store, never into a chat or into the pane.
 
    ![The ELEVENLABS key field in Settings > Tools & Keys, holding a test key](docs/media/setup-key-saved.png)
@@ -87,7 +87,7 @@ The Python packages (`websockets`, `sounddevice`, `numpy`, on macOS `pyobjc-fram
 
 ### The System Audio Recording permission
 
-macOS asks for this permission the first time Hermeneus captures audio through a process tap: in the setup, in the doctor's check or in your first session. The prompt names the app that runs Hermes: Hermes for Desktop, or your terminal app (for example Terminal or iTerm) for the CLI.
+macOS asks for this permission the first time Hermeneus captures audio through a process tap, the macOS 14.2 feature that lets an app record the sound other apps play: in the setup, in the doctor's check or in your first session. The prompt names the app that runs Hermes: Hermes for Desktop, or your terminal app (for example Terminal or iTerm) for the CLI.
 
 1. Click **Allow** when macOS shows the prompt.
 2. If you clicked **Don't Allow** or no prompt appeared, open **System Settings > Privacy & Security > Screen & System Audio Recording**. Under **System Audio Recording Only**, turn on the app that runs Hermes. The full Screen & System Audio Recording entry also works, but Hermeneus needs only the audio part.
@@ -270,7 +270,7 @@ The full tables and their sources are in [`hermeneus_engine/languages.py`](herme
           |
           |  finished sentence
           v
-  your Hermes model              auxiliary task live_translate, with up to 3 earlier lines as context
+  your Hermes model              task live_translate, with up to 3 earlier lines as context
           |
           |  translated line
           +------------------------> pane, terminal, /translate status
@@ -280,8 +280,8 @@ The full tables and their sources are in [`hermeneus_engine/languages.py`](herme
 ```
 
 1. A capture backend reads the audio. On macOS 14.2 and later it is a Core Audio process tap, which needs no driver. It follows one app with its helper processes, or all system audio except Hermeneus itself. On older macOS, or when you choose it, Hermeneus reads a virtual loopback device such as BlackHole 2ch that you install yourself.
-2. The audio streams to ElevenLabs Scribe v3 Live (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`) with speaker diarization and multilingual mode on. Scribe returns partial and committed transcripts, a language code for each segment, and a speaker label.
-3. Hermeneus releases each finished sentence for translation, often before Scribe closes the segment. Your Hermes model translates it through the plugin LLM API (`ctx.llm`) under the auxiliary task `live_translate`. The request carries up to 3 earlier lines, so names and terms stay consistent.
+2. The audio streams to ElevenLabs Scribe v3 Live (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`) with speaker diarization (telling speakers apart) and multilingual mode on. Scribe returns partial and committed transcripts, a language code for each segment, and a speaker label.
+3. Hermeneus releases each finished sentence for translation, often before Scribe closes the segment. Your Hermes model translates it through the plugin LLM API (`ctx.llm`, the call Hermes gives plugins to reach your model) under the auxiliary task `live_translate`. An auxiliary task is a named side job that Hermes can route to its own model. The request carries up to 3 earlier lines, so names and terms stay consistent.
 4. A guard checks each reply, so only a translation goes on screen (see [Translation model](#translation-model)).
 5. With spoken translation on, the translated line goes to ElevenLabs Flash v2.5 over its multi-stream-input WebSocket.
 
@@ -320,7 +320,7 @@ Command flags override the settings for one session.
 | `capture_backend` | `auto` | `auto`, `process-tap`, `process-loopback` or `virtual-device`. `auto` picks the process tap on macOS 14.2 and later (process loopback on Windows build 20348 and later, preview), otherwise a virtual device such as BlackHole or VB-CABLE. |
 | `source` | `""` | Audio source, as `hermes hermeneus devices` lists it. Empty means all system audio with a process tap. `app:<bundle id>` on macOS, `app:<exe>` on Windows (preview); `system` is accepted on both. |
 | `speak` | `false` | Speak the translation as well as showing subtitles. |
-| `commit_strategy` | `vad` | `vad` or `turn_prediction`: how Scribe decides a segment is finished. |
+| `commit_strategy` | `vad` | `vad` (voice activity detection: a pause ends the segment) or `turn_prediction`: how Scribe decides a segment is finished. |
 | `output_device` | `""` | Output device for spoken translation. It must not feed the audio source. |
 | `voice_id` | `""` | ElevenLabs voice id. Empty uses the default voice Talia. |
 | `context_segments` | `3` | Earlier lines sent with each translation request (0 to 10). |
@@ -331,7 +331,7 @@ Command flags override the settings for one session.
 | `overlay_opacity` | `90` | Background opacity in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | `true` | Mark a new speaker with a small number in the speaker's colour. |
 | `overlay_style` | `banner` | `banner` (deep navy, periwinkle edge, warm white text) or `theme` (follows Hermes Desktop). |
-| `overlay_pace` | `live` | `live` goes faster when more than 3 s of text waits. `read` gives every line its full reading time. No text is dropped either way. |
+| `overlay_pace` | `live` | `live` or `read`, see [Subtitle pace](#subtitle-pace). |
 | `overlay_reading_cps` | `0` | Reading speed in characters per second (5 to 30). 0 uses the subtitle language: Turkish 17, English 20, most others 17. |
 | `overlay_page` | `false` | Serve live subtitles on a 127.0.0.1 page for OBS while a session runs. |
 | `overlay_page_port` | `47821` | Port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
@@ -381,7 +381,7 @@ Spoken translation uses ElevenLabs Flash v2.5. The default voice is Talia (`OZ0L
 | --- | --- |
 | macOS 14.2 and later | Tested with real audio. Process tap, no driver needed. |
 | macOS 13 to 14.1 | Works with a virtual device that you install yourself (see below). |
-| Windows | Preview: implemented and reviewed against documentation, not yet run on a Windows machine. |
+| Windows | Preview, not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). |
 | Linux | Planned. |
 
 ### Fallback: virtual device with a Multi-Output Device
@@ -401,7 +401,7 @@ For spoken translation on the fallback, choose your speakers or headphones direc
 
 ### Windows (preview)
 
-Status: implemented and reviewed against documentation, not yet run on a Windows machine. macOS is tested on real audio; Windows is not. The catalog entry lists macOS only, so `hermes plugins install hermeneus` refuses to install on Windows. To try the preview, install from the repository URL; Hermes v0.23.1 does not gate loading on the `platforms` field of `plugin.yaml`.
+Status: implemented and reviewed against documentation, not yet run on a Windows machine. The catalog entry lists macOS only, so `hermes plugins install hermeneus` refuses to install on Windows. To try the preview, install from the repository URL; Hermes v0.23.1 does not gate loading on the `platforms` field of `plugin.yaml`.
 
 - Driverless capture uses WASAPI process loopback, which needs OS build 20348 or later. On a desktop PC that means Windows 11. Older Windows uses VB-CABLE, which you install yourself.
 - The floating strip is not available on Windows. Use the Desktop pane, the terminal or the overlay page.
@@ -455,7 +455,7 @@ No subtitle text is written anywhere. Nothing else is written.
 - **Permission.** The process tap needs the macOS **System Audio Recording** permission for the app that runs Hermes. The virtual device fallback reads an input device, so macOS asks for the **Microphone** permission instead.
 - **Test tone.** The setup's **Allow system audio** and **Check again**, `hermes hermeneus doctor` and the pane's Doctor tab prove the permission with a 440 Hz test tone of about half a second.
   - A small player process plays it, and the real capture worker taps that one process with the tap set to mute it.
-  - When an output device named BlackHole, VB-Cable, VB-Audio, Loopback Audio or Soundflower is installed, the tone plays there at -23 dBFS, where nobody hears it.
+  - When an output device named BlackHole, VB-Cable, VB-Audio, Loopback Audio or Soundflower is installed, the tone plays there at -23 dBFS (decibels below the loudest digital level), where nobody hears it.
   - Otherwise it plays on your default output at -53.5 dBFS while the tap mutes it. You may hear it briefly; whether the mute makes it fully silent has not been measured.
   - The first check shows the macOS permission prompt and waits up to 30 seconds for your answer. `hermes hermeneus doctor --no-audio-check` skips it.
 
@@ -472,7 +472,7 @@ No subtitle text is written anywhere. Nothing else is written.
 
 ### Local network and remote starts
 
-- **Overlay page, off by default.** Only after `hermes hermeneus overlay-page on`, the process that runs the session listens on TCP port 47821 (`overlay_page_port`) on 127.0.0.1 only, never on another interface, while the session runs. It serves one page and a Server-Sent Events stream of the subtitle lines (original, translation, speaker number, session state) and of the Desktop theme the pane sent. Every address needs a random token that is new each session. Requests without it get 403, and requests whose Host header is not `127.0.0.1` or `localhost` with that port get 403, which blocks DNS rebinding. It answers GET and HEAD only, sends no CORS headers, has no control routes and loads nothing from the internet. It stops when the session ends, when the plugin is unloaded and with its process. Any program running as you on this Mac that learns the address can read the subtitles.
+- **Overlay page, off by default.** Only after `hermes hermeneus overlay-page on`, the process that runs the session listens on TCP port 47821 (`overlay_page_port`) on 127.0.0.1 only, never on another interface, while the session runs. It serves one page and a Server-Sent Events stream (one HTTP response that the server keeps open and adds events to) of the subtitle lines (original, translation, speaker number, session state) and of the Desktop theme the pane sent. Every address needs a random token that is new each session. Requests without it get 403, and requests whose Host header is not `127.0.0.1` or `localhost` with that port get 403, which blocks DNS rebinding. It answers GET and HEAD only, sends no CORS headers, has no control routes and loads nothing from the internet. It stops when the session ends, when the plugin is unloaded and with its process. Any program running as you on this Mac that learns the address can read the subtitles.
 - With the page off, Hermeneus listens on no TCP port on macOS.
 - **Starts from a chat.** `/translate start` and `/translate set --source` from a chat platform are refused unless you turn on `allow_remote_start`. With it on, a chat message can start capture on the Mac that runs Hermes and streaming to ElevenLabs, billed to your account, with no action at that Mac. The refusal covers slash commands; **Start** in a Desktop pane connected to a remote Hermes backend is not refused. The setup's audio check is refused from another computer.
 
@@ -492,12 +492,11 @@ Prices change; the ElevenLabs page is the reference.
 
 ## Limits
 
-- Hermeneus is tested on macOS. Windows is a preview that has not yet run on a Windows machine. Linux support is planned.
+- Hermeneus is tested on macOS only (see [Platforms](#platforms)).
 - One session runs at a time. A second start reports the running session.
-- The floating strip is macOS only. It was measured above a native full-screen window in its own Space on one built-in display. Several displays and moving between ordinary Spaces were not measured.
+- The floating strip is macOS only. It was measured above a native full-screen window in its own Space (a macOS desktop) on one built-in display. Several displays and moving between ordinary Spaces were not measured.
 - Your model sets how far subtitles trail the speech and how good they are in a given language.
-- The default `live` pace shows fast speech at up to twice the reading speed. It stayed within 9.0 s of the speech in the talk show measured above.
-- With the `read` pace, which you can choose instead, the strip and the overlay page fall behind fast, continuous speech, by up to 29.2 s in that talk show.
+- On fast speech the strip and the overlay page trail the speech: by up to 9.0 s with the default `live` pace and up to 29.2 s with `read` in the talk show measured under [Subtitle pace](#subtitle-pace).
 - A line whose translation arrives more than 6 s late can appear on the strip after the lines spoken after it.
 - Speaker labels come from Scribe's diarization. Scribe can merge two labels during a session; Hermeneus relabels the lines it still shows when that happens. When a line already on the strip moves to another speaker, its words move to a new speaker row. This is the one case in which rows on screen change.
 - In voice only mode the pane, the strip and the overlay page still show the lines.
@@ -541,9 +540,9 @@ Every failure message a session can show, with its exact text and where it appea
 
 Other problems:
 
-- **The setup says the audio libraries are not loaded.** Restart the gateway: **Backend** in the status bar, then the power button (**Restart gateway**). Then press **Check again**.
+- **The setup says the audio libraries are not loaded.** Restart the gateway as in [Quick start step 2](#in-hermes-desktop), then press **Check again**.
 - **No pane or status bar item after a terminal install.** Turn on the plugin's **Desktop** switch in **Capabilities > Plugins** (see [In a terminal](#in-a-terminal)).
-- **The pane says "Hermeneus backend unreachable".** Turn on Hermeneus in **Capabilities > Plugins** (its Agent switch) and press **Try again**. If it stays unreachable, restart the gateway as above.
+- **The pane says "Hermeneus backend unreachable".** Turn on Hermeneus in **Capabilities > Plugins** (its Agent switch) and press **Try again**. If it stays unreachable, restart the gateway as in [Quick start step 2](#in-hermes-desktop).
 - **No subtitles while audio plays.** With the process tap, Hermeneus notices when the tap delivers only silence while the app reports that it is playing. It rebuilds the tap up to five times and then shows a message. If the message says macOS is giving silence, allow the permission and start again. Check that the source is the app that is playing: `hermes hermeneus devices` marks apps that play now. It lists apps with a Dock icon, so a command-line player does not appear.
 - **The captured app quit, or you changed the output device.** No action is needed with the process tap. Capture follows the app's new processes within about a second, and is rebuilt when the default output or the device list changes.
 - **"Capture did not start within 30 s".** macOS was probably showing the permission prompt. Allow it and start again.
