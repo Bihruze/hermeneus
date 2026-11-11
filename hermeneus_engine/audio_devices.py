@@ -10,6 +10,10 @@
   (VB-Audio Virtual Cable)" and a recording side "CABLE Output (VB-Audio Virtual
   Cable)". Audio played to the first comes out of the second, so for feedback
   they are one device (BlackHole uses one name for both sides on macOS).
+  The MME host API cuts names to 31 characters, so the same cable can also
+  appear as "CABLE Input (VB-Audio Virtual C" or "CABLE Output (VB-Audio Virtual ".
+  The rule therefore keys on the leading "CABLE[-X] Input|Output (VB" and
+  ignores the rest of the name.
 """
 
 from __future__ import annotations
@@ -45,11 +49,17 @@ def prefer_one(matches: Sequence[int], devices: Sequence[dict], hostapis: Callab
 
 
 _VB_SIDE = re.compile(r"\b(input|output)\b")
+# "CABLE Input (VB-Audio Virtual Cable)", "CABLE-A Output (VB-Audio Cable A)", and the
+# 31-character MME forms of both. The suffix after CABLE tells numbered cables apart.
+_VB_CABLE = re.compile(r"^cable(-[a-z0-9]+)?\s+(?:input|output)\s*\(vb")
 
 
 def loopback_pair_key(name: str) -> Optional[str]:
     """A key shared by both sides of a VB-Audio cable, or None for any other device."""
-    folded = (name or "").casefold()
+    folded = (name or "").casefold().strip()
+    m = _VB_CABLE.match(folded)
+    if m:
+        return "vb-cable" + (m.group(1) or "")
     if "vb-audio" not in folded:
         return None
     return re.sub(r"\s+", " ", _VB_SIDE.sub("", folded)).strip()

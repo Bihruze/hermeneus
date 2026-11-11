@@ -521,3 +521,33 @@ def test_w22_plugin_yaml_settings_are_os_neutral():
     block = text[text.index("  allow_remote_start:"):]
     description = next(line for line in block.splitlines() if line.strip().startswith("description:"))
     assert "Mac" not in description and "this computer" in description
+
+
+# ---------------------------------------------------------------- W21 truncated MME cable names
+
+CABLE_NAMES = {
+    "MME": ("CABLE Input (VB-Audio Virtual C", "CABLE Output (VB-Audio Virtual "),
+    "Windows DirectSound": ("CABLE Input (VB-Audio Virtual Cable)", "CABLE Output (VB-Audio Virtual Cable)"),
+    "Windows WASAPI": ("CABLE Input (VB-Audio Virtual Cable)", "CABLE Output (VB-Audio Virtual Cable)"),
+}
+
+
+@pytest.mark.parametrize("out_api", sorted(CABLE_NAMES))
+@pytest.mark.parametrize("cap_api", sorted(CABLE_NAMES))
+def test_w21_cable_pair_matches_across_host_api_names(out_api, cap_api):
+    out_name, cap_name = CABLE_NAMES[out_api][0], CABLE_NAMES[cap_api][1]
+    assert len(CABLE_NAMES["MME"][0]) == 31 and len(CABLE_NAMES["MME"][1]) == 31
+    assert audio_devices.same_loopback_device(out_name, cap_name)
+    inv = routing.AudioInventory(devices=(
+        routing.AudioDeviceInfo(out_name, output_channels=2),
+        routing.AudioDeviceInfo(cap_name, input_channels=2),
+        routing.AudioDeviceInfo("Speakers (Realtek(R) Audio)", output_channels=2),
+    ))
+    v = routing.check_feedback_risk(out_name, cap_name, capture_backend="virtual-device", inventory=inv)
+    assert v.risky and v.code == routing.CODE_SAME_DEVICE
+
+
+def test_w21_numbered_and_truncated_cables_stay_apart():
+    assert audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE-A Output (VB-Audio Cable")
+    assert not audio_devices.same_loopback_device("CABLE-A Input (VB-Audio Cable A)", "CABLE Output (VB-Audio Virtual ")
+    assert not audio_devices.same_loopback_device("Cable Modem Output", "Cable Modem Input")
