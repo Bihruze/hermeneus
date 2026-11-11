@@ -91,8 +91,25 @@ def test_setup_state_is_complete_only_with_a_key_and_working_audio():
     for audio in ("unknown", "running", "denied", "failed"):
         assert onboarding.setup_state(key_set=True, audio={"state": audio}, model=model,
                                       language=lang)["complete"] is False
+    # Off macOS (Windows, Linux) there is no System Audio Recording permission to ask for.
     assert onboarding.setup_state(key_set=True, audio={"state": "not_needed"}, model=model,
-                                  language=lang)["complete"] is True
+                                  language=lang, platform="win32")["complete"] is True
+
+
+def test_on_macos_setup_never_completes_without_the_audio_step():
+    """A6-1: on a Mac only a working check, or a macOS without process taps, finishes the audio step."""
+    model = onboarding.model_route({}, {"model": "m"})
+    lang = {"code": "tr", "from": "hermes"}
+
+    def complete(audio):
+        return onboarding.setup_state(key_set=True, audio=audio, model=model, language=lang,
+                                      platform="darwin")["complete"]
+
+    assert complete({"state": "ok"}) is True
+    assert complete({"state": "not_needed",
+                     "message": "capture backend 'process-tap' is not part of this build"}) is False
+    assert complete({"state": "not_needed", "message": ""}) is False
+    assert complete({"state": "not_needed", "message": f"{onboarding.OLD_MACOS}; this Mac runs 13.6"}) is True
 
 
 # -- the audio check -----------------------------------------------------------------
@@ -195,7 +212,8 @@ async def test_missing_plugin_libraries_ask_for_one_restart_not_a_skip(data_dir)
 
     check = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=unavailable)
     state = check.state()
-    assert state["state"] == "failed" and "Quit and reopen Hermes" in state["message"] and "objc" in state["message"]
+    assert state["state"] == "failed" and "Restart gateway" in state["message"] and "objc" in state["message"]
+    assert "status bar" in state["message"] and "Quit and reopen" not in state["message"]
 
     check, _ = _check([ModuleNotFoundError("No module named 'numpy'", name="numpy")], data_dir)
     check.start()
@@ -210,3 +228,131 @@ def test_a_backend_check_that_raises_is_a_failure_not_a_skip(data_dir):
 
     state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=broken).state()
     assert state["state"] == "failed" and "HAL busy" in state["message"]
+
+
+# -- A6-1: a capture module that cannot load after a fresh install ------------------
+
+def _fake_components(monkeypatch, *, load_error=None, available=(True, "ok"), version=(15, 1)):
+    components = importlib.import_module(f"{pkg.__name__}.hermeneus_engine.components")
+    process_tap = importlib.import_module(f"{pkg.__name__}.hermeneus_engine.capture.process_tap")
+    monkeypatch.setattr(onboarding.sys, "platform", "darwin")
+    monkeypatch.setattr(process_tap, "macos_version", lambda: version)
+
+    class Backend:
+        name = "process-tap"
+
+        def available(self):
+            return available
+
+    def capture_backend(name):
+        if load_error:
+            raise components.ComponentUnavailable(load_error)
+        return Backend()
+
+    monkeypatch.setattr(components, "capture_backend", capture_backend)
+
+
+def test_a_capture_module_missing_after_install_is_failed_with_the_restart_action(monkeypatch, data_dir):
+    """The audit's case: Hermes put numpy and pyobjc into a new environment the running backend cannot see."""
+    _fake_components(monkeypatch, load_error="capture backend 'process-tap' is not part of this build")
+    check = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available)
+    state = check.state()
+    assert state["state"] == "failed" and state["state"] != "not_needed"
+    assert "Restart gateway" in state["message"] and "Check again" in state["message"]
+    setup = onboarding.setup_state(key_set=True, audio=state, model={}, language={"code": "en"}, platform="darwin")
+    assert setup["complete"] is False
+
+
+def test_a_missing_module_name_is_named_in_the_restart_message(monkeypatch, data_dir):
+    _fake_components(monkeypatch, load_error="capture.process-tap is not part of this build (numpy is missing)")
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available).state()
+    assert state["state"] == "failed" and "(numpy)" in state["message"]
+
+
+def test_pyobjc_missing_on_a_new_mac_is_failed_not_skipped(monkeypatch, data_dir):
+    _fake_components(monkeypatch, available=(False, "PyObjC is missing. Install pyobjc-framework-CoreAudio."))
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available).state()
+    assert state["state"] == "failed" and "pyobjc-framework-CoreAudio" in state["message"]
+    assert "Restart gateway" in state["message"]
+
+
+def test_a_saved_ok_does_not_hide_libraries_that_went_missing(monkeypatch, data_dir):
+    (data_dir / onboarding.STATE_FILE).write_text(json.dumps({"audio": {"state": "ok", "message": "", "at": 1}}))
+    _fake_components(monkeypatch, load_error="capture backend 'process-tap' is not part of this build")
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available).state()
+    assert state["state"] == "failed"
+
+
+def test_only_a_macos_without_process_taps_needs_no_permission(monkeypatch, data_dir):
+    _fake_components(monkeypatch, version=(13, 6))
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available).state()
+    assert state["state"] == "not_needed" and state["message"].startswith(onboarding.OLD_MACOS)
+    assert onboarding.audio_step_done(state, "darwin") is True
+    _fake_components(monkeypatch)
+    state = onboarding.AudioCheck(lambda t: None, lambda: data_dir, available=onboarding.process_tap_available).state()
+    assert state["state"] == "unknown"
+
+
+# -- A6-5: no overlapping checks after the deadline ----------------------------------
+
+async def test_no_second_capture_while_a_timed_out_check_is_still_running(data_dir):
+    running, most = [], [0]
+    gate = threading.Event()
+    ok = tap_doctor.DoctorResult(True, tap_doctor.OK, "works")
+
+    def slow(timeout_s):
+        running.append(1)
+        most[0] = max(most[0], len(running))
+        gate.wait(5)
+        running.pop()
+        return ok
+
+    check = onboarding.AudioCheck(slow, lambda: data_dir, available=lambda: (True, ""), deadline_s=0.1)
+    check.start()
+    await check.wait()
+    assert check.state()["state"] == "failed" and "did not finish" in check.state()["message"]
+    assert check.busy() is True
+    again = check.start()  # Check again while the first capture thread is alive
+    assert again["state"] == "failed" and "still finishing" in again["message"]
+    await asyncio.sleep(0.05)
+    assert most[0] == 1
+    gate.set()
+    for _ in range(100):
+        if not check.busy():
+            break
+        await asyncio.sleep(0.02)
+    await asyncio.sleep(0.02)
+    # The late answer (the user answered the prompt after the deadline) is kept.
+    assert check.state()["state"] == "ok" and check.busy() is False
+    assert most[0] == 1
+
+
+async def test_the_running_marker_lives_exactly_as_long_as_the_capture_thread(data_dir):
+    gate = threading.Event()
+    seen = []
+
+    def slow(timeout_s):
+        seen.append(onboarding.audio_check_running(data_dir))
+        gate.wait(5)
+        return tap_doctor.DoctorResult(True, tap_doctor.OK, "works")
+
+    check = onboarding.AudioCheck(slow, lambda: data_dir, available=lambda: (True, ""), deadline_s=5)
+    assert onboarding.audio_check_running(data_dir) is False
+    check.start()
+    assert onboarding.audio_check_running(data_dir) is True  # set before the thread is even scheduled
+    await asyncio.sleep(0.05)
+    gate.set()
+    await check.wait()
+    assert seen == [True] and onboarding.audio_check_running(data_dir) is False
+
+
+def test_a_stale_or_dead_marker_does_not_block_a_start(data_dir):
+    import os
+    path = data_dir / onboarding.MARKER_FILE
+    path.write_text(json.dumps({"pid": os.getpid(), "at": 100.0}))
+    assert onboarding.audio_check_running(data_dir, now=lambda: 100.0 + 5) is True
+    assert onboarding.audio_check_running(data_dir, now=lambda: 100.0 + onboarding.MARKER_STALE_S + 1) is False
+    path.write_text(json.dumps({"pid": 2 ** 22 + 12345, "at": 100.0}))
+    assert onboarding.audio_check_running(data_dir, now=lambda: 101.0) is False
+    path.write_text("not json")
+    assert onboarding.audio_check_running(data_dir) is False

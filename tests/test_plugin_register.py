@@ -398,3 +398,60 @@ def test_api_open_privacy_settings_failure_names_the_pane(setup_api, monkeypatch
     r = client.post("/api/plugins/hermeneus/setup/open-privacy-settings")
     assert r.status_code == 500 and "Screen & System Audio Recording" in r.json()["detail"]
     assert opened == [True]
+
+
+# -- A6 fixes ------------------------------------------------------------------------
+
+def test_api_start_is_409_while_the_audio_check_runs(setup_api, monkeypatch, data_dir):
+    """A6-6: the chip, its popover and the pane all start through POST /start."""
+    import threading
+    from hermeneus_engine.capture import tap_doctor
+    client, module, plugin, _results = setup_api
+    gate = threading.Event()
+
+    def slow(timeout_s):
+        gate.wait(5)
+        return tap_doctor.DoctorResult(True, tap_doctor.OK, "works")
+
+    check = module._onboarding.AudioCheck(slow, lambda: plugin.controller.data_dir, available=lambda: (True, ""))
+    monkeypatch.setattr(module, "audio_check", check)
+    assert client.post("/api/plugins/hermeneus/setup/audio-check").json()["state"] == "running"
+    r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 409 and "audio check is running" in r.json()["detail"]
+    assert lock_holder(data_dir) is None
+    gate.set()
+    deadline = time.monotonic() + 5
+    while check.busy() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 200
+    client.post("/api/plugins/hermeneus/stop")
+
+
+def test_slash_and_api_start_refuse_while_another_copy_runs_the_check(api, data_dir):
+    """A6-6: /translate start runs in another copy of the plugin; the marker file reaches it."""
+    import os
+    client, module, plugin, _rig = api
+    marker = Path(plugin.controller.data_dir) / module._onboarding.MARKER_FILE
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"pid": os.getpid(), "at": time.time()}))
+    try:
+        r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+        assert r.status_code == 409 and "audio check is running" in r.json()["detail"]
+        reply = asyncio.run(plugin.slash("start --to tr", platform="desktop"))
+        assert "audio check is running" in reply
+    finally:
+        marker.unlink()
+    assert lock_holder(data_dir) is None
+
+
+def test_api_setup_tells_another_computer_nothing(setup_api, monkeypatch):
+    """A6-7: GET /setup is local only; a remote or proxied client learns no key, model or language."""
+    client, module, _plugin, _results = setup_api
+    monkeypatch.setattr(module._glue, "get_secret", lambda name: "sk-not-shown")
+    for remote in (_client(setup_api[:1] + (None, None, None), "192.168.1.20"),
+                   _client(setup_api[:1] + (None, None, None), "127.0.0.1", headers={"X-Forwarded-For": "1.2.3.4"})):
+        body = remote.get("/api/plugins/hermeneus/setup").json()
+        assert body["remote"] is True and set(body) == {"remote", "complete", "message"}
+        assert "key" not in body and "model" not in body and "language" not in body
+    assert "key" in client.get("/api/plugins/hermeneus/setup").json()

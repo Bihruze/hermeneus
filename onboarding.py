@@ -48,6 +48,13 @@ PRIVACY_PANE = "System Settings > Privacy & Security > Screen & System Audio Rec
 CHECK_TIMEOUT_S = 30.0
 CHECK_DEADLINE_S = CHECK_TIMEOUT_S + 15.0
 STATE_FILE = "setup.json"
+# Present while a check's capture thread is alive, so a session start in another copy of the plugin
+# in this Hermes (the /translate command, a terminal run) can refuse to overlap it. Removed when the
+# thread ends; ignored once older than MARKER_STALE_S (a process that died mid-check).
+MARKER_FILE = "audio-check.running"
+MARKER_STALE_S = 120.0
+# The only reason a Mac needs no audio permission: no process taps before macOS 14.2.
+OLD_MACOS = "process taps need macOS 14.2 or later"
 
 # Audio check states the pane shows.
 AUDIO_UNKNOWN = "unknown"      # never run on this Hermes profile
@@ -59,10 +66,30 @@ AUDIO_NOT_NEEDED = "not_needed"  # no process tap here (virtual device or Window
 
 FALLBACK_LANGUAGE = "en"
 
-# Hermes installs plugin dependencies when the plugin is turned on; a process that started before
-# that cannot import them until it restarts (hermes_cli/plugins_activation.py:75-79).
-RESTART_MESSAGE = ("Hermeneus's audio libraries ({module}) are not loaded in this Hermes yet. Quit and "
-                   "reopen Hermes, then press Check again.")
+# Hermes installs plugin dependencies when the plugin is turned on, into a new environment; the
+# backend that was already running cannot import them until it restarts
+# (hermes_cli/plugins_activation.py:75-79). Quitting Desktop is not enough: a detached gateway
+# survives it and is re-attached. Desktop's own control is "Restart gateway", the power button in
+# the menu of the gateway item in its status bar (apps/desktop/src/i18n/en.ts:2433,
+# app/shell/gateway-menu-panel.tsx:194-205).
+RESTART_ACTION = "Restart gateway"
+RESTART_MESSAGE = ("Hermeneus's audio libraries ({module}) are not loaded in this Hermes yet. Open the "
+                   "gateway item in Hermes's status bar (bottom of the window), click Restart gateway, "
+                   "wait for it to reconnect, then press Check again.")
+STILL_FINISHING_MESSAGE = ("The last audio check is still finishing in the background. If macOS is showing "
+                           "a prompt, answer it, wait a few seconds, then press Check again.")
+
+
+class AudioLibrariesMissing(ImportError):
+    """The capture code or its libraries cannot load in this process (installed after it started)."""
+
+
+class AudioCheckRunning(RuntimeError):
+    """A session start was refused because the first-run audio check is capturing right now."""
+
+
+AUDIO_CHECK_RUNNING_MESSAGE = ("the system audio check is running; wait for it to finish (about 30 seconds "
+                               "at most), then start again")
 
 
 def missing_module_message(exc: BaseException) -> Optional[str]:
@@ -177,6 +204,7 @@ class AudioCheck:
         self._clock = clock
         self._lock = threading.Lock()
         self._task: Optional[asyncio.Task] = None
+        self._worker: Optional[asyncio.Future] = None  # the capture thread, which can outlive the deadline
         self._current: Optional[dict] = None
 
     # state
@@ -225,30 +253,65 @@ class AudioCheck:
 
     # running
 
+    def busy(self) -> bool:
+        """True while a check runs or its capture thread is still alive after the deadline."""
+        if self._task is not None and not self._task.done():
+            return True
+        return self._worker is not None and not self._worker.done()
+
     def start(self) -> dict:
-        """Begin a check unless one runs; returns the state at once. Call from the event loop."""
+        """Begin a check unless one runs; returns the state at once. Call from the event loop.
+
+        A capture thread that outlived its deadline is still capturing, so no second check starts
+        until it ends (two taps and test tones would overlap); its late answer is kept when it comes.
+        """
         if self._task is not None and not self._task.done():
             return self.state()
+        if self._worker is not None and not self._worker.done():
+            self._set({"state": AUDIO_FAILED, "message": STILL_FINISHING_MESSAGE, "at": self._clock()})
+            return self.state()
         self._set({"state": AUDIO_RUNNING, "message": "", "at": self._clock()})
+        _write_marker(self._data_dir())
         self._task = asyncio.get_running_loop().create_task(self._run())
         return self.state()
 
-    async def _run(self) -> None:
+    def _guarded_check(self) -> Any:
         try:
-            result = await asyncio.wait_for(asyncio.to_thread(self._run_check, CHECK_TIMEOUT_S),
-                                            timeout=self._deadline_s)
+            return self._run_check(CHECK_TIMEOUT_S)
+        finally:
+            _clear_marker(self._data_dir())
+
+    async def _run(self) -> None:
+        worker = asyncio.ensure_future(asyncio.to_thread(self._guarded_check))
+        self._worker = worker
+        try:
+            result = await asyncio.wait_for(asyncio.shield(worker), timeout=self._deadline_s)
             outcome = classify(result)
         except asyncio.TimeoutError:
             outcome = {"state": AUDIO_FAILED,
                        "message": (f"The audio check did not finish within {int(self._deadline_s)} seconds. "
                                    f"If macOS is showing a prompt, answer it, then press Check again.")}
+            worker.add_done_callback(self._late)
         except Exception as exc:
             outcome = {"state": AUDIO_FAILED,
                        "message": missing_module_message(exc) or f"The audio check failed: {exc}"}
+        self._finish(outcome)
+
+    def _finish(self, outcome: dict) -> None:
         outcome["at"] = self._clock()
         if outcome["state"] in (AUDIO_OK, AUDIO_DENIED):
             self._save(outcome)
         self._set(outcome)
+
+    def _late(self, worker: asyncio.Future) -> None:
+        """The answer of a capture thread that ended after the deadline (the prompt was answered late)."""
+        if worker.cancelled() or worker.exception() is not None:
+            return
+        with self._lock:
+            current = self._current
+        if current is not None and current.get("state") == AUDIO_RUNNING:
+            return  # cannot happen (start waits for this thread), but never overwrite a newer check
+        self._finish(classify(worker.result()))
 
     async def wait(self) -> None:
         """For tests and shutdown: wait for a running check to end."""
@@ -278,15 +341,73 @@ def real_check(timeout_s: float) -> Any:
 
 
 def process_tap_available() -> tuple[bool, str]:
-    """Whether this Mac captures through a process tap (the only backend with this permission)."""
+    """Whether this Mac captures through a process tap (the only backend with this permission).
+
+    On macOS the answer "not needed" is given only for a macOS older than 14.2, which has no
+    process taps and so no System Audio Recording permission. A capture module or library that
+    cannot load (Hermes installed it after this backend started) raises AudioLibrariesMissing,
+    which the setup shows as a failure with the one restart action, never as "not needed".
+    """
     if sys.platform != "darwin":
         return False, "this computer does not use the macOS process tap"
     from .hermeneus_engine import components
     try:
         backend = components.capture_backend("process-tap")
-        return backend.available()
     except components.ComponentUnavailable as exc:
-        return False, str(exc)
+        raise AudioLibrariesMissing(str(exc), name=_missing_name(str(exc))) from None
+    from .hermeneus_engine.capture.process_tap import MIN_MACOS, macos_version
+    version = macos_version()
+    if version is not None and version < MIN_MACOS:
+        return False, f"{OLD_MACOS}; this Mac runs {'.'.join(map(str, version))}"
+    ok, why = backend.available()
+    if not ok:
+        raise AudioLibrariesMissing(why, name="pyobjc-framework-CoreAudio" if "PyObjC" in why else "Core Audio")
+    return ok, why
+
+
+def _missing_name(text: str) -> str:
+    """The module named in a 'process-tap is not part of this build (numpy is missing)' reason, else the text."""
+    if "(" in text and text.endswith("is missing)"):
+        return text.rsplit("(", 1)[1][: -len(" is missing)")]
+    return text
+
+
+def _marker(data_dir: Any) -> Path:
+    return Path(data_dir) / MARKER_FILE
+
+
+def _write_marker(data_dir: Any) -> None:
+    try:
+        path = _marker(data_dir)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"pid": os.getpid(), "at": time.time()}))
+    except OSError as exc:  # the in-process guard still holds
+        log.warning("could not mark the audio check as running: %s", exc)
+
+
+def _clear_marker(data_dir: Any) -> None:
+    try:
+        _marker(data_dir).unlink()
+    except OSError:
+        pass
+
+
+def audio_check_running(data_dir: Any, *, now: Callable[[], float] = time.time) -> bool:
+    """Whether a first-run audio check is capturing in this Hermes now (any copy of the plugin)."""
+    try:
+        data = json.loads(_marker(data_dir).read_text())
+        pid, at = int(data["pid"]), float(data["at"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return False
+    if now() - at > MARKER_STALE_S:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:
+        pass  # alive, owned by someone else
+    return True
 
 
 def open_privacy_settings(run: Optional[Callable[[list], Any]] = None) -> None:
@@ -301,9 +422,21 @@ def open_privacy_settings(run: Optional[Callable[[list], Any]] = None) -> None:
 
 # -- the whole picture ------------------------------------------------------------------
 
-def setup_state(*, key_set: Optional[bool], audio: dict, model: dict, language: dict) -> dict:
+def audio_step_done(audio: dict, platform: str = sys.platform) -> bool:
+    """Whether the audio step lets setup finish. On macOS "not needed" counts only with the
+    reason process_tap_available gives for a macOS without process taps."""
+    state = audio.get("state")
+    if state == AUDIO_OK:
+        return True
+    if state != AUDIO_NOT_NEEDED:
+        return False
+    return platform != "darwin" or str(audio.get("message") or "").startswith(OLD_MACOS)
+
+
+def setup_state(*, key_set: Optional[bool], audio: dict, model: dict, language: dict,
+                platform: str = sys.platform) -> dict:
     """What the pane's setup shows. ``complete`` is what gates the guided setup."""
-    audio_done = audio.get("state") in (AUDIO_OK, AUDIO_NOT_NEEDED)
+    audio_done = audio_step_done(audio, platform)
     return {
         "key": {"set": key_set, "name": SECRET_NAME, "url": KEY_URL, "permissions": list(KEY_PERMISSIONS)},
         "audio": {**audio, "settings_url": PRIVACY_URL, "settings_pane": PRIVACY_PANE},

@@ -101,10 +101,15 @@ def _surface(request: Request) -> str:
 @router.post("/start")
 async def start(request: Request, body: Optional[dict] = Body(default=None)):
     choices = _options.Choices.from_mapping(body or {})
+    if audio_check.busy():
+        # The setup's audio check is capturing (its own tap and test tone); a session would overlap it.
+        return _error(409, _onboarding.AUDIO_CHECK_RUNNING_MESSAGE, session=await plugin.controller.status())
     try:
         return await plugin.start(choices, platform=_surface(request))
     except _commands.RemoteStartRefused as exc:
         return _error(403, str(exc))
+    except _onboarding.AudioCheckRunning as exc:
+        return _error(409, str(exc), session=await plugin.controller.status())
     except _runtime.SessionBusy as exc:
         return _error(409, str(exc), session=await plugin.controller.status())
     except _options.UsageError as exc:
@@ -172,11 +177,18 @@ async def overlay_theme(body: Optional[dict] = Body(default=None)):
 
 
 @router.get("/setup")
-async def setup(locale: list[str] = Query(default=[])) -> dict:
+async def setup(request: Request, locale: list[str] = Query(default=[])) -> dict:
     """What the pane's first-run setup shows. ``locale`` is the Desktop app's system languages, in order.
 
     Answers at once: it reads config and whether the key is set (never its value), and the last audio check.
+
+    Local only, like the POST setup routes: another computer (or a proxy) gets no detail, only
+    ``{"remote": true}``. That is a 200, not the POST routes' 403, so a Desktop connected from
+    another computer shows its normal controls (whose Start is refused there with the plain
+    remote message) instead of a setup error no click there could fix; setup is done on this Mac.
     """
+    if _surface(request) != "desktop":
+        return {"remote": True, "complete": None, "message": _commands.REMOTE_START_REFUSED}
     settings = plugin.settings()
     language = _onboarding.default_language(saved=settings.get("target_language"),
                                             hermes_language=_glue.display_language(),
