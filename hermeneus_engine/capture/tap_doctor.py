@@ -209,16 +209,18 @@ def check_process_tap(*, timeout_s: float = 30.0,
         info["tone_device"] = device or "default output"
         heard_note = ("The test tone played on " + device + ", which you do not hear." if device else
                       "A short quiet test tone played on your default output, muted while captured; you may "
-                      "have heard it briefly. Use --no-audio-check to skip this check.")
+                      "have heard it briefly. Without BlackHole or VB-Cable installed, each doctor run plays it. "
+                      "Use --no-audio-check to skip this check.")
         info["worker_stats"] = backend.last_stats
         if info["samples"] == 0:
-            return DoctorResult(False, START_FAILED, "Capture started but delivered no audio at all.", info)
+            return DoctorResult(False, START_FAILED, "Capture started but delivered no audio at all. " + heard_note,
+                                info)
         if info["all_zero"]:
-            return DoctorResult(False, PERMISSION_DENIED, permission_message(app_name()), info)
+            return DoctorResult(False, PERMISSION_DENIED, permission_message(app_name()) + " " + heard_note, info)
         if info["rms_dbfs"] < MIN_RMS_DBFS or info["tone_ratio_db"] < MIN_TONE_RATIO_DB:
             return DoctorResult(False, WRONG_AUDIO,
                                 "Capture delivered audio, but not the test sound. Run doctor again; if it "
-                                f"repeats, check {PERMISSION_PANE}.", info)
+                                f"repeats, check {PERMISSION_PANE}. " + heard_note, info)
         return DoctorResult(True, OK, "System audio capture works. " + heard_note, info)
     except Exception as exc:  # doctor must report, never crash
         return DoctorResult(False, START_FAILED, f"Capture check failed: {exc}")

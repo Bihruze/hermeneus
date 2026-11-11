@@ -820,3 +820,8 @@ def test_doctor_run_skips_the_audio_check_on_request():
                         which=lambda n: None, verify_tap_audio=lambda: called.append(1) or (True, "x"), audio_check=False)
     perm = [c for c in report.checks if c.name == "permission: system audio recording"]
     assert called == [] and perm and perm[0].ok is None and "--no-audio-check" in perm[0].detail
+
+
+def test_doctor_failure_messages_also_mention_the_tone():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, np.zeros(4800, dtype=np.float32)) for i in range(10)])
+    assert r.code == "permission-denied" and "test tone" in r.message
