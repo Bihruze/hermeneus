@@ -97,7 +97,8 @@ def api(data_dir, monkeypatch):
     monkeypatch.setattr(module, "plugin", plugin)
     app = FastAPI()
     app.include_router(module.router, prefix="/api/plugins/hermeneus")
-    with TestClient(app) as client:
+    # A Desktop on this Mac: the gateway sees a loopback peer (dashboard/plugin_api.py _surface).
+    with TestClient(app, client=("127.0.0.1", 50123)) as client:
         yield client, module, plugin, rig
     plugin.unload()
 
@@ -225,8 +226,8 @@ def test_api_overlay_routes(api):
     answer = client.get("/api/plugins/hermeneus/overlay").json()
     assert answer["visible"] is False and answer["armed"] is False and answer["settings"]["max_lines"] == 2
     assert client.post("/api/plugins/hermeneus/overlay", json={"visible": "yes"}).status_code == 400
-    # The test client is not on 127.0.0.1, so it is a remote Desktop: the overlay is refused, not opened there.
-    answer = client.post("/api/plugins/hermeneus/overlay", json={"visible": True})
+    # A client that is not on 127.0.0.1 is a remote Desktop: the overlay is refused, not opened there.
+    answer = _client(api, "192.168.1.20").post("/api/plugins/hermeneus/overlay", json={"visible": True})
     assert answer.status_code == 409 and "chat platform" in answer.json()["detail"]
     assert client.post("/api/plugins/hermeneus/overlay", json={"visible": False}).json()["visible"] is False
 
@@ -262,3 +263,51 @@ def test_api_overlay_theme_is_validated_and_stored(api, data_dir):
     stored = json.loads((data_dir / "overlay" / "theme.json").read_text())
     assert stored["dark"] is True and stored["source"] == "desktop:midnight" and len(stored["speakers"]) == 3
     assert client.post("/api/plugins/hermeneus/overlay/apply").json()["visible"] is False
+
+
+# -- F38: the dashboard routes refuse capture for a remote Desktop -------------------------
+
+START_BODY = {"source": {"backend": "virtual-device", "source_id": "BlackHole 2ch"}, "target_language": "tr",
+              "speak": False, "output_device": None}
+
+
+def _client(api, host, headers=None):
+    from fastapi.testclient import TestClient
+    _client_, module, _plugin, _rig = api
+    return TestClient(_client_.app, client=(host, 50124), headers=headers or {})
+
+
+def test_api_start_from_a_remote_host_is_403_and_captures_nothing(api, data_dir):
+    _c, module, plugin, rig = api
+    remote = _client(api, "192.168.1.20")
+    r = remote.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 403 and r.json()["detail"] == module._commands.REMOTE_START_REFUSED
+    assert lock_holder(data_dir) is None and rig.scheduler is None
+
+
+def test_api_start_through_a_local_proxy_counts_as_remote(api, data_dir):
+    _c, module, _plugin, rig = api
+    proxied = _client(api, "127.0.0.1", headers={"X-Forwarded-For": "203.0.113.7"})
+    r = proxied.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 403
+    assert lock_holder(data_dir) is None
+
+
+def test_api_source_change_from_remote_is_403_but_other_settings_pass_the_gate(api, data_dir):
+    client, module, plugin, _rig = api
+    assert client.post("/api/plugins/hermeneus/start", json=START_BODY).status_code == 200
+    remote = _client(api, "10.0.0.5")
+    r = remote.post("/api/plugins/hermeneus/settings", json={"source": {"backend": "virtual-device",
+                                                                       "source_id": "BlackHole 2ch"}})
+    assert r.status_code == 403 and r.json()["detail"] == module._commands.REMOTE_START_REFUSED
+    other = remote.post("/api/plugins/hermeneus/settings", json={"target_language": "de"})
+    assert other.status_code != 403
+    assert remote.post("/api/plugins/hermeneus/stop").json()["state"] == "idle"  # stop works from anywhere
+
+
+def test_api_remote_start_with_opt_in(api, data_dir, monkeypatch):
+    _c, module, plugin, _rig = api
+    monkeypatch.setattr(plugin, "_settings", lambda: {"voice_id": "", "allow_remote_start": True})
+    remote = _client(api, "192.168.1.20")
+    r = remote.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 200 and r.json()["state"] in ("starting", "live")

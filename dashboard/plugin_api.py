@@ -99,6 +99,8 @@ async def start(request: Request, body: Optional[dict] = Body(default=None)):
     choices = _options.Choices.from_mapping(body or {})
     try:
         return await plugin.start(choices, platform=_surface(request))
+    except _commands.RemoteStartRefused as exc:
+        return _error(403, str(exc))
     except _runtime.SessionBusy as exc:
         return _error(409, str(exc), session=await plugin.controller.status())
     except _options.UsageError as exc:
@@ -115,11 +117,13 @@ async def stop() -> dict:
 
 
 @router.post("/settings")
-async def settings(body: Optional[dict] = Body(default=None)):
+async def settings(request: Request, body: Optional[dict] = Body(default=None)):
     """Change the running session. Answers at once with the accepted change or a refusal."""
     try:
         changes = _options.changes_from_mapping(body or {})
-        return await plugin.set(changes)
+        return await plugin.set(changes, platform=_surface(request))
+    except _commands.RemoteStartRefused as exc:
+        return _error(403, str(exc))
     except _options.UsageError as exc:
         return _error(400, str(exc))
     except _ipc.SettingsRefused as exc:
