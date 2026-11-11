@@ -536,6 +536,51 @@ test('a look change is saved and applied to the open overlay', async () => {
   assert.equal(ctrl.overlay.get().settings.text_size, 34)
 })
 
+test('rows dragged on the native strip are saved as overlay_max_lines, once', async () => {
+  let saved = 2
+  const deps = {
+    calls: [],
+    request: (method, params) => {
+      deps.calls.push({ method, params })
+      saved = params.values.overlay_max_lines
+
+      return Promise.resolve({ ok: true })
+    }
+  }
+  const answer = () => ({
+    visible: true,
+    armed: false,
+    settings: { max_lines: saved },
+    ...(saved === 5 ? {} : { resized: { max_lines: 5 } })
+  })
+  const ctx = fakeCtx({ '/overlay': () => Promise.resolve(answer()), '/overlay/apply': () => Promise.resolve(answer()) })
+  const ctrl = createController(ctx, undefined, deps)
+
+  await ctrl.refreshOverlay()
+  assert.deepEqual(deps.calls, [
+    { method: 'plugins.manage', params: { action: 'settings', key: 'hermeneus', values: { overlay_max_lines: 5 } } }
+  ])
+  assert.deepEqual(ctx.calls.at(-1), { path: '/overlay/apply', opts: { method: 'POST', body: {} } })
+  assert.equal(ctrl.overlay.get().settings.max_lines, 5)
+
+  await ctrl.refreshOverlay() // the setting holds it now: nothing more is saved
+  assert.equal(deps.calls.length, 1)
+})
+
+test('a resized answer out of range or already saved is ignored', async () => {
+  for (const answer of [
+    { visible: true, settings: { max_lines: 2 }, resized: { max_lines: 9 } },
+    { visible: true, settings: { max_lines: 2 }, resized: { max_lines: '4' } },
+    { visible: true, settings: { max_lines: 4 }, resized: { max_lines: 4 } }
+  ]) {
+    const deps = fakeHost()
+    const ctrl = createController(fakeCtx({ '/overlay': () => Promise.resolve(answer) }), undefined, deps)
+
+    await ctrl.refreshOverlay()
+    assert.equal(deps.calls.length, 0)
+  }
+})
+
 test('an overlay refusal shows as an error and leaves the switch off', async () => {
   const ctx = fakeCtx({
     '/overlay': () => Promise.reject(new Error('no translation session is running'))
@@ -573,6 +618,7 @@ test('the pane resolves the same tokens the backend table names', () => {
   assert.deepEqual(Object.keys(OVERLAY_COLOR_TOKENS), ['surface', 'text', 'text_secondary', 'text_tertiary', 'stroke', 'failed'])
   assert.equal(OVERLAY_COLOR_TOKENS.failed, '--ui-red')
   assert.deepEqual([...OVERLAY_TEXT_SIZES], [20, 26, 34, 44])
+  assert.deepEqual([...plugin.OVERLAY_LINES], [1, 2, 3, 4, 5, 6])
 })
 
 test('the mode select shows the running mode, or the saved choice while idle', () => {

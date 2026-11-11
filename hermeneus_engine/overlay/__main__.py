@@ -117,7 +117,9 @@ def main(argv=None) -> int:
                                on_reset=lambda: overlay.reset_position(),
                                on_hide=quit_soon,
                                on_scroll=lambda rows: overlay.scroll(rows, time.monotonic()),
-                               on_live=lambda: overlay.back_to_live(time.monotonic()))
+                               on_live=lambda: overlay.back_to_live(time.monotonic()),
+                               on_resized=lambda frame, rows: overlay.resized(frame, rows),
+                               on_reset_size=lambda: overlay.reset_size())
     overlay = OverlayApp(panel, Positions(control.positions_file(data_dir)), settings)
     _apply_theme(data_dir, panel, overlay, state)
     overlay.place()

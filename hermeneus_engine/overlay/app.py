@@ -7,12 +7,14 @@ same methods (not built; see README). Tests drive ``OverlayApp`` with a fake.
 
 from __future__ import annotations
 
+from dataclasses import replace
 from typing import Optional, Protocol
 
 from ..overlay_settings import OverlaySettings
 from . import pace
 from .model import PENDING, TRANSLATED, OverlayModel, Run, Strings, View, fit_head
-from .placement import Display, Positions, Rect, Spot, display_at, frame_for, spot_for
+from .placement import (DEFAULT_WIDTH, Display, Positions, Rect, Spot, display_at, frame_for, snap_rows,
+                        spot_for)
 
 HISTORY_ROWS = 6  # rows the strip grows to while the user looks back
 HISTORY_IDLE_S = 8.0  # back to live after this long without a scroll
@@ -38,7 +40,9 @@ class OverlayApp:
     def __init__(self, panel: Panel, positions: Positions, settings: OverlaySettings) -> None:
         self.panel = panel
         self.positions = positions
-        self.settings = settings
+        self.config = settings  # as handed to the overlay (settings.json, from the plugin settings)
+        self.settings = settings  # what it draws with: ``config`` with the rows chosen on this display
+        self._config_arrived(settings)
         self.model = OverlayModel()
         self.frame: Optional[Rect] = None
         self.display: Optional[Display] = None
@@ -54,29 +58,86 @@ class OverlayApp:
 
     # -- placement ----------------------------------------------------------------
 
+    def _config_arrived(self, config: OverlaySettings) -> None:
+        """Settings were handed over (at start or from the pane). ``overlay_max_lines`` wins over dragged rows
+        when it changed since the overlay last saw it: then every display follows it again, and a drag not yet
+        handed back is dropped. When it is the value a drag handed back, the hand-back is done."""
+        value, p = config.max_lines, self.positions
+        if p.wanted is not None and value == p.wanted:
+            p.set_lines(seen=value, clear_wanted=True)
+        elif p.seen is None:
+            p.set_lines(seen=value)
+        elif value != p.seen:
+            p.set_lines(seen=value, clear_wanted=True)
+            p.clear_rows()
+
+    def _rows_here(self) -> Optional[int]:
+        return self.positions.spot(self.display.key).rows if self.display is not None else None
+
+    def _use_display(self, display: Display) -> None:
+        self.display = display
+        rows = self._rows_here()
+        self.settings = replace(self.config, max_lines=rows if rows is not None else self.config.max_lines)
+
     def place(self) -> Rect:
         displays = self.panel.displays()
-        display = self.positions.choose(displays, self.panel.main_display())
-        self.display = display
-        self.frame = frame_for(self.positions.spot(display.key), display, self.panel.strip_height(self.settings))
+        self._use_display(self.positions.choose(displays, self.panel.main_display()))
+        self.frame = frame_for(self.positions.spot(self.display.key), self.display,
+                               self.panel.strip_height(self.settings))
         self.panel.set_frame(self.frame)
         return self.frame
 
     def moved(self, frame: Rect) -> None:
-        """The user dropped the strip at ``frame``: remember it for the display it is on."""
+        """The user dropped the strip at ``frame``: remember it for the display it is on. Its rows go with it."""
         displays = self.panel.displays()
         display = display_at(frame, displays) or self.display or self.panel.main_display()
-        spot = spot_for(frame, display)
-        self.frame = frame_for(spot, display, frame.h)
-        self.display = display
-        self.panel.set_frame(self.frame)
+        spot = spot_for(frame, display, self._rows_here())
         self.positions.remember(display.key, spot)
+        self._use_display(display)
+        self.frame = frame_for(spot, display, frame.h)
+        self.panel.set_frame(self.frame)
+        self._fit_height(self.view)  # text that arrived while the strip was held
+
+    def row_height(self, rows: int) -> float:
+        """The strip's height for ``rows`` rows with the current look (and the original line when shown)."""
+        return self.panel.strip_height(self.settings, rows, bool(self.view.original))
+
+    def resized(self, frame: Rect, rows_changed: bool) -> None:
+        """The user let go of a resize handle at ``frame``. The width is kept as dragged; when the height was
+        dragged it snaps to whole rows (1 to 6), so no row is ever cut. Width and rows are remembered for the
+        display, and new rows are handed back to the ``overlay_max_lines`` setting (``Positions.wanted``)."""
+        displays = self.panel.displays()
+        display = display_at(frame, displays) or self.display or self.panel.main_display()
+        rows = snap_rows(frame.h, self.row_height) if rows_changed else self._rows_here()
+        self._store_size(display, spot_for(frame, display, rows), rows_changed)
+
+    def reset_size(self) -> None:
+        """Double click on the grip: the default width, in the same place, and the rows follow the
+        ``overlay_max_lines`` setting again. Nothing is handed back, so the setting is never rewritten."""
+        if self.display is None or self.frame is None:
+            return
+        if self.positions.wanted is not None:
+            self.positions.set_lines(clear_wanted=True)
+        self._store_size(self.display, replace(spot_for(self.frame, self.display), width=DEFAULT_WIDTH), False)
+
+    def _store_size(self, display: Display, spot: Spot, rows_changed: bool) -> None:
+        self.positions.remember(display.key, spot)
+        if rows_changed and spot.rows is not None:
+            if spot.rows != self.config.max_lines:
+                self.positions.set_lines(wanted=spot.rows)
+            elif self.positions.wanted is not None:
+                self.positions.set_lines(clear_wanted=True)
+        self._use_display(display)
+        self.rows_cache = pace.RowCache()
+        self.view = View()
+        self.frame = frame_for(spot, display, self.panel.strip_height(self.settings))
+        self.panel.set_frame(self.frame)
+        self.refresh(self._now)
 
     def set_width(self, fraction: float) -> None:
         if self.display is None or self.frame is None:
             return
-        spot = spot_for(self.frame, self.display)
-        spot = Spot(spot.cx, spot.bottom, fraction)
+        spot = replace(spot_for(self.frame, self.display, self._rows_here()), width=fraction)
         self.positions.remember(self.display.key, spot)
         self.frame = frame_for(spot, self.display, self.frame.h)
         self.panel.set_frame(self.frame)
@@ -99,10 +160,12 @@ class OverlayApp:
     _now = 0.0
 
     def _fit_height(self, view: View) -> None:
-        """The strip follows its content up to max lines, keeping its bottom edge."""
+        """The strip follows its content up to max lines, keeping its bottom edge. Rows the user dragged the
+        strip to on this display are held: the strip keeps that height, with empty rows at the top until text
+        fills them, so a drag is never undone. Rows from the setting alone are a maximum."""
         if view.empty or self.frame is None or self.display is None:
             return
-        rows = len(view.lines) or 1
+        rows = max(len(view.lines) or 1, self._rows_here() or 0)
         height = self.panel.strip_height(self.settings, rows, bool(view.original))
         if abs(height - self.frame.h) < 0.5:
             return
@@ -119,8 +182,10 @@ class OverlayApp:
         self.refresh(self._now)
 
     def apply_settings(self, settings: OverlaySettings) -> None:
-        if settings == self.settings:
+        if settings == self.config:
             return
+        self.config = settings
+        self._config_arrived(settings)
         self.settings = settings
         self.queue.pace = settings.pace
         self.rows_cache = pace.RowCache()
