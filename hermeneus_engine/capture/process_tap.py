@@ -142,7 +142,7 @@ class ProcessTapBackend:
         self._lock = threading.RLock()
         self._run: Optional[_Run] = None
         self.on_status = on_status
-        self._reader = reader  # None lets the worker choose (PortAudio when sounddevice is present)
+        self._reader = reader  # None uses the worker default (the IOProc reader); "portaudio" on request
         # Silence tapped app or pid sources on their device while tapped (the doctor's test tone).
         self._mute_tapped = mute_tapped
         self._responsible_app = responsible_app or responsible_app_name
