@@ -129,6 +129,7 @@ class Choices:
     speak: Optional[bool] = None
     device: Optional[str] = None
     voice: Optional[str] = None
+    mode: Optional[str] = None  # subtitles, both or voice; decides speak when given
 
     @classmethod
     def from_namespace(cls, ns: Any) -> "Choices":
@@ -144,7 +145,7 @@ class Choices:
         return cls(to=body.get("target_language") or body.get("to"), source=body.get("source"),
                    speak=None if speak is None else bool(speak),
                    device=body.get("output_device") or body.get("device"),
-                   voice=body.get("voice_id") or body.get("voice"))
+                   voice=body.get("voice_id") or body.get("voice"), mode=body.get("mode") or None)
 
 
 def _text(value: Any) -> str:
@@ -225,6 +226,12 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
     target = lang.iso639_1 or lang.iso639_3
 
     speak = choices.speak if choices.speak is not None else bool(settings.get("speak", False))
+    subtitles = True
+    if choices.mode is not None:
+        mode = str(choices.mode).strip().lower()
+        if mode not in ("subtitles", "both", "voice"):
+            raise UsageError(f"mode must be subtitles, both or voice, not {choices.mode!r}")
+        speak, subtitles = mode != "subtitles", mode != "voice"
 
     source = pick_source(choices.source, settings, sources)
 
@@ -255,4 +262,5 @@ def resolve(choices: Choices, settings: Mapping[str, Any], sources: Sequence[Cap
 
     return SessionOptions(source=source, target_language=target, speak=speak,
                           output_device=device if speak else None, commit_strategy=strategy,
-                          voice_id=voice if speak else None, context_segments=context_segments)
+                          voice_id=voice if speak else None, context_segments=context_segments,
+                          subtitles=subtitles)

@@ -305,3 +305,11 @@ def test_cli_set_and_voices(data_dir, monkeypatch):
     err = io.StringIO()
     assert commands.cmd_voices(plugin, parser.parse_args(["voices"]), out=out, err=err) == 1
     assert err.getvalue().startswith("hermeneus: Voices: no ElevenLabs API key is set.")
+
+
+def test_start_body_mode_voice_hides_subtitles():
+    opts = resolve(Choices.from_mapping({"mode": "voice", "target_language": "tr", "output_device": "Speakers",
+                                         "source": "BlackHole"}), {}, [SOURCE])
+    assert (opts.speak, opts.subtitles, opts.mode) == (True, False, "voice")
+    with pytest.raises(UsageError, match="mode must be"):
+        resolve(Choices(to="tr", source="BlackHole", mode="loud"), {}, [SOURCE])
