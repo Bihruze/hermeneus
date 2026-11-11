@@ -222,6 +222,23 @@ def palette_from_json(raw: str) -> Optional[Palette]:
         return None
 
 
+def css_vars(p: Palette) -> dict:
+    """The palette as the 127.0.0.1 page's CSS variables."""
+    out = {"--surface": p.surface.css(), "--text-primary": p.text.css(), "--text-secondary": p.text_secondary.css(),
+           "--text-tertiary": p.text_tertiary.css(), "--stroke": p.stroke.css(), "--radius": f"{p.radius_px}px",
+           "--font-sans": p.font}
+    for i, color in enumerate(p.speakers[:6], start=1):
+        out[f"--speaker-{i}"] = color.css()
+    return out
+
+
+def page_tokens(sent: Optional[Palette]) -> dict:
+    """What the page needs: the fallback for each system appearance, and what the Desktop pane sent."""
+    return {"light": css_vars(FALLBACK[False]), "dark": css_vars(FALLBACK[True]),
+            "sent": css_vars(sent) if sent is not None else None,
+            "sent_mode": ("dark" if sent.dark else "light") if sent is not None else None}
+
+
 def first_font(stack: str) -> str:
     """The first family of a CSS font stack, unquoted."""
     for part in stack.split(","):
