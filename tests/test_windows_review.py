@@ -664,3 +664,40 @@ def test_o2_release_returns_the_close_failure_once():
 def test_o3_close_documents_a_tick_thread_inside_activation():
     doc = LoopbackCapture.close.__doc__ or ""
     assert "inside an activation" in doc and "R24" in doc
+
+
+# ---------------------------------------------------------------- VB-Audio products by prefix (A5 final)
+
+def mme(name):
+    return name[:31]  # MME cuts device names to 31 characters
+
+
+VB_PRODUCTS = [
+    ("CABLE Input (VB-Audio Virtual Cable)", "CABLE Output (VB-Audio Virtual Cable)"),
+    ("CABLE-A Input (VB-Audio Cable A)", "CABLE-A Output (VB-Audio Cable A)"),
+    ("CABLE-B Input (VB-Audio Cable B)", "CABLE-B Output (VB-Audio Cable B)"),
+    ("CABLE-C Input (VB-Audio Cable C)", "CABLE-C Output (VB-Audio Cable C)"),
+    ("CABLE-D Input (VB-Audio Cable D)", "CABLE-D Output (VB-Audio Cable D)"),
+    ("Hi-Fi Cable Input (VB-Audio Hi-Fi Cable)", "Hi-Fi Cable Output (VB-Audio Hi-Fi Cable)"),
+    ("VoiceMeeter Input (VB-Audio VoiceMeeter VAIO)", "VoiceMeeter Output (VB-Audio VoiceMeeter VAIO)"),
+    ("VoiceMeeter Aux Input (VB-Audio VoiceMeeter AUX VAIO)", "VoiceMeeter Aux Output (VB-Audio VoiceMeeter AUX VAIO)"),
+    ("VoiceMeeter VAIO3 Input (VB-Audio VoiceMeeter VAIO3)", "VoiceMeeter VAIO3 Output (VB-Audio VoiceMeeter VAIO3)"),
+]
+
+
+@pytest.mark.parametrize("play,record", VB_PRODUCTS)
+@pytest.mark.parametrize("cut_play,cut_record", [(False, False), (True, False), (False, True), (True, True)])
+def test_vb_product_sides_pair_full_and_truncated(play, record, cut_play, cut_record):
+    a = mme(play) if cut_play else play
+    b = mme(record) if cut_record else record
+    assert audio_devices.same_loopback_device(a, b), (a, b)
+
+
+def test_vb_products_and_numbers_stay_apart():
+    keys = {audio_devices.loopback_pair_key(p) for p, _ in VB_PRODUCTS}
+    keys |= {audio_devices.loopback_pair_key(mme(p)) for p, _ in VB_PRODUCTS}
+    assert len(keys) == len(VB_PRODUCTS)  # one key per product, the MME cut included
+    assert not audio_devices.same_loopback_device("Hi-Fi Cable Input (VB-Audio Hi-", "CABLE Output (VB-Audio Virtual ")
+    assert not audio_devices.same_loopback_device("VoiceMeeter Input (VB-Audio Voi", "VoiceMeeter Aux Output (VB-Audi")
+    assert audio_devices.loopback_pair_key("Speakers (Realtek(R) Audio)") is None
+    assert audio_devices.loopback_pair_key("Line Input (USB Audio)") is None
