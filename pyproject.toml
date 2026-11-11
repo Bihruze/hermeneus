@@ -13,14 +13,17 @@ license = "MIT"
 # 20348+, preview). All three ship wheels on PyPI (comtypes and pycaw pure
 # Python py3-none-any, psutil win_amd64 and win_arm64); psutil's range contains
 # the psutil==7.2.2 Hermes v0.23.1 pins; comtypes 1.4.8 is the floor pycaw itself
-# requires; Hermes core pins neither comtypes nor pycaw.
+# requires (2024-10-20); the cap <1.5 keeps comtypes 1.5.0 (uploaded 2026-11-09,
+# inside a 3-day quarantine when this was written) out until it is reviewed, so
+# resolution picks 1.4.17 (2026-09-21), the newest release outside that window. Hermes
+# core pins neither comtypes nor pycaw.
 dependencies = [
   "websockets>=15.0.1,<16",
   "sounddevice>=0.5.6,<0.6",
   "numpy>=2.5.4,<3",
   "pyobjc-framework-CoreAudio>=12.0,<14; sys_platform == 'darwin'",
   "pyobjc-framework-Cocoa>=12.0,<14; sys_platform == 'darwin'",
-  "comtypes>=1.4.8,<2; sys_platform == 'win32'",
+  "comtypes>=1.4.8,<1.5; sys_platform == 'win32'",
   "pycaw>=20240210,<20270101; sys_platform == 'win32'",
   "psutil>=5.9,<8; sys_platform == 'win32'",
 ]
