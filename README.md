@@ -8,7 +8,7 @@ Hermeneus listens to any voice playing on your computer and shows it in your lan
 
 Hermeneus is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/), an open-source AI agent that you use from a terminal, from chat apps or from the Hermes Desktop app.
 
-<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build with the owner. -->
+<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build with the owner. Until then this image is missing. -->
 <p align="center"><img src="docs/media/strip-live.gif" alt="The floating subtitle strip translating a live news stream into Turkish" width="100%"></p>
 
 ## The name
@@ -49,11 +49,10 @@ Details for each are under [Using Hermeneus](#using-hermeneus).
 
 ## Screenshots
 
-<!-- CAPTURE-PENDING: the eight files below come from the C1 captures of this build (light and dark). -->
 <table>
 <tr>
 <td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane in Hermes Desktop during a session" width="100%"></picture><br><sub>The Desktop pane during a session</sub></td>
-<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/strip-dark.png"><img src="docs/media/strip-light.png" alt="The floating subtitle strip with its grip, resize handles and history tab labelled" width="100%"></picture><br><sub>The floating strip and its controls</sub></td>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/strip-dark.png"><img src="docs/media/strip-light.png" alt="An offscreen render of the floating subtitle strip over a drawn background" width="100%"></picture><br><sub>The floating strip (an offscreen render; a live capture follows)</sub></td>
 </tr>
 <tr>
 <td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/setup-dark.png"><img src="docs/media/setup-light.png" alt="The first-run setup in the Hermeneus pane" width="100%"></picture><br><sub>The first-run setup</sub></td>
@@ -117,9 +116,11 @@ You need:
    ![The ELEVENLABS key field in Settings > Tools & Keys, holding a test key](docs/media/setup-key-saved.png)
 
 4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again** (see [the permission](#the-system-audio-recording-permission) if it still fails).
+
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/setup-dark.png"><img src="docs/media/setup-light.png" alt="The setup with the key step done and the Allow system audio button" width="100%"></picture>
+
 5. **Start.** The translation model is your main Hermes model, unless you pinned one for **Live translation**. The subtitle language is your Hermes or system language. Both are filled in. The source is all system audio by default. Press **Start**, then play a video or a stream with speech in it. Subtitles appear in the pane and in the floating strip above your other apps.
 
-   <!-- CAPTURE-PENDING: docs/media/pane-live-light.png and docs/media/pane-live-dark.png from the C1 captures. -->
    <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane during a session, with translated lines" width="100%"></picture>
 
 If the pane is closed, click **Hermeneus** in the status bar. Until setup is complete, that click opens the pane instead of starting. After the first run, one click on **Hermeneus** starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
@@ -160,6 +161,17 @@ hermes plugins remove hermeneus                  # remove it
 
 The Python packages (`websockets`, `sounddevice`, `numpy`, on macOS `pyobjc-framework-CoreAudio` and `pyobjc-framework-Cocoa`, on Windows only `comtypes`, `pycaw` and `psutil`) are declared in `pyproject.toml`. Hermes asks before it installs them.
 
+### Updating
+
+```bash
+hermes plugins update             # lists the plugins with an update and asks "Update all N? [Y/n]"; --yes answers yes
+hermes plugins update hermeneus   # updates Hermeneus only
+```
+
+After an update, restart the gateway (**Backend** in the status bar, then the power button), so it loads the new Python code. Then quit and reopen Hermes Desktop: Desktop copies the plugin's new pane (`desktop/plugin.js`) when it starts.
+
+**Install from Git** with **Force reinstall** in Desktop is not an update route. It stops with "Reinstall declined: dependency install skipped (non-interactive)", because that install runs without a terminal to ask the Python packages question. The installed plugin stays as it was.
+
 ### The System Audio Recording permission
 
 macOS asks for this permission the first time Hermeneus captures audio through a process tap, the macOS 14.2 feature that lets an app record the sound other apps play: in the setup, in the doctor's check or in your first session. The prompt names the app that runs Hermes: Hermes for Desktop, or your terminal app (for example Terminal or iTerm) for the CLI.
@@ -187,7 +199,7 @@ The strip floats near the bottom of the screen, above every other app, including
 - **Resizing it.** Drag the handle at the right edge for the width, the short bar at the top edge for the height, or the corner square at the top right for both. The bottom edge stays put, so the strip grows upward. The height snaps to whole rows when you let go, from 1 to 6, so a row is never cut. The width goes from 320 pt to the whole width of the screen. Position, width and rows are remembered for each display, and the pane saves new rows as `overlay_max_lines`.
 - **Reading back.** Click the small up arrow above the strip's right end, or scroll over it. The strip grows to 6 rows of history and a **Back to live** tab appears. While history is open, the strip takes the mouse: scroll over it to move through earlier rows. A click on the strip or on **Back to live** returns to live, and that click does not reach the app underneath. The strip also returns to live by itself after 8 seconds without a scroll. Then clicks pass through it again. New text keeps arriving underneath, and nothing is lost.
 - **Look.** The default style, `banner`, uses deep navy, a periwinkle edge and warm white text. The `theme` style follows your Hermes Desktop theme in its light or dark mode. The background is 90% opaque by default, so a news ticker in the video does not show through the letters. Below 50% opacity the text is always light with a thin dark outline. Every speaker colour is at least 4.5:1 (WCAG AA) against the strip.
-- **Look menu.** The look button next to the pane's overlay button sets the style, text size, rows, background opacity, the original line, speaker numbers and the pace. A change there or in Settings reaches an open strip without closing it.
+- **Look menu.** The look button next to the pane's overlay button sets the style, text size, rows, background opacity, the original line, speaker names and the pace. A change there or in Settings reaches an open strip without closing it.
 
 The strip opens only on the Mac where the request comes from. A slash command from a chat platform, or a Desktop connected to a remote backend, is refused with a message.
 
@@ -594,6 +606,7 @@ Other problems:
 - **"no audio source chosen".** More than one virtual device is installed and no source was given. Pass `--source <name>` or set `source`.
 - **"--source matches more than one source".** Pass the full name as `hermes hermeneus devices` prints it.
 - **Spoken translation is refused with a feedback warning.** The output device would feed the audio back into the capture source, for example a Multi-Output Device that contains BlackHole while you capture BlackHole. Pick your speakers or headphones directly.
+- **The pane looks the same after an update.** Quit and reopen Hermes Desktop after the gateway restart (see [Updating](#updating)).
 - **"a session is already running".** `hermes hermeneus status` shows it and `hermes hermeneus stop` ends it.
 - **Subtitles lag by several seconds.** Pin a small, fast model to **Live translation**. If you chose the **Read all** pace, switch back to **Follow live**.
 
