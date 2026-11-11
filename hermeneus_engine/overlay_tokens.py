@@ -116,6 +116,8 @@ class Palette:
     failed: Optional[Rgba] = None  # --ui-red; None means the nous value for this mode
     # The pane's localised overlay words, as (key, text) pairs; empty means the English defaults.
     strings: tuple[tuple[str, str], ...] = ()
+    # A soft inner edge drawn along the hairline (the banner style); None draws the hairline alone.
+    glow: Optional[Rgba] = None
 
     @property
     def failed_color(self) -> Rgba:
@@ -145,6 +147,22 @@ def _nous(dark: bool) -> Palette:
 # --ui-red, light styles.css:243 and dark :613; the pane colours a failed line's caption with it.
 _RED = {False: Rgba.hex("#cf2d56"), True: Rgba.hex("#e75e78")}
 FALLBACK = {False: _nous(False), True: _nous(True)}
+
+
+def _banner() -> Palette:
+    """The opt-in ``overlay_style: banner`` look, from the owner's Hermeneus project banner: colours sampled
+    from the image with PIL (median of pixel groups): background #080B29, title #EEE9E2, indigo #3744AC,
+    periwinkle #7785E0, glow #BDC4FF. Always dark. Speaker colours are new hues tuned to the navy: every one
+    is at least 4.5:1 against it (WCAG AA), speaker 1 is the banner periwinkle."""
+    base = Rgba.hex("#eee9e2")  # the HERMENEUS title
+    speakers = ("#7b83ff", "#6fd6b0", "#f2a65a", "#c9a2ff", "#6ccbeb", "#e8d27a")
+    return Palette(dark=True, surface=Rgba.hex("#080b29"), text=base.with_alpha(0.94),
+                   text_secondary=base.with_alpha(0.74), text_tertiary=base.with_alpha(0.54),
+                   stroke=Rgba.hex("#7785e0", 0.7), speakers=tuple(Rgba.hex(c) for c in speakers),
+                   radius_px=6.0, source="banner", failed=Rgba.hex("#ff7d8f"), glow=Rgba.hex("#3744ac", 0.45))
+
+
+BANNER = _banner()
 
 
 # -- parsing what the pane sends ---------------------------------------------------------
@@ -294,5 +312,5 @@ def first_font(stack: str) -> str:
     return FALLBACK_FONT
 
 
-__all__ = ["FALLBACK", "Palette", "Rgba", "ThemeError", "contrast", "palette_from_payload", "parse_color",
+__all__ = ["BANNER", "FALLBACK", "Palette", "Rgba", "ThemeError", "contrast", "palette_from_payload", "parse_color",
            "first_font", "palette_from_json", "palette_to_json"]

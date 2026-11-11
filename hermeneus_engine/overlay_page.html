@@ -103,7 +103,8 @@ html, body {
   // Limits and defaults mirror hermeneus_engine/overlay_settings.py.
   var LIMITS = { text_size: [14, 64], max_lines: [1, 3], opacity: [0, 100] }
   var DEFAULTS = { text_size: 26, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto' }
-  var THEMES = ['auto', 'light', 'dark']
+  // banner: the opt-in overlay_style colours (overlay_tokens.BANNER); the server setting picks it as the default.
+  var THEMES = ['auto', 'light', 'dark', 'banner']
   var LINE_STATES = ['partial', 'committed', 'translated', 'failed']
   var RUNNING = ['starting', 'live', 'reconnecting']
   var SPEAKER_SLOTS = 6
@@ -140,7 +141,7 @@ html, body {
     function pick(key) {
       return params.has(key) ? params.get(key) : base[key]
     }
-    var theme = String(pick('theme') || 'auto').toLowerCase()
+    var theme = String(pick('theme') || (base.style === 'banner' ? 'banner' : 'auto')).toLowerCase()
     return {
       text_size: toInt(pick('text_size'), DEFAULTS.text_size, LIMITS.text_size),
       max_lines: toInt(pick('max_lines'), DEFAULTS.max_lines, LIMITS.max_lines),
@@ -319,7 +320,7 @@ html, body {
    *  theme, otherwise the system appearance. */
   function themeVars(tokens, mode, prefersDark) {
     if (!tokens || typeof tokens !== 'object') return null
-    var pick = mode === 'light' || mode === 'dark' ? tokens[mode]
+    var pick = mode === 'light' || mode === 'dark' || mode === 'banner' ? tokens[mode]
       : tokens.follow_system === false ? tokens['default']
         : tokens[prefersDark ? 'dark' : 'light']
     var out = {}

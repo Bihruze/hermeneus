@@ -679,3 +679,75 @@ def test_one_line_on_a_row_too_narrow_for_the_header_keeps_the_newest_words():
     assert texts[0] == "Not translated" and texts[-1].endswith("ee")
     view = build_view(m, 0, width=10, measure=chars, max_lines=1, show_speaker=True, show_original=False)
     assert "".join(r.text for r in view.lines[0]).strip() == "cc dd ee"
+
+
+# -- legibility under a see-through background -------------------------------------
+
+def test_text_edge_keeps_the_halo_alone_from_50_percent_and_adds_a_thin_outline_below():
+    from hermeneus_engine.overlay import theme
+    for opacity in (50, 80, 100):
+        edge = theme.text_edge(opacity)
+        assert (edge.outline_percent, edge.halo_alpha, edge.halo_blur, edge.solid) == (0.0, 0.9, 0.14, False)
+    for opacity in (0, 30, 49):
+        edge = theme.text_edge(opacity)
+        assert edge.solid and 0 < edge.outline_percent <= 10  # thin: at most 5% of the size outside the glyph
+
+
+def test_ink_is_opaque_below_50_percent_so_the_outline_never_shows_through_the_letters():
+    from hermeneus_engine.overlay import theme
+    from hermeneus_engine.overlay_tokens import FALLBACK
+    for dark in (False, True):
+        p = FALLBACK[dark]
+        assert theme.ink(p.text_secondary, p.surface, theme.text_edge(80)) == p.text_secondary
+        for color in (p.text, p.text_secondary, p.failed_color, *p.speakers):
+            solid = theme.ink(color, p.surface, theme.text_edge(0))
+            assert solid.a == 1.0
+            assert solid == color.over(p.surface.with_alpha(1.0))
+
+
+# -- banner style ----------------------------------------------------------------------
+
+def test_overlay_style_defaults_to_theme_and_accepts_banner_only():
+    assert ovs.from_settings({}).style == "theme"
+    assert ovs.from_settings({"overlay_style": " Banner "}).style == "banner"
+    assert ovs.from_settings({"overlay_style": "neon"}).style == "theme"
+    assert ovs.from_settings({"overlay_style": 3}).style == "theme"
+    s = ovs.from_settings({"overlay_style": "banner"})
+    assert ovs.OverlaySettings.from_json(s.to_json()) == s
+
+
+def test_banner_style_overrides_the_sent_theme_and_the_default_does_not():
+    from hermeneus_engine.overlay import theme
+    from hermeneus_engine.overlay_tokens import BANNER, FALLBACK
+    sent = FALLBACK[False]
+    assert theme.palette(True, None) is FALLBACK[True]
+    assert theme.palette(True, sent) is sent
+    assert theme.palette(False, sent, "banner") is BANNER
+    assert theme.palette(False, None, "theme") is FALLBACK[False]
+
+
+def _delta_e(a, b):
+    """CIE76 distance in Lab (D65)."""
+    def lab(c):
+        def lin(v):
+            return v / 12.92 if v <= 0.04045 else ((v + 0.055) / 1.055) ** 2.4
+        r, g, b_ = lin(c.r), lin(c.g), lin(c.b)
+        x = (0.4124 * r + 0.3576 * g + 0.1805 * b_) / 0.95047
+        y = 0.2126 * r + 0.7152 * g + 0.0722 * b_
+        z = (0.0193 * r + 0.1192 * g + 0.9505 * b_) / 1.08883
+        f = [t ** (1 / 3) if t > 0.008856 else 7.787 * t + 16 / 116 for t in (x, y, z)]
+        return 116 * f[1] - 16, 500 * (f[0] - f[1]), 200 * (f[1] - f[2])
+    la, lb = lab(a), lab(b)
+    return sum((p - q) ** 2 for p, q in zip(la, lb)) ** 0.5
+
+
+def test_banner_text_and_speakers_meet_wcag_aa_on_the_navy_and_stay_apart():
+    from hermeneus_engine.overlay_tokens import BANNER, contrast
+    navy = BANNER.surface
+    assert BANNER.dark and navy.a == 1.0
+    for color in (BANNER.text, BANNER.text_secondary, BANNER.text_tertiary, BANNER.failed_color, *BANNER.speakers):
+        assert contrast(color.over(navy), navy) >= 4.5
+    colors = (*BANNER.speakers, BANNER.failed_color)
+    for i, a in enumerate(colors):
+        for b in colors[i + 1:]:
+            assert _delta_e(a, b) > 20

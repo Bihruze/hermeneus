@@ -193,7 +193,7 @@ hermes hermeneus overlay-page off
 
 With the page on, the process that runs the session serves live subtitles at `http://127.0.0.1:47821/<token>/` while the session runs. The command, `run` and the doctor print the full address. Add it in OBS as a Browser source, or open it in a browser on this Mac for a second screen. The page background is transparent. It shows the newest lines, each as soon as it is heard and then replaced in place by its translation.
 
-The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity` and `overlay_show_speaker`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1) and `theme` (`light`, `dark` or `auto`). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
+The page uses the shared overlay settings `overlay_max_lines`, `overlay_text_size`, `overlay_show_original`, `overlay_opacity`, `overlay_show_speaker` and `overlay_style`. Query parameters override them per source: `max_lines` (1 to 3), `text_size` (14 to 64 px), `show_original` (0 or 1), `opacity` (0 to 100), `show_speaker` (0 or 1) and `theme` (`light`, `dark`, `auto` or `banner`). Example: `http://127.0.0.1:47821/<token>/?theme=dark&max_lines=1`. Reload the source after you change a setting.
 
 `max_lines` counts rows on screen, as on the native overlay. Older lines leave first; a sentence longer than the limit rolls, so its newest words stay visible and its first words leave. The original stays on one row: its end when the translation rolled, otherwise its start.
 
@@ -247,7 +247,8 @@ The overlay is a strip near the bottom of the screen that floats above every oth
 - It closes by itself when the session stops, and with `overlay hide`, the same buttons, or **Hide overlay** in its menu.
 - It never takes keyboard focus and clicks pass through it to the app underneath. Only two small handles take the mouse: drag the grip at the left edge to move the strip, drag the handle at the right edge to change its width, right-click the grip for width presets, **Reset position** and **Hide overlay**. Position and width are remembered for each display.
 - It draws with the Hermes Desktop theme you use. The pane reads the theme's colours, radius and font on its own element and sends them to the backend, and both the overlay and the 127.0.0.1 page use them, in Desktop's light or dark. Until Desktop has sent a theme, the overlay uses the default Nous values and the system appearance.
-- Text keeps a soft halo in the background colour, and below 50% background opacity an outline as well, so it stays readable on bright or dark video with no background at all.
+- `overlay_style: banner` swaps the theme for the Hermeneus banner colours (deep navy, a periwinkle edge, warm white text, speaker colours tuned to the navy) on both the overlay and the page. The default, `theme`, follows Desktop as above.
+- Text keeps a soft halo in the background colour, and below 50% background opacity a thin outline drawn behind opaque letters as well, so it stays readable on bright or dark video with no background at all.
 - The look popover next to the pane's overlay button sets text size, lines, background opacity, the original line and speaker names. These are the `overlay_*` settings below; a change there or in Settings reaches an open overlay without closing it.
 - The overlay opens only on the Mac where the request comes from: a slash command from a chat platform such as Telegram, or a Desktop connected to a remote backend, is refused with a message.
 
@@ -277,6 +278,7 @@ Command flags override the settings for one session.
 | `overlay_show_original` | Overlay shows the original | bool | `true` | | Show the heard sentence in small text under its translation. |
 | `overlay_opacity` | Overlay background opacity | int | `80` | | Background opacity of the overlay in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | Overlay speaker names | bool | `true` | | Show Speaker 1, Speaker 2 and their colours in the overlay. |
+| `overlay_style` | Overlay style | str | `theme` | theme, banner | theme follows the Hermes Desktop theme. banner uses the Hermeneus banner colours: deep navy, periwinkle edge, warm white text. |
 | `allow_remote_start` | Allow start from chat platforms | bool | `false` | | Lets /translate start and /translate set --source work from Telegram, Slack and other chat platforms. Off by default: a start from chat turns on audio capture on this computer and sends that audio to ElevenLabs while nobody may be at the computer. Status and stop work from anywhere either way. |
 | `overlay_page` | Overlay page | bool | `false` | | Serve live subtitles on a 127.0.0.1 page for OBS browser sources and second screens while a session runs. hermes hermeneus overlay-page prints its address. |
 | `overlay_page_port` | Overlay page port | int | `47821` | | 127.0.0.1 port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |

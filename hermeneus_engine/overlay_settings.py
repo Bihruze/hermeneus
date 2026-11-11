@@ -21,10 +21,13 @@ KEY_MAX_LINES = "overlay_max_lines"
 KEY_SHOW_ORIGINAL = "overlay_show_original"
 KEY_OPACITY = "overlay_opacity"
 KEY_SHOW_SPEAKER = "overlay_show_speaker"
+KEY_STYLE = "overlay_style"
 
 TEXT_SIZE_MIN, TEXT_SIZE_MAX = 14, 64
 MAX_LINES_MIN, MAX_LINES_MAX = 1, 3
 OPACITY_MIN, OPACITY_MAX = 0, 100
+# "theme" follows Hermes Desktop (overlay_tokens.FALLBACK or what the pane sent); "banner" is overlay_tokens.BANNER.
+STYLES = ("theme", "banner")
 
 DEFAULTS: dict[str, Any] = {
     KEY_AUTO: True,
@@ -33,6 +36,7 @@ DEFAULTS: dict[str, Any] = {
     KEY_SHOW_ORIGINAL: True,
     KEY_OPACITY: 80,
     KEY_SHOW_SPEAKER: True,
+    KEY_STYLE: "theme",
 }
 
 
@@ -44,6 +48,7 @@ class OverlaySettings:
     show_original: bool = DEFAULTS[KEY_SHOW_ORIGINAL]
     opacity: int = DEFAULTS[KEY_OPACITY]
     show_speaker: bool = DEFAULTS[KEY_SHOW_SPEAKER]
+    style: str = DEFAULTS[KEY_STYLE]
 
     @property
     def background_alpha(self) -> float:
@@ -70,6 +75,7 @@ _FIELD_TO_KEY = {
     "show_original": KEY_SHOW_ORIGINAL,
     "opacity": KEY_OPACITY,
     "show_speaker": KEY_SHOW_SPEAKER,
+    "style": KEY_STYLE,
 }
 
 
@@ -97,6 +103,12 @@ def _int(value: Any, default: int, lo: int, hi: int) -> int:
     return max(lo, min(hi, number))
 
 
+def _choice(value: Any, default: str, choices: tuple[str, ...]) -> str:
+    if isinstance(value, str) and value.strip().lower() in choices:
+        return value.strip().lower()
+    return default
+
+
 def from_settings(settings: Mapping[str, Any]) -> OverlaySettings:
     """Overlay settings from the plugin settings mapping, every value checked and clamped."""
     get = settings.get
@@ -107,4 +119,5 @@ def from_settings(settings: Mapping[str, Any]) -> OverlaySettings:
         show_original=_bool(get(KEY_SHOW_ORIGINAL), DEFAULTS[KEY_SHOW_ORIGINAL]),
         opacity=_int(get(KEY_OPACITY), DEFAULTS[KEY_OPACITY], OPACITY_MIN, OPACITY_MAX),
         show_speaker=_bool(get(KEY_SHOW_SPEAKER), DEFAULTS[KEY_SHOW_SPEAKER]),
+        style=_choice(get(KEY_STYLE), DEFAULTS[KEY_STYLE], STYLES),
     )
