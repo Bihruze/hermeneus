@@ -75,6 +75,15 @@ html, body {
 .text { transition: color 120ms linear; }
 .pending .text { color: var(--text-pending); }
 .failed .text { color: var(--text-failed); }
+/* A failed line starts with a marker in --ui-red, as the pane marks it (shared table:
+   hermeneus_engine/overlay_tokens.py, role "failed"; the native strip draws the same words). */
+.failed .text::before {
+  content: 'Not translated';
+  color: var(--failed);
+  font-size: var(--label-scale);
+  font-weight: var(--label-weight);
+  margin-inline-end: 0.5em;
+}
 </style>
 </head>
 <body>

@@ -553,3 +553,13 @@ def test_doctor_lines():
     assert waiting.ok and "47830" in waiting.detail
     failed = commands.overlay_check({"overlay_page": True}, {"running": False, "error": "port 1 busy"})
     assert failed.ok is False and failed.state == "warn" and "--port" in failed.fix
+
+
+def test_page_marks_a_failed_line_in_the_shared_red():
+    # Before: --text-failed equalled --text-pending and nothing else marked the line (A3 re-audit N2).
+    from hermeneus_engine import overlay_page as op, overlay_tokens as tok
+    tokens = op.theme_tokens(None)
+    assert tokens["dark"]["--failed"] == tok.FALLBACK[True].failed_color.css()
+    assert tokens["light"]["--failed"] == tok.FALLBACK[False].failed_color.css()
+    html = op.PAGE_FILE.read_text(encoding="utf-8")
+    assert ".failed .text::before" in html and "content: 'Not translated'" in html and "var(--failed)" in html
