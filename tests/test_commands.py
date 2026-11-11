@@ -413,3 +413,14 @@ async def test_a_caller_that_names_no_surface_is_not_local(data_dir):
     assert await plugin.slash("start --to tr --source BlackHole", platform="") == commands.REMOTE_START_REFUSED
     with pytest.raises(commands.RemoteStartRefused):
         await plugin.start(commands.Choices(to="tr", source="BlackHole"))
+
+
+def test_cli_prints_a_translated_line_once_when_later_updates_add_timings():
+    out = io.StringIO()
+    p = commands._Printer(False, out, io.StringIO())
+    base = {"type": "line", "line": {"line_id": "a", "state": "translated", "translation": "merhaba",
+                                     "speaker_id": None}}
+    p({**base, "seq": 1, "timings": {"translated_ms": 10.0}})
+    p({**base, "seq": 2, "timings": {"translated_ms": 10.0, "speech_end_ms": 5.0}})
+    p({**base, "seq": 3, "line": {**base["line"], "speaker_id": "s1:speaker_0"}})
+    assert out.getvalue().splitlines() == ["merhaba"]
