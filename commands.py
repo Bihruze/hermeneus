@@ -14,6 +14,7 @@ from typing import Any, Callable, Optional, TextIO
 
 from . import glue
 from .hermeneus_engine import components, doctor, overlay_page, stop_signals
+from .hermeneus_engine.platform_words import this_machine
 from .hermeneus_engine.contracts import FeedbackRiskError
 from .hermeneus_engine.control import Controller
 from .hermeneus_engine.ipc import SettingsRefused
@@ -251,11 +252,12 @@ def describe_voices(payload: dict) -> str:
 
 def setup_cli(parser: argparse.ArgumentParser) -> None:
     sub = parser.add_subparsers(dest="hermeneus_command", metavar="COMMAND")
-    p_doc = sub.add_parser("doctor", help="check what live translation needs on this Mac")
+    p_doc = sub.add_parser("doctor", help=f"check what live translation needs on {this_machine()}")
     p_doc.add_argument("--json", action="store_true", help="print the checks as JSON")
     p_doc.add_argument("--no-audio-check", action="store_true",
-                       help="skip the capture check, which plays a short quiet test tone (on BlackHole or "
-                            "VB-Cable when installed, so you do not hear it)")
+                       help=("skip the capture check, which plays a short quiet test tone (on BlackHole or "
+                             "VB-Cable when installed, so you do not hear it)") if sys.platform == "darwin" else
+                       "accepted for scripts; the Windows doctor has no capture check to skip")
     p_doc.add_argument("--test-model", action="store_true",
                        help="also make one tiny call on the live_translate model (spends a few tokens)")
     p_dev = sub.add_parser("devices", help="list audio sources and output devices")
@@ -273,7 +275,8 @@ def setup_cli(parser: argparse.ArgumentParser) -> None:
     p_voices = sub.add_parser("voices", help="list the voices on your ElevenLabs account")
     p_voices.add_argument("--json", action="store_true")
     p_voices.add_argument("--refresh", action="store_true", help="ask ElevenLabs again instead of the 60 s cache")
-    p_overlay = sub.add_parser("overlay", help="show or hide the floating subtitle overlay on this Mac")
+    p_overlay = sub.add_parser("overlay", help=("show or hide the floating subtitle overlay on this Mac" if sys.platform == "darwin" else
+                                     "the floating subtitle overlay (macOS only; use the Desktop pane or overlay-page)"))
     p_overlay.add_argument("overlay_action", nargs="?", choices=("show", "hide", "status"), default="status")
     p_overlay.add_argument("--json", action="store_true")
     p_page = sub.add_parser("overlay-page", help="serve live subtitles on a 127.0.0.1 page for OBS and second "
@@ -418,7 +421,7 @@ def overlay_check(settings: dict, info: Optional[dict]) -> doctor.Check:
 def describe_overlay(settings: dict, info: Optional[dict]) -> str:
     if info and info.get("running"):
         return (f"Overlay page: {info['url']}\n"
-                "Add it to OBS as a Browser source, or open it on this Mac. It serves 127.0.0.1 only and "
+                f"Add it to OBS as a Browser source, or open it on {this_machine()}. It serves 127.0.0.1 only and "
                 "the address changes every session.")
     if info and info.get("error"):
         return f"Overlay page: {info['error']}"

@@ -74,6 +74,35 @@ def _output_device(sd_loader: Callable[[], Any]) -> Check:
     return Check(name, True, f"default output: {info.get('name', 'unknown')}", required=False)
 
 
+def _microphone_privacy() -> Check:
+    """Counterpart of the macOS permission lines. Windows documents no permission for process loopback;
+    the microphone privacy switch is the one setting that could plausibly silence it, and it does gate a
+    VB-CABLE input. The doctor does not read it (the consent store is not a documented interface)."""
+    return Check("permission: microphone (Windows privacy)", None,
+                 "the doctor does not read this setting. If capture delivers only silence, it is the first "
+                 "thing to check",
+                 "open Settings > Privacy & security > Microphone and turn on Let desktop apps access your "
+                 "microphone, then start again", required=False)
+
+
+def _vb_cable_route(loopback_ok: bool, sd_loader: Callable[[], Any]) -> Check:
+    """Counterpart of the macOS Multi-Output check for the VB-CABLE fallback."""
+    name = "system sound reaches the virtual device"
+    if loopback_ok:
+        return Check(name, True, "not needed: process loopback reads system audio directly", required=False)
+    try:
+        out = str(sd_loader().query_devices(kind="output").get("name", ""))
+    except Exception as exc:
+        return Check(name, None, f"could not read the default output: {exc}", required=False)
+    if "cable input" in out.casefold():
+        return Check(name, True, f"the default output is '{out}', so CABLE Output receives system sound. To hear "
+                     "it too, turn on Listen to this device for CABLE Output (Sound control panel > Recording "
+                     "> CABLE Output > Properties > Listen)", required=False)
+    return Check(name, False, f"sound output goes to '{out}' only, so CABLE Output receives silence",
+                 "choose CABLE Input as the output under Settings > System > Sound (or as the app's output), "
+                 "then turn on Listen to this device for CABLE Output to keep hearing it")
+
+
 def _load_sounddevice():
     import sounddevice
     return sounddevice
@@ -85,7 +114,11 @@ def run(*, get_secret: SecretGetter, aux_config: Optional[dict],
         sd_loader: Optional[Callable[[], Any]] = None) -> DoctorReport:
     report = DoctorReport()
     report.checks.append(_windows((build or _windows_build)()))
-    report.checks.extend(_capture())
+    capture = _capture()
+    report.checks.extend(capture)
+    loopback_ok = any(c.name == "capture: process-loopback" and c.ok for c in capture)
+    report.checks.append(_microphone_privacy())
+    report.checks.append(_vb_cable_route(loopback_ok, sd_loader or _load_sounddevice))
     report.checks.append(_output_device(sd_loader or _load_sounddevice))
     report.checks.append(_secret(get_secret))
     report.checks.append(_aux(aux_config))

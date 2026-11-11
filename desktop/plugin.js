@@ -1921,7 +1921,8 @@ function StatusChip({ ctrl }) {
 export default {
   id: ID,
   name: 'Hermeneus',
-  description: 'Live subtitles for audio playing on this Mac.',
+  description: (typeof navigator !== 'undefined' && /^Win/.test(navigator.platform || ''))
+    ? 'Live subtitles for audio playing on this PC.' : 'Live subtitles for audio playing on this Mac.',
   register(ctx) {
     ctx.i18n.register(LOCALES)
 

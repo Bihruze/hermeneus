@@ -7,6 +7,7 @@ UsageError with the flag that supplies it (catalog rule 12).
 from __future__ import annotations
 
 import argparse
+import sys
 import shlex
 from dataclasses import dataclass
 from typing import Any, Mapping, Optional, Sequence
@@ -23,6 +24,14 @@ CAPTURE_BACKEND_CHOICES = ("auto", "process-tap", "process-loopback", "virtual-d
 AUTO_ORDER = ("process-tap", "process-loopback", "virtual-device")
 PROCESS_TAP_SYSTEM_SOURCE = "system"
 SYSTEM_SOURCE_BACKENDS = ("process-tap", "process-loopback")
+# Shown when capture_backend names the other platform's driverless backend.
+OTHER_OS_BACKEND = {"darwin": "process-loopback", "win32": "process-tap"}
+WRONG_OS = {
+    "process-tap": "capture_backend is process-tap, the macOS process tap; this system does not offer it. "
+                   "Set capture_backend to auto (or process-loopback on Windows).",
+    "process-loopback": "capture_backend is process-loopback, the Windows process loopback; this system does not "
+                        "offer it. Set capture_backend to auto (or process-tap on macOS).",
+}
 MAX_CONTEXT_SEGMENTS = 10
 
 
@@ -191,6 +200,8 @@ def pick_source(wanted: Any, settings: Mapping[str, Any], sources: Sequence[Capt
     if isinstance(wanted, Mapping):
         return match_source(wanted, sources)
     allowed = list(sources) if backend == "auto" else [s for s in sources if s.backend == backend]
+    if not allowed and backend == OTHER_OS_BACKEND.get(sys.platform):
+        raise UsageError(WRONG_OS[backend])
     name = _text(wanted) or _text(settings.get("source"))
     if name:
         return match_source(name, allowed)
