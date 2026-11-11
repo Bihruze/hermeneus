@@ -20,6 +20,7 @@ the Unix socket around it.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import itertools
 import logging
 import os
@@ -31,7 +32,8 @@ from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional, P
 
 from . import languages, messages
 from .bus import SubtitleBus, wire_language
-from .sentences import DEFAULT_STABLE_MS, DEFAULT_STABLE_PARTIALS, SentenceSplitter
+from .metrics import LatencyRecorder, Stage, StreamClock, distribution
+from .sentences import DEFAULT_PAUSE_MS, DEFAULT_STABLE_MS, DEFAULT_STABLE_PARTIALS, SentenceSplitter
 from .contracts import (
     ENGINE_CHANNELS,
     ENGINE_SAMPLE_RATE,
@@ -142,6 +144,8 @@ class SessionOptions:
     # stable_ms turns it off: lines are then whole Scribe segments.
     sentence_stable_ms: float = DEFAULT_STABLE_MS
     sentence_stable_partials: int = DEFAULT_STABLE_PARTIALS
+    # Release of a finished last sentence at a pause (sentences.py); negative turns it off.
+    sentence_pause_ms: float = DEFAULT_PAUSE_MS
     # False only in mode "voice": displays hide the subtitle text.
     subtitles: bool = True
 
@@ -154,6 +158,20 @@ class SessionOptions:
     def source_dict(self) -> dict:
         return {"backend": self.source.backend, "source_id": self.source.source_id,
                 "label": self.source.label}
+
+
+class SpeechMetricsRelay:
+    """Hands the speaker's per-utterance metrics (elevenlabs_flash.UtteranceMetrics) to the session.
+
+    The speaker is built before the session exists; the session sets ``target``.
+    """
+
+    def __init__(self) -> None:
+        self.target: Optional[Callable[[object], None]] = None
+
+    def __call__(self, metrics: object) -> None:
+        if self.target is not None:
+            self.target(metrics)
 
 
 @dataclass
@@ -169,6 +187,8 @@ class SessionComponents:
     capture_factory: Optional[Callable[[CaptureSource], CaptureBackend]] = None
     # route_check(output_device, source) raises FeedbackRiskError for a route that would be captured again.
     route_check: Optional[Callable[[str, CaptureSource], None]] = None
+    # Receives the speaker's UtteranceMetrics; pass it as the speaker's on_metrics.
+    speech_metrics: SpeechMetricsRelay = field(default_factory=SpeechMetricsRelay)
 
 
 class _SwitchSink:
@@ -279,6 +299,14 @@ def _majority_speaker(words) -> Optional[str]:
     return counts.most_common(1)[0][0]
 
 
+def _takes_utterance_id(speaker: object) -> bool:
+    """FlashSpeaker.speak takes utterance_id (it keys its UtteranceMetrics); the Speaker contract does not."""
+    try:
+        return "utterance_id" in inspect.signature(speaker.speak).parameters
+    except (TypeError, ValueError):
+        return False
+
+
 def _in_daemon_thread(fn: Callable[[], object], name: str) -> "asyncio.Future":
     """Run a blocking call on its own daemon thread.
 
@@ -370,8 +398,17 @@ class TranslationSession:
         self._detected: Optional[str] = None
         self._capture_note = ""
         self._failure_message = ""
+        # Stage times of every line (metrics.LatencyRecorder) and the map from
+        # Scribe word times to the capture clock (metrics.StreamClock).
+        self.latency = LatencyRecorder(max_segments=2000)
+        self._stream_clock = StreamClock()
+        self._stt_sessions_seen: Optional[int] = None
+        self._clock_reliable = True
+        self._pause_timer: Optional[asyncio.TimerHandle] = None
+        self._tts_first_audio_ms: deque = deque(maxlen=500)
         self._splitter = SentenceSplitter(stable_ms=options.sentence_stable_ms,
-                                          stable_partials=options.sentence_stable_partials)
+                                          stable_partials=options.sentence_stable_partials,
+                                          pause_ms=options.sentence_pause_ms)
         self._segment_lines: list[str] = []      # lines of the segment being spoken
         self._segments: "OrderedDict[int, list[str]]" = OrderedDict()  # segment_index -> its lines
         self._failure_published_ns = 0
@@ -388,7 +425,7 @@ class TranslationSession:
         self._jobs: set[asyncio.Task] = set()
         self.stats: dict[str, int] = {"lines_committed": 0, "lines_translated": 0,
                                       "lines_failed": 0, "speak_errors": 0,
-                                      "sentences_released_early": 0, "settings_changes": 0}
+                                      "sentences_released_early": 0, "sentences_released_at_pause": 0, "settings_changes": 0}
 
     # -- status -----------------------------------------------------------
 
@@ -409,7 +446,24 @@ class TranslationSession:
                 pass
         if self._started_ns:
             m["uptime_s"] = round((self._clock() - self._started_ns) / 1e9, 1)
+        m["latency_ms"] = self.latency_summary()
         return m
+
+    def latency_summary(self) -> dict:
+        """p50 and p95 per stage interval, in ms, over the lines this session kept (up to 2000)."""
+        def brief(values) -> dict:
+            d = distribution(values)
+            return {"count": d["count"], **({"p50": round(d["p50"]), "p95": round(d["p95"])} if d["count"] else {})}
+
+        pairs = {"end_of_sentence_to_subtitle": (Stage.SPEECH_END, Stage.TRANSLATED),
+                 "end_of_sentence_to_released": (Stage.SPEECH_END, "released"),
+                 "released_to_translated": ("released", Stage.TRANSLATED),
+                 "translated_to_first_tts_audio": (Stage.TRANSLATED, Stage.TTS_FIRST_AUDIO)}
+        snap = [seg for _key, seg, _meta in self.latency.snapshot()]
+        out = {name: brief([(seg[b] - seg[a]) / 1e6 for seg in snap if a in seg and b in seg])
+               for name, (a, b) in pairs.items()}
+        out["tts_request_to_first_audio"] = brief(list(self._tts_first_audio_ms))
+        return out
 
     def _publish_status(self, state: Optional[str] = None, message: Optional[str] = None) -> None:
         if state is not None:
@@ -438,8 +492,10 @@ class TranslationSession:
         self._stop_lock = asyncio.Lock()
         self._settings_lock = asyncio.Lock()
         self._started_ns = self._clock()
+        self.bus.epoch_ns = self._started_ns
+        self._c.speech_metrics.target = self._on_speech_metrics
         self._frames = FrameQueue(self._loop, int(self.options.max_queued_seconds * BYTES_PER_SECOND),
-                                  self._c.stt.send_audio)
+                                  self._send_audio)
         self._publish_status("starting", "connecting to speech to text")
         try:
             self._scheduler = self._c.scheduler_factory(self._on_translated)
@@ -481,6 +537,9 @@ class TranslationSession:
             self._publish_status("stopping", message if final_state == "failed" else "stopping")
             if self._frames is not None:
                 self._frames.close()
+            if self._pause_timer is not None:
+                self._pause_timer.cancel()
+                self._pause_timer = None
             current = asyncio.current_task()
             self._speaking = self._want_speech = False
             for task in list(self._jobs):
@@ -570,18 +629,33 @@ class TranslationSession:
     async def _speech_loop(self) -> None:
         assert self._speech is not None
         while True:
-            text, language = await self._speech.get()
+            text, language, line_id = await self._speech.get()
             speaker = self._c.speaker
             if speaker is None or not self._speaking:
                 continue
             try:
-                await speaker.speak(text, language=language)
+                if _takes_utterance_id(speaker):
+                    await speaker.speak(text, language=language, utterance_id=line_id)
+                else:
+                    await speaker.speak(text, language=language)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.stats["speak_errors"] += 1
                 logger.warning("hermeneus: spoken translation failed: %s", exc)
                 self._note_speak_failure(messages.speak_error(str(exc)))
+
+    def _on_speech_metrics(self, m: object) -> None:
+        """UtteranceMetrics from the speaker: first spoken audio of a line (E5)."""
+        latency = getattr(m, "first_audio_latency_ns", None)
+        first = getattr(m, "first_audio_ns", None)
+        if latency is None or first is None:
+            return
+        self._tts_first_audio_ms.append(latency / 1e6)
+        line_id = str(getattr(m, "utterance_id", "") or "")
+        line = self._lines.get(line_id)
+        if line is not None and Stage.TTS_FIRST_AUDIO not in line.timings_ns:
+            self._store(replace(line, timings_ns={**line.timings_ns, Stage.TTS_FIRST_AUDIO: int(first)}))
 
     def _note_speak_failure(self, message: str) -> None:
         """Show a spoken translation failure in the status, at most once per reason per 30 s."""
@@ -628,7 +702,33 @@ class TranslationSession:
     def _new_id(self) -> str:
         return f"{self._prefix}-{next(self._ids)}"
 
+    def _send_audio(self, pcm: bytes, captured_ns: int) -> None:
+        """On the loop: note the chunk in the stream clock, then hand it to the STT client."""
+        stats = getattr(self._c.stt, "stats", None)
+        opened = getattr(stats, "sessions_opened", None)
+        if opened is not None:
+            if self._stt_sessions_seen is not None and opened != self._stt_sessions_seen:
+                # A rotation or reconnect started a new Scribe session. The
+                # client switches sessions inside its own sender, so where the
+                # new session's sample 0 falls is not visible here. Word times
+                # are no longer mapped rather than mapped wrongly (contract
+                # request: a per-session offset from the STT client).
+                self._clock_reliable = False
+            self._stt_sessions_seen = opened
+        self._stream_clock.on_frame(len(pcm), captured_ns)
+        self._c.stt.send_audio(pcm, captured_ns)
+
+    def _word_capture_ns(self, t_s: Optional[float]) -> Optional[int]:
+        """Capture time of a Scribe word time, or None when it cannot be mapped reliably."""
+        if t_s is None or not self._clock_reliable:
+            return None
+        mapped = self._stream_clock.to_capture_ns(float(t_s))
+        if mapped is None or mapped[1]:
+            return None
+        return mapped[0]
+
     def _store(self, line: SubtitleLine) -> None:
+        self.latency.record_timings(line.line_id, line.timings_ns)
         self._lines.pop(line.line_id, None)
         self._lines[line.line_id] = line
         while len(self._lines) > self.options.max_lines:
@@ -653,11 +753,14 @@ class TranslationSession:
             return
         speaker = _majority_speaker(event.words)
         now = event.received_ns or self._clock()
-        for sentence in self._splitter.on_partial(text, now):
+        last = event.words[-1] if event.words and event.words[-1].type in (None, "word") else None
+        last_end_ns = self._word_capture_ns(last.end) if last is not None else None
+        for sentence in self._splitter.on_partial(text, now, last_end_ns):
             # The sentence takes over the partial line's id, so the display
             # keeps one line per sentence in speaking order.
             self._release(sentence, speaker=speaker, source_language=self._detected,
                           segment_index=None, received_ns=now, early=True)
+        self._arm_pause_timer()
         rest = self._splitter.remainder(text)
         if not rest:
             return
@@ -673,6 +776,26 @@ class TranslationSession:
             line = replace(prev, original=rest, speaker_id=speaker or prev.speaker_id)
         self._store(line)
 
+    def _arm_pause_timer(self) -> None:
+        """Wake up when the finished last sentence is due at a pause (sentences.py pause rule)."""
+        if self._pause_timer is not None:
+            self._pause_timer.cancel()
+            self._pause_timer = None
+        deadline = self._splitter.pause_deadline_ns()
+        if deadline is None or self._loop is None or self.closed:
+            return
+        self._pause_timer = self._loop.call_later(max(0.0, (deadline - self._clock()) / 1e9), self._on_pause)
+
+    def _on_pause(self) -> None:
+        self._pause_timer = None
+        if self.closed or self._state not in ("live", "reconnecting", "starting"):
+            return
+        now = self._clock()
+        for sentence in self._splitter.on_tick(now):
+            self._release(sentence, speaker=None, source_language=self._detected,
+                          segment_index=None, received_ns=now, early=True)
+            self.stats["sentences_released_at_pause"] += 1
+
     def _release(self, text: str, *, speaker: Optional[str], source_language: Optional[str],
                  segment_index: Optional[int], received_ns: int, early: bool) -> SubtitleLine:
         """Turn the current partial line (or a new one) into a committed line and send it to translation."""
@@ -685,6 +808,7 @@ class TranslationSession:
             timings, line_id = {}, self._new_id()
         self._partial_id = None
         timings["commit"] = received_ns
+        timings["released"] = received_ns
         if early:
             timings["sentence_released"] = received_ns
         line = SubtitleLine(line_id=line_id, state=LineState.COMMITTED, original=text,
@@ -716,6 +840,7 @@ class TranslationSession:
             self._publish_status()
         received = event.received_ns or self._clock()
         pieces = self._splitter.on_commit(text) if text else []
+        self._arm_pause_timer()
         for piece in pieces:
             self._release(piece, speaker=None, source_language=source_language,
                           segment_index=event.segment_index, received_ns=received, early=False)
@@ -745,8 +870,21 @@ class TranslationSession:
             chunk = words[pos:pos + n] if i < len(line_ids) - 1 else words[pos:]
             pos += n
             speaker = _majority_speaker(chunk)
-            if speaker is not None and line.speaker_id != speaker:
-                self._store(replace(line, speaker_id=speaker))
+            changed = replace(line, speaker_id=speaker) if speaker is not None and line.speaker_id != speaker else line
+            timed = [w for w in chunk if w.start is not None]
+            if timed:
+                first = self._word_capture_ns(timed[0].start)
+                last_w = timed[-1]
+                end = self._word_capture_ns(last_w.end if last_w.end is not None else last_w.start)
+                timings = dict(changed.timings_ns)
+                if first is not None and Stage.CAPTURE not in timings:
+                    timings[Stage.CAPTURE] = first
+                if end is not None and Stage.SPEECH_END not in timings:
+                    timings[Stage.SPEECH_END] = end
+                if timings != changed.timings_ns:
+                    changed = replace(changed, timings_ns=timings)
+            if changed is not line:
+                self._store(changed)
 
     def _on_merged(self, event: SpeakersMerged) -> None:
         for line_id, line in list(self._lines.items()):
@@ -813,7 +951,8 @@ class TranslationSession:
         self._store(line)
         if (line.state == LineState.TRANSLATED and line.translation and self._speaking
                 and self._speech is not None and not self.closed):
-            self._speech.put_nowait((line.translation, line.target_language or self.options.target_language))
+            self._speech.put_nowait((line.translation, line.target_language or self.options.target_language,
+                                     line.line_id))
 
     def _recently_slow(self) -> bool:
         now = self._clock()

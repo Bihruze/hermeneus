@@ -210,11 +210,13 @@ class Rig:
                 raise self.route_error
 
         if not self.live_changes:
-            return SessionComponents(capture=self.capture, stt=self.stt, scheduler_factory=factory,
-                                     speaker=self.speaker)
-        return SessionComponents(capture=self.capture, stt=self.stt, scheduler_factory=factory,
+            self.build_components = SessionComponents(capture=self.capture, stt=self.stt,
+                                                      scheduler_factory=factory, speaker=self.speaker)
+            return self.build_components
+        self.build_components = SessionComponents(capture=self.capture, stt=self.stt, scheduler_factory=factory,
                                  speaker=self.speaker, speaker_factory=speaker_factory,
                                  capture_factory=capture_factory, route_check=route_check)
+        return self.build_components
 
 
 def make_rig(**kw) -> Rig:

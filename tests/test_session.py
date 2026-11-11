@@ -388,3 +388,71 @@ async def test_lines_of_a_session_owned_elsewhere_stay_after_it_ends(data_dir):
     assert [e["type"] for e in after["events"]] == ["status"] and after["events"][0]["state"] == "idle"
     fresh = await gateway.lines(None)
     assert fresh["reset"] is True  # a pane that has nothing gets an empty snapshot
+
+
+# -- pause release and stage timings (E17, E4, E5) -----------------------------------------
+
+def _timed(text, start_s, step_s=0.3, speaker=None):
+    words = []
+    t = start_s
+    for w in text.split():
+        words.append(Word(w, start=t, end=t + step_s * 0.8, speaker_id=speaker, type="word"))
+        t += step_s
+    return tuple(words)
+
+
+async def test_finished_sentence_is_released_at_a_pause_and_lines_carry_timings(data_dir):
+    rt, rig = await started(data_dir, sentence_pause_ms=300)
+    base = time.monotonic_ns() - 1_800_000_000
+    for i in range(90):  # 1.8 s of audio already captured (under the 2 s queue bound)
+        rt.session._frames.put(b"\0" * 640, base + i * 20_000_000)
+        if i % 20 == 0:
+            await asyncio.sleep(0)
+    await asyncio.sleep(0.01)
+    words = _timed("The council approved the plan.", 0.5, step_s=0.2)
+    rig.stt.emit(PartialTranscript("The council approved the plan.", words, received_ns=time.monotonic_ns()))
+    await wait_for(lambda: any(l.state == LineState.TRANSLATED for l in rt.bus.lines()))
+    [line] = rt.bus.lines()
+    assert line.original == "The council approved the plan." and rt.session.stats["sentences_released_at_pause"] == 1
+    rig.stt.emit(CommittedTranscript("The council approved the plan.", segment_index=0))
+    rig.stt.emit(DiarizedTranscript(0, "", words))
+    await wait_for(lambda: "speech_end" in rt.bus.lines()[0].timings_ns)
+    events, _ = rt.bus.events_after(None)
+    timings = [e for e in events if e["type"] == "line"][0]["timings"]
+    assert set(timings) >= {"capture_ms", "speech_end_ms", "committed_ms", "released_ms", "translated_ms"}
+    # capture of the first word: 0.5 s after the first sample
+    assert abs(timings["capture_ms"] - ((base + 500_000_000) - rt.session._started_ns) / 1e6) < 1.0
+    summary = rt.session.metrics()["latency_ms"]
+    assert summary["end_of_sentence_to_subtitle"]["count"] == 1 and "p50" in summary["end_of_sentence_to_subtitle"]
+    assert len(rig.stt.audio) == 90  # the stream clock wrapper still hands every chunk to the STT client
+    await rt.close()
+
+
+async def test_word_times_are_not_mapped_after_a_new_scribe_session(data_dir):
+    rt, rig = await started(data_dir)
+    rig.stt.stats = type("S", (), {"sessions_opened": 1})()
+    rt.session._frames.put(b"\0" * 640, time.monotonic_ns())
+    await asyncio.sleep(0.01)
+    assert rt.session._word_capture_ns(0.01) is not None
+    rig.stt.stats.sessions_opened = 2
+    rt.session._frames.put(b"\0" * 640, time.monotonic_ns())
+    await asyncio.sleep(0.01)
+    assert rt.session._word_capture_ns(0.01) is None
+    await rt.close()
+
+
+async def test_first_spoken_audio_reaches_line_timings_and_status(data_dir):
+    speaker = FakeSpeaker()
+    rig = make_rig(speaker=speaker)
+    rt, rig = await started(data_dir, rig, speak=True, output_device="Headphones", voice_id="v1")
+    rig.stt.emit(CommittedTranscript("hello there friend", segment_index=0))
+    await wait_for(lambda: speaker.spoken)
+    line_id = rt.bus.lines()[0].line_id
+    now = time.monotonic_ns()
+    metrics = type("M", (), {"utterance_id": line_id, "first_audio_ns": now, "first_audio_latency_ns": 250_000_000})()
+    rig.build_components.speech_metrics(metrics)
+    await wait_for(lambda: "tts_first_audio" in rt.bus.lines()[0].timings_ns)
+    summary = rt.session.metrics()["latency_ms"]
+    assert summary["tts_request_to_first_audio"] == {"count": 1, "p50": 250, "p95": 250}
+    assert summary["translated_to_first_tts_audio"]["count"] == 1
+    await rt.close()

@@ -16,7 +16,7 @@ from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
 from .contracts import CaptureError, CaptureSource, LlmCall, OutputDevice, SecretGetter, SttConfig
-from .session import SessionComponents, SessionOptions
+from .session import SessionComponents, SessionOptions, SpeechMetricsRelay
 
 SECRET_NAME = "ELEVENLABS_API_KEY"
 
@@ -195,6 +195,7 @@ def build(options: SessionOptions, services: HermesServices,
     The factories in the result let the session start spoken translation,
     change its voice or output device, and change its source while it runs.
     """
+    speech_metrics = SpeechMetricsRelay()
 
     def speaker_factory(voice_id: str, output_device: str, source: CaptureSource) -> Any:
         # options.resolve fills voice_id (flag, setting, default); FlashConfig has the same default.
@@ -204,7 +205,8 @@ def build(options: SessionOptions, services: HermesServices,
             return route_verdict(output_device or "", source)
 
         playback = load("speaker.playback")(output_device, sample_rate=config.sample_rate, route_check=route_check)
-        return load("speaker")(config, lambda: services.get_secret(SECRET_NAME), playback)
+        return load("speaker")(config, lambda: services.get_secret(SECRET_NAME), playback,
+                               on_metrics=speech_metrics)
 
     speaker: Optional[Any] = None
     if options.speak:
@@ -225,4 +227,5 @@ def build(options: SessionOptions, services: HermesServices,
 
     return SessionComponents(capture=capture, stt=stt, scheduler_factory=scheduler_factory, speaker=speaker,
                              speaker_factory=speaker_factory,
-                             capture_factory=capture_factory, route_check=check_feedback_risk)
+                             capture_factory=capture_factory, route_check=check_feedback_risk,
+                             speech_metrics=speech_metrics)
