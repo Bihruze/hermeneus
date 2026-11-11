@@ -29,7 +29,7 @@ The plugin registers no tools, hooks or middleware.
 
 Network calls to third-party services:
 
-- Streams the captured audio to ElevenLabs Scribe v3 Live at `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with the user's `ELEVENLABS_API_KEY`, for as long as a session runs. ElevenLabs bills all streamed audio, silence included.
+- Streams the captured audio to ElevenLabs Scribe v3 Live at `wss://api.elevenlabs.io/v1/speech-to-text/realtime` with the user's `ELEVENLABS_API_KEY`, for as long as a session runs, except that it stops sending after about 10 s of digital silence from the source and resumes with the first sound (session.py silence gate). ElevenLabs bills all streamed audio, including quiet audio that is not digital silence.
 - With spoken translation on (off by default), sends the translated text to ElevenLabs text to speech at `wss://api.elevenlabs.io/v1/text-to-speech/<voice id>/multi-stream-input`.
 - `GET https://api.elevenlabs.io/v2/voices` with the key in the `xi-api-key` header, for `hermes hermeneus voices`, `/translate voices`, `GET /voices` and the pane's voice picker (asked only when a mode with voice is chosen). Answers are cached in memory for 60 s. Code: `hermeneus_engine/tts/voice_catalog.py:31`, `:72-75`.
 - Sends each committed segment, plus up to 3 earlier lines with their speaker labels and translations (`context_segments`, 0 to 10), to the user's configured model through `ctx.llm` under the plugin's own auxiliary task `live_translate`. No audio goes to the model. `hermes hermeneus doctor --test-model` sends one tiny extra request.
