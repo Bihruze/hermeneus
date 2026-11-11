@@ -14,8 +14,10 @@ of source.
 
 The stream runs in a worker process (``_loopback_worker``), started with a
 minimal environment and stopped through its stdin, then TerminateProcess.
-This module never imports comtypes, pycaw or psutil, so the Hermes process
-keeps its own COM apartment untouched.
+comtypes and pycaw are imported only in that worker, so the Hermes process
+keeps its own COM apartment untouched. psutil, which does not use COM, is
+imported in the Hermes process only by ``own_ancestry``, to refuse a pid:
+source that holds Hermeneus.
 """
 
 from __future__ import annotations

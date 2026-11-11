@@ -387,3 +387,110 @@ def test_w17_exit_code_259_is_not_alive_once_the_handle_is_signaled():
     from test_windows_platform import FakeKernel32
     assert winproc.pid_alive(5, FakeKernel32(77, exit_code=259, signaled=True)) is False
     assert winproc.pid_alive(5, FakeKernel32(77, exit_code=259, signaled=False)) is True
+
+
+# ---------------------------------------------------------------- W18 / W19 (A4 re-audit N1 to N3)
+
+class WaitTrackingStream:
+    """A stream whose wait() blocks until the test releases it, and which records a close during a wait."""
+
+    def __init__(self, hal, target, include):
+        self.hal, self.target, self.include = hal, target, include
+        self.sample_rate, self.channels, self.sample_format = 48000, 2, "float32"
+        self.started = self.closed = False
+        self.in_wait = threading.Event()
+        self.release = threading.Event()
+        self.violations = []
+        self.closed_by = None
+
+    def start(self):
+        self.started = True
+
+    def wait(self, timeout_s):
+        self.in_wait.set()
+        self.release.wait(2.0)
+        self.in_wait.clear()
+        return False
+
+    def read(self):
+        return []
+
+    def close(self):
+        if self.in_wait.is_set():
+            self.violations.append("closed while a wait was pending")
+        self.closed = True
+        self.closed_by = threading.current_thread().name
+        self.release.set()
+        return []
+
+
+def test_w18_only_the_pump_closes_a_stream_it_may_be_waiting_on():
+    hal = hal_with_tree()
+    streams = []
+
+    def open_loopback(pid, include):
+        s = WaitTrackingStream(hal, pid, include)
+        streams.append(s)
+        return s
+
+    hal.open_loopback = open_loopback
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None, refresh_interval=60)
+    cap.open()
+    try:
+        first = streams[0]
+        assert first.in_wait.wait(1.0)          # the pump is inside WaitForSingleObject on the first stream
+        assert cap.rebuild("silence") is True    # the tick thread's rebuild, run from this thread
+        assert not first.closed                  # handed over, not closed under the waiting pump
+        first.release.set()                      # the wait returns
+        deadline = time.monotonic() + 1.0
+        while not first.closed and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert first.closed and first.closed_by == "hermeneus-loopback-pump"
+        assert first.violations == []
+    finally:
+        for s in streams:
+            s.release.set()
+        cap.close()
+    assert all(s.closed for s in streams) and all(not s.violations for s in streams)
+
+
+def test_w19_activation_runs_outside_the_lock():
+    hal = hal_with_tree()
+    real_open = hal.open_loopback
+    inside = threading.Event()
+    go_on = threading.Event()
+
+    def slow_open(pid, include):
+        if inside.is_set() is False and len(hal.streams) >= 1:
+            inside.set()
+            go_on.wait(2.0)
+        return real_open(pid, include)
+
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    hal.open_loopback = slow_open
+    t = threading.Thread(target=cap.rebuild, args=("silence",))
+    t.start()
+    assert inside.wait(1.0)
+    got = cap._lock.acquire(timeout=0.2)  # the pump could take the lock during a slow activation
+    if got:
+        cap._lock.release()
+    go_on.set()
+    t.join(2.0)
+    cap.close()
+    assert got and hal.clean
+
+
+def test_w19_the_peak_is_swapped_under_the_lock():
+    hal = hal_with_tree()
+    cap = LoopbackCapture(hal, LoopbackSpec(mode="pid", pid=200), lambda p, t: None)
+    cap.open(start_pump=False)
+    cap._window_peak = 0.5
+    done = threading.Event()
+    with cap._lock:
+        t = threading.Thread(target=lambda: (cap._watchdog(0.0), done.set()))
+        t.start()
+        assert not done.wait(0.1)  # the watchdog waits for the lock the pump holds while converting
+    assert done.wait(1.0)
+    t.join()
+    cap.close()
