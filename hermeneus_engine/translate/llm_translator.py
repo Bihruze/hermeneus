@@ -20,7 +20,7 @@ from typing import Optional, Sequence, Union
 
 from ..contracts import LlmCall, TranslationError
 from .languages import primary_subtag, resolve_target_language
-from .prompt import ContextLine, build_messages, clean_reply, reply_problem
+from .prompt import ContextLine, build_messages, clean_reply, guard_reply
 
 # A healthy one-line translation is a short prompt and a short reply. Six
 # seconds leaves room for a slow first token while still failing well before
@@ -119,9 +119,10 @@ class LlmTranslator:
         cleaned = clean_reply(raw, original=stripped, target=target)
         if not cleaned:
             raise TranslationError("Translation failed: the model returned an empty reply.")
-        # Only the translation goes on screen: a reply with notes, copied speech or the wrong script
-        # fails the line ("Not translated") instead. String checks, no second model call.
-        problem = reply_problem(cleaned, original=stripped, target=target, source_language=source_language)
-        if problem:
-            raise TranslationError(f"Translation rejected: {problem}.")
-        return cleaned
+        # Only the translation goes on screen: the corrected part of a reply that marks one, or the
+        # reply without a short copied fragment at its edge; a reply with notes, copied speech or the
+        # wrong script fails the line ("Not translated"). String checks, no second model call.
+        guarded = guard_reply(cleaned, original=stripped, target=target, source_language=source_language)
+        if guarded.problem:
+            raise TranslationError(f"Translation rejected: {guarded.problem}.")
+        return guarded.text
