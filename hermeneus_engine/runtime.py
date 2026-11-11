@@ -30,7 +30,7 @@ from typing import Callable, Optional
 
 from .bus import SubtitleBus
 from .ipc import BusServer
-from .session import SessionComponents, SessionOptions, TranslationSession
+from .session import SessionComponents, SessionOptions, SettingRefused, TranslationSession
 
 logger = logging.getLogger(__name__)
 
@@ -202,7 +202,7 @@ class SessionRuntime:
                             "socket": str(sock)})
         try:
             remove_stale_socket(sock)
-            self._server = BusServer(sock, self.bus, on_stop=self.request_stop)
+            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_set=self.apply_settings)
             await self._server.start()
             loop = asyncio.get_running_loop()
 
@@ -221,6 +221,13 @@ class SessionRuntime:
             await self._close_server()
             self._lock.release()
             raise
+
+    def apply_settings(self, changes: dict) -> dict:
+        """Live change for the running session (socket op ``set``). Raises SettingRefused."""
+        session = self.session
+        if session is None:
+            raise SettingRefused("The session is still starting; try the change again in a moment.")
+        return session.apply_settings(changes)
 
     def request_stop(self) -> None:
         """Ask the run to stop. Safe from the runtime's loop thread."""

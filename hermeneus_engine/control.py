@@ -13,7 +13,8 @@ from pathlib import Path
 from typing import AsyncIterator, Callable, Optional
 
 from .bus import idle_status, last_process_seq
-from .ipc import SessionClient, SessionUnavailable
+from . import messages
+from .ipc import SessionClient, SessionUnavailable, SettingsRefused
 from .runtime import ComponentBuilder, SessionBusy, SessionHost, lock_holder, socket_path
 from .session import SessionOptions
 
@@ -89,6 +90,20 @@ class Controller:
         while time.monotonic() < deadline and lock_holder(self.data_dir):
             await asyncio.sleep(0.05)
         return await self.status()
+
+    async def set(self, changes: dict) -> dict:
+        """Change the running session's settings, from any process. Answers at once.
+
+        Returns ``{"ok", "accepted", "applying", "status"}``; raises
+        SettingsRefused with the reason. The owner's socket serves the change
+        even when this process owns the session, so there is one code path.
+        """
+        try:
+            return await self._client().set(changes)
+        except SessionUnavailable:
+            if lock_holder(self.data_dir):
+                raise SettingsRefused("The session is still starting; try the change again in a moment.") from None
+            raise SettingsRefused(messages.NOT_RUNNING) from None
 
     def stop_local(self, timeout: float = 2.0) -> bool:
         """Synchronous stop for unload hooks. True when nothing local is left running."""
