@@ -226,3 +226,18 @@ def test_api_overlay_routes(api):
     answer = client.post("/api/plugins/hermeneus/overlay", json={"visible": True})
     assert answer.status_code == 409 and "chat platform" in answer.json()["detail"]
     assert client.post("/api/plugins/hermeneus/overlay", json={"visible": False}).json()["visible"] is False
+
+
+def test_surface_treats_a_proxied_loopback_request_as_remote(api):
+    from starlette.requests import Request
+    _client, module, _plugin, _rig = api
+
+    def req(host, headers=()):
+        return Request({"type": "http", "method": "POST", "path": "/", "client": (host, 50000),
+                        "headers": [(k.lower().encode(), v.encode()) for k, v in headers]})
+
+    assert module._surface(req("127.0.0.1")) == "desktop"
+    assert module._surface(req("::1")) == "desktop"
+    assert module._surface(req("192.168.1.20")) == "remote"
+    for header in ("X-Forwarded-For", "Forwarded", "X-Real-IP", "X-Forwarded-Host"):
+        assert module._surface(req("127.0.0.1", [(header, "203.0.113.7")])) == "remote", header
