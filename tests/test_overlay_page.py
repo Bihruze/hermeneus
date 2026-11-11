@@ -179,7 +179,7 @@ def test_page_is_self_contained_and_carries_the_settings(server):
     _, hdrs, body = http(server.port, f"/{server.token}/")
     html = body.decode("utf-8")
     assert "http://" not in html.replace("http://127.0.0.1", "") and "https://" not in html
-    assert '"max_lines":3' in html and '"show_original":false' in html and '"pace":"read"' in html
+    assert '"max_lines":3' in html and '"show_original":false' in html and '"pace":"live"' in html
     assert overlay_page.SETTINGS_PLACEHOLDER not in html
 
 

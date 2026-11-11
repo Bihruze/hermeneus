@@ -115,7 +115,7 @@ config_schema:
   overlay_pace:
     type: str
     choices: [read, live]
-    default: read
+    default: live
     label: "Subtitle pace"
     description: "read (read everything): every line stays up for its reading time, so the subtitles may fall behind fast speech. live (follow live): when more than 3 s of text is waiting, lines go up faster, down to half their reading time. No text is ever dropped; scroll back in the overlay to read it again."
   overlay_reading_cps:
