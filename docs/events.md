@@ -36,7 +36,10 @@ higher. After a gap (socket dropped, process restarted) it asks
   `translated`, or `failed` (translation failed or was skipped to keep up; the
   original stays, `error` says why). A reply that is not only a translation (notes
   about the task, copied source words, the wrong script) also ends as `failed`,
-  with `error` "Translation rejected: ..." and an empty `translation`.
+  with `error` "Translation rejected: ..." and an empty `translation`, unless the
+  translator could keep a clean part of it (the text after "Correct output:", or
+  the reply without a short copied fragment at its edge); `translation` then holds
+  only that part.
 - Order on screen: the overlay and the page show lines in the order of these
   events, except that a line still `committed` holds later lines for at most
   6 s. A line whose translation arrives after that goes up after the lines that

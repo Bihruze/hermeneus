@@ -285,7 +285,7 @@ Measured lag on real audio (the A7 audit): two real sessions with ElevenLabs Scr
 | Al Jazeera English news, 4.2 min, 155 wpm (14.1 characters per second in Turkish) | 2.03 / 3.29 / 4.42 s | 3.6 s; 6.7 / 9.0 / 10.7 s | 2.5 s; 3.8 / 5.3 / 7.3 s |
 | Last Week Tonight (talk show), 3.7 min, 185 wpm (20.0 characters per second in Turkish) | 1.82 / 2.93 / 6.84 s | 21.5 s; 23.9 / 37.9 / 41.8 s | 3.0 s; 4.0 / 9.5 / 13.3 s |
 
-News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on (41.8 s at most within 3.5 minutes), while `live` stays within 13.3 s. That maximum came on one 404-character line in which the model wrote notes instead of a translation; the translator now rejects such replies (see [Translation model](#translation-model)).
+News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on (41.8 s at most within 3.5 minutes), while `live` stays within 13.3 s. That maximum came on one 404-character line in which the model wrote notes around its translation; the translator now keeps only the corrected part of such a reply (see [Translation model](#translation-model)).
 
 ## Configuration
 
@@ -344,7 +344,7 @@ Providers tested with this release:
 
 Other providers go through the same Hermes route and are untested.
 
-Only a translation goes on screen. The prompt asks for the translation alone, once, with no notes, corrections or copied source words. Each reply is then checked with plain string checks, with no second model call and no slower model (about 20 to 30 microseconds per line). A reply is rejected when the model talks about the task ("Hmm, wait, only the Turkish text should be given. Correct output: ..."), when it copies a run of the speech's own words (three or more source-language function words such as "between them and"; names and titles kept as they are do not count), or when it is not written in the target language's script. A rejected line shows "Not translated" and its reply is never shown, spoken or printed. On the two real sessions of the A7 audit (101 translated lines) the check rejected exactly the two leaked replies and no other line.
+Only a translation goes on screen. The prompt asks for the translation alone, once, with no notes, corrections or copied source words. Each reply is then checked with plain string checks, with no second model call and no slower model (about 30 microseconds per line, under 0.2 ms at most). A reply that marks its corrected translation ("Correct output: ...", "Doğru çıktı: ...") keeps only the text after the mark, when that passes the checks. A short copied run of the speech at the reply's edge (at most a quarter of the reply's own words) is cut off, so "between them and Mira Tal arasında ..." becomes "Mira Tal arasında ..."; a short phrase kept inside the reply stays. Otherwise a reply is rejected when the model talks about its task ("I need to output just the Turkish text", "Wait, I misread the segment", a "Note:" or Turkish "Not:" label the speech does not have), when 40% or more of its own words are the speech's words (names, brands, numbers, quoted phrases and words the two languages share do not count), or when it is not written in the target language's script (Latin names, brands and abbreviations such as TikTok, iPhone or NBA do not count). For an English target, phrases that can be ordinary speech ("Let me correct that.", "Note: the schedule changes." for a Spanish "Nota: ...") are kept. A rejected line shows "Not translated" and its reply is never shown, spoken or printed. On the 170 translated lines of the A7 audit's three real sessions, the checks reject none, keep the corrected part of the one reply with notes, and cut the copied start off the one reply that began in English; every other line passes unchanged.
 
 ### Secret
 
@@ -573,6 +573,7 @@ The preview label stays until these are checked.
 - The process tap reads audio before the system output volume is applied, so the volume setting does not change what Hermeneus hears.
 - Spoken translation covers 32 languages and needs an output device.
 - Speaker labels come from Scribe's diarization. Scribe can merge two labels during a session; Hermeneus relabels the lines it still shows when that happens.
+- When Scribe moves a line that is already on the overlay to another speaker, the line starts a new speaker row with its new label, so its words move to that row. This is the one case in which rows on screen change (the owner decides whether the label should stay wrong instead).
 - Translation runs on your model. Its speed sets how far subtitles trail the speech, and its skill in a language sets their quality.
 - Scribe bills streamed audio including silence, so an idle session still costs money.
 
