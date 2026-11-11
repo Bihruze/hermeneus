@@ -83,17 +83,40 @@ html, body {
   vertical-align: 0.15em;
 }
 /* "Translating": one small dot in a faint ring on a spot of its own below the lines, as on the native
-   strip, so it never reads as a "..." continuation of the text. */
+   strip, so it never reads as a "..." continuation of the text. It sits on a small box in the
+   subtitle colours, at least 85% opaque, so it stays visible over any video. */
 #pending {
-  color: var(--text-tertiary, var(--text-secondary));
-  width: 0.32em;
-  height: 0.32em;
+  position: relative;
+  isolation: isolate;
+  width: 1.2em;
+  height: 0.8em;
+  margin-top: 0.1em;
+  border-radius: var(--radius);
+  color: var(--text-secondary);
+}
+#pending::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--surface);
+  opacity: max(var(--box-opacity), 0.85);
+}
+#pending::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 0.3em;
+  height: 0.3em;
+  margin: -0.15em 0 0 -0.15em;
   border-radius: 50%;
   background: currentColor;
-  box-shadow: 0 0 0 0.12em var(--surface), 0 0 0 0.2em currentColor;
-  opacity: 0.85;
-  margin-top: 0.15em;
+  box-shadow: 0 0 0 0.1em var(--surface), 0 0 0 0.17em currentColor;
 }
+:root[data-see-through] #pending { color: #e6edf3; }
+:root[data-see-through] #pending::before { background: #161b22; }
 /* Under 50% background the video shows through: light text with a thin dark edge in every theme, as TV
    subtitles are (the native strip's theme.see_through). */
 :root[data-see-through] .line {
