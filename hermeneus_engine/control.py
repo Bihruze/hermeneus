@@ -119,8 +119,13 @@ class Controller:
             page.pop("type", None)
             return page
         except SessionUnavailable:
+            # No session to ask. The lines a consumer holds came from the
+            # session that just ended, possibly in another process, and stay
+            # valid until the next session starts (that session's hello makes
+            # the consumer resync, and its seq range resets it then). Only a
+            # consumer that holds nothing gets a reset.
             status = self._idle_event(await self.status())
-            return {"seq": status["seq"], "reset": after is None or after != status["seq"], "events": [status]}
+            return {"seq": status["seq"], "reset": after is None, "events": [status]}
 
     @staticmethod
     def _idle_event(status: dict) -> dict:

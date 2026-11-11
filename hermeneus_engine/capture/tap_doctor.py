@@ -26,11 +26,15 @@ from ..contracts import ENGINE_SAMPLE_RATE, CaptureError, CaptureSource
 from .process_tap import PERMISSION_PANE, ProcessTapBackend, permission_message, responsible_app_name, worker_env
 
 TONE_HZ = 440.0
-TONE_AMPLITUDE = 0.1
-LISTEN_SECONDS = 1.5
+# Tone level per route. A tap reads the samples a process writes, before the output volume, so
+# the captured level equals the written level (measured: amplitude 0.1 arrives at -23.01 dBFS
+# RMS, the exact value for a 0.1 sine). On a virtual device nobody hears it; on the default
+# output the tap also mutes it (CATapMutedWhenTapped), and the tone is quiet in case it is not.
+VIRTUAL_AMPLITUDE = 0.1        # -23 dBFS RMS
+AUDIBLE_AMPLITUDE = 0.003      # -53.5 dBFS RMS: 6.5 dB above MIN_RMS_DBFS
+LISTEN_SECONDS = 0.5
 SETTLE_SECONDS = 0.15   # tone audio captured after "go" is analysed from this point on
-# A captured tone at TONE_AMPLITUDE is about -23 dBFS RMS. Anything under
-# -60 dBFS, or a tone peak that does not stand out, is not the test sound.
+# Anything under -60 dBFS, or a tone peak that does not stand out, is not the test sound.
 MIN_RMS_DBFS = -60.0
 MIN_TONE_RATIO_DB = 20.0
 
@@ -49,8 +53,9 @@ def cb(out, frames, t, st):
     if not go.is_set():
         out.fill(0); return
     n = np.arange(frames) + n0[0]; n0[0] += frames
-    out[:, 0] = {TONE_AMPLITUDE} * np.sin(2 * np.pi * {TONE_HZ} * n / 48000)
-s = sd.OutputStream(device=(sys.argv[1] if len(sys.argv) > 1 else None), samplerate=48000, channels=1,
+    out[:, 0] = AMP * np.sin(2 * np.pi * {TONE_HZ} * n / 48000)
+AMP = float(sys.argv[1])
+s = sd.OutputStream(device=(sys.argv[2] if len(sys.argv) > 2 else None), samplerate=48000, channels=1,
                     dtype="float32", callback=cb)
 s.start()
 print("ready", flush=True)
@@ -74,8 +79,10 @@ class DoctorResult:
 class TonePlayer:
     """A separate process that plays silence until ``begin()``, then a quiet tone until killed."""
 
-    def __init__(self, device: Optional[str] = None, ready_timeout_s: float = 10.0) -> None:
-        args = [sys.executable, "-c", PLAYER_SCRIPT] + ([device] if device else [])
+    def __init__(self, device: Optional[str] = None, amplitude: float = AUDIBLE_AMPLITUDE,
+                 ready_timeout_s: float = 10.0) -> None:
+        self.device = device
+        args = [sys.executable, "-c", PLAYER_SCRIPT, repr(float(amplitude))] + ([device] if device else [])
         self._proc = subprocess.Popen(args, stdin=subprocess.PIPE,
                                       stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=worker_env())
         self.pid = self._proc.pid
@@ -101,6 +108,37 @@ class TonePlayer:
             self._proc.wait(timeout=2)
         except Exception:
             pass
+
+
+VIRTUAL_OUTPUT_MARKERS = ("blackhole", "vb-cable", "vb-audio", "loopback audio", "soundflower")
+
+
+def virtual_output_device(query_devices: Optional[Callable[[], list]] = None) -> Optional[str]:
+    """Name of an installed virtual output device (BlackHole, VB-Cable, ...), which nobody hears.
+
+    A per-process tap captures a process on whatever device it plays to (measured with a player
+    on BlackHole 2ch and BlackHole 16ch), so the doctor plays its tone there when one exists.
+    Two-channel devices come first: a mono mixdown of a 16-channel device arrives 18 dB lower.
+    """
+    try:
+        if query_devices is None:
+            import sounddevice as sd
+
+            query_devices = sd.query_devices
+        devices = [dict(d) for d in query_devices()]
+    except Exception:
+        return None
+    found = [d for d in devices if d.get("max_output_channels", 0) > 0
+             and any(m in str(d.get("name", "")).casefold() for m in VIRTUAL_OUTPUT_MARKERS)]
+    found.sort(key=lambda d: (d.get("max_output_channels", 0) != 2, d.get("max_output_channels", 0)))
+    return str(found[0]["name"]) if found else None
+
+
+def default_player() -> "TonePlayer":
+    device = virtual_output_device()
+    if device:
+        return TonePlayer(device=device, amplitude=VIRTUAL_AMPLITUDE)
+    return TonePlayer(device=None, amplitude=AUDIBLE_AMPLITUDE)
 
 
 def analyse(pcm: np.ndarray, rate: int = ENGINE_SAMPLE_RATE) -> dict:
@@ -136,7 +174,7 @@ def check_process_tap(*, timeout_s: float = 30.0,
     if not ok:
         return DoctorResult(False, UNAVAILABLE, why)
     try:
-        player = (player_factory or TonePlayer)()
+        player = (player_factory or default_player)()
     except Exception as exc:
         return DoctorResult(False, NO_TEST_PLAYER, f"No test sound could be played: {exc}")
     chunks: list[tuple[float, bytes]] = []
@@ -167,6 +205,11 @@ def check_process_tap(*, timeout_s: float = 30.0,
             pcm = np.frombuffer(b"".join(p for t, p in chunks if t >= go_at + SETTLE_SECONDS), dtype="<i2")
         info = analyse(pcm)
         info["start_s"] = round(start_s, 3)
+        device = getattr(player, "device", None)
+        info["tone_device"] = device or "default output"
+        heard_note = ("The test tone played on " + device + ", which you do not hear." if device else
+                      "A short quiet test tone played on your default output, muted while captured; you may "
+                      "have heard it briefly. Use --no-audio-check to skip this check.")
         info["worker_stats"] = backend.last_stats
         if info["samples"] == 0:
             return DoctorResult(False, START_FAILED, "Capture started but delivered no audio at all.", info)
@@ -176,7 +219,7 @@ def check_process_tap(*, timeout_s: float = 30.0,
             return DoctorResult(False, WRONG_AUDIO,
                                 "Capture delivered audio, but not the test sound. Run doctor again; if it "
                                 f"repeats, check {PERMISSION_PANE}.", info)
-        return DoctorResult(True, OK, "System audio capture works.", info)
+        return DoctorResult(True, OK, "System audio capture works. " + heard_note, info)
     except Exception as exc:  # doctor must report, never crash
         return DoctorResult(False, START_FAILED, f"Capture check failed: {exc}")
     finally:

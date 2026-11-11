@@ -423,6 +423,7 @@ def verify_system_audio_capture(timeout_s: float = 30.0) -> tuple[bool, str]:
     return result.ok, result.message
 
 
+
 def permission_message(app: Optional[str]) -> str:
     who = f"'{app}'" if app else "the app that runs Hermes"
     return (f"macOS is giving Hermeneus silence instead of audio. Open {PERMISSION_PANE}, "

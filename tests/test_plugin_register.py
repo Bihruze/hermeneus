@@ -176,3 +176,13 @@ def test_api_relays_a_session_owned_by_another_process(api, data_dir):
         return status
 
     assert asyncio.run(scenario())["state"] == "live"
+
+
+def test_api_overlay_routes(api):
+    client, module, plugin, _rig = api
+    assert client.get("/api/plugins/hermeneus/overlay").json() == {"visible": False, "pid": None}
+    assert client.post("/api/plugins/hermeneus/overlay", json={"visible": "yes"}).status_code == 400
+    # The test client is not on 127.0.0.1, so it is a remote Desktop: the overlay is refused, not opened there.
+    answer = client.post("/api/plugins/hermeneus/overlay", json={"visible": True})
+    assert answer.status_code == 409 and "chat platform" in answer.json()["detail"]
+    assert client.post("/api/plugins/hermeneus/overlay", json={"visible": False}).json()["visible"] is False
