@@ -90,14 +90,14 @@ Every place that shows the session shows the same lines. Every way of starting a
 
 ### Floating strip
 
-The strip floats near the bottom of the screen, above every other app, including a full-screen video. It never takes keyboard focus, and clicks pass through it to the app underneath.
+The strip floats near the bottom of the screen, above every other app, including a full-screen video. It never takes keyboard focus, and clicks pass through it to the app underneath, except while its history is open (see **Reading back** below).
 
 - **When it opens.** The strip opens with every session started on this Mac (setting `overlay`, on by default). The overlay button in the pane's controls row or next to the status bar item shows or hides it. While no session runs, those buttons arm it for the next session. `hermes hermeneus overlay show|hide|status` and `/translate overlay show|hide|status` do the same. It closes by itself when the session stops.
 - **What it shows.** It shows the translation only, in large text. A sentence appears when its translation is ready. While speech is still being translated, a small dot in a faint ring shows in its own spot at the strip's right end, and the words in the source language never show. Turn on `overlay_show_original` to also see the heard sentence in small text above its translation.
-- **Rows.** Text rolls up: new text enters at the bottom and older rows move up and out, at a pace you can read (see [Subtitle pace](#subtitle-pace)). Each speaker turn starts a row of its own. A small number in the speaker's colour marks the first row of a turn (`overlay_show_speaker`). The strip clears 7 seconds after the last text went up, once nothing waits.
+- **Rows.** Text rolls up: new text enters at the bottom and older rows move up and out, at a pace you can read (see [Subtitle pace](#subtitle-pace)). Each speaker turn starts a row of its own. A small number in the speaker's colour marks the first row of a turn (`overlay_show_speaker`). The strip clears 7 seconds after the last text went up, once nothing waits. It shows 2 rows by default. To change that, drag its top edge or pick **Lines** in the pane's look menu.
 - **Moving it.** Drag the grip at the left edge to move the strip. Right-click the grip for width presets, **Reset position** and **Hide overlay**. Double-click it for the default width, with the rows back to `overlay_max_lines`.
 - **Resizing it.** Drag the handle at the right edge for the width, the short bar at the top edge for the height, or the corner square at the top right for both. The bottom edge stays put, so the strip grows upward. The height snaps to whole rows when you let go, from 1 to 6, so a row is never cut. The width goes from 320 pt to the whole width of the screen. Position, width and rows are remembered for each display, and the pane saves new rows as `overlay_max_lines`.
-- **Reading back.** Click the small up arrow above the strip's right end, or scroll over it. The strip grows to 6 rows of history and a **Back to live** tab appears. While history is open, the strip takes the mouse: scroll to move through earlier rows, click it or **Back to live** to return. It returns to live by itself after 8 seconds without a scroll. New text keeps arriving underneath, and nothing is lost.
+- **Reading back.** Click the small up arrow above the strip's right end, or scroll over it. The strip grows to 6 rows of history and a **Back to live** tab appears. While history is open, the strip takes the mouse: scroll over it to move through earlier rows. A click on the strip or on **Back to live** returns to live, and that click does not reach the app underneath. The strip also returns to live by itself after 8 seconds without a scroll. Then clicks pass through it again. New text keeps arriving underneath, and nothing is lost.
 - **Look.** The default style, `banner`, uses deep navy, a periwinkle edge and warm white text. The `theme` style follows your Hermes Desktop theme in its light or dark mode. The background is 90% opaque by default, so a news ticker in the video does not show through the letters. Below 50% opacity the text is always light with a thin dark outline. Every speaker colour is at least 4.5:1 (WCAG AA) against the strip.
 - **Look menu.** The look button next to the pane's overlay button sets the style, text size, rows, background opacity, the original line, speaker numbers and the pace. A change there or in Settings reaches an open strip without closing it.
 
@@ -120,8 +120,8 @@ Each unit stays its reading time before the next one enters, in the order the se
 
 When speech is faster than reading speed, `overlay_pace` decides:
 
-- `read` (read everything, the default) gives every unit its full reading time. Subtitles may fall behind fast speech and catch up in pauses.
-- `live` (follow live) shortens units while more than 3 s of reading waits, down to half their reading time and never under the minimum. Scroll back to read what went by.
+- `live` (**Follow live** in the pane, the default) shortens units while more than 3 s of reading waits, down to half their reading time and never under the minimum. Scroll back to read what went by.
+- `read` (**Read all** in the pane) gives every unit its full reading time. Subtitles may fall behind fast speech and catch up in pauses.
 
 Measured lag on real audio:
 
@@ -136,7 +136,7 @@ How it was measured:
 - Each session's time-stamped events were then replayed through the overlay code with an offscreen strip at the default settings, 860 pt wide.
 - Every time runs from the end of a spoken sentence.
 
-News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on, while `live` stays within 13.3 s. That maximum came on one 404-character line in which the model wrote notes around its translation. The translator now keeps only the corrected part of such a reply (see [Translation model](#translation-model)).
+News at 14 characters per second stays below the Turkish reading speed, so both paces stay close to live. The talk show runs above it, so `read` falls behind for as long as the fast speech goes on, while `live` stays within 13.3 s. This is why `live` is the default. Its 13.3 s maximum came on one 404-character line in which the model wrote notes around its translation. The translator now keeps only the corrected part of such a reply (see [Translation model](#translation-model)).
 
 ### Hermes Desktop pane
 
@@ -314,7 +314,7 @@ Command flags override the settings for one session.
 | `overlay_opacity` | `90` | Background opacity in percent (0 to 100). The text stays fully opaque. |
 | `overlay_show_speaker` | `true` | Mark a new speaker with a small number in the speaker's colour. |
 | `overlay_style` | `banner` | `banner` (deep navy, periwinkle edge, warm white text) or `theme` (follows Hermes Desktop). |
-| `overlay_pace` | `read` | `read` gives every line its reading time. `live` goes faster when more than 3 s of text waits. No text is dropped either way. |
+| `overlay_pace` | `live` | `live` goes faster when more than 3 s of text waits. `read` gives every line its full reading time. No text is dropped either way. |
 | `overlay_reading_cps` | `0` | Reading speed in characters per second (5 to 30). 0 uses the subtitle language: Turkish 17, English 20, most others 17. |
 | `overlay_page` | `false` | Serve live subtitles on a 127.0.0.1 page for OBS while a session runs. |
 | `overlay_page_port` | `47821` | Port for the overlay page (1024 to 65535). A port in use is an error; no other port is picked. |
@@ -473,7 +473,8 @@ Prices change; the ElevenLabs page is the reference.
 - One session runs at a time. A second start reports the running session.
 - The floating strip is macOS only. It was measured above a native full-screen window in its own Space on one built-in display. Several displays and moving between ordinary Spaces were not measured.
 - Your model sets how far subtitles trail the speech and how good they are in a given language.
-- With the default `read` pace, the strip and the overlay page fall behind fast, continuous speech, by up to 41.8 s in the talk show measured above.
+- The default `live` pace shows fast speech at up to twice the reading speed. It stayed within 13.3 s of the speech in the talk show measured above.
+- With the `read` pace, which you can choose instead, the strip and the overlay page fall behind fast, continuous speech, by up to 41.8 s in that talk show.
 - A line whose translation arrives more than 6 s late can appear on the strip after the lines spoken after it.
 - Speaker labels come from Scribe's diarization. Scribe can merge two labels during a session; Hermeneus relabels the lines it still shows when that happens. When a line already on the strip moves to another speaker, its words move to a new speaker row. This is the one case in which rows on screen change.
 - In voice only mode the pane, the strip and the overlay page still show the lines.
@@ -527,7 +528,7 @@ Other problems:
 - **"--source matches more than one source".** Pass the full name as `hermes hermeneus devices` prints it.
 - **Spoken translation is refused with a feedback warning.** The output device would feed the audio back into the capture source, for example a Multi-Output Device that contains BlackHole while you capture BlackHole. Pick your speakers or headphones directly.
 - **"a session is already running".** `hermes hermeneus status` shows it and `hermes hermeneus stop` ends it.
-- **Subtitles lag by several seconds.** Pin a small, fast model to **Live translation**, or set `overlay_pace` to `live`.
+- **Subtitles lag by several seconds.** Pin a small, fast model to **Live translation**. If you chose the **Read all** pace, switch back to **Follow live**.
 
 ## License
 
