@@ -6,7 +6,9 @@ import { test } from 'node:test'
 
 import { plugin } from './load-plugin.mjs'
 
-const { chipClick, clientLocales, createController, defaultSourceKey, setupNeeded, setupPath, setupSteps, startBody } =
+import { readFileSync } from 'node:fs'
+
+const { chipClick, clientLocales, createController, defaultSourceKey, setupKnownComplete, setupNeeded, setupPath, setupSteps, setupTickDue, startBody } =
   plugin
 
 const SETUP = {
@@ -66,10 +68,28 @@ test('the main Hermes model counts as set up; only a missing model is a todo', (
   assert.equal(setupSteps({ ...SETUP, model: { route: 'main', ready: false } }).model, 'todo')
 })
 
-test('the guided setup shows until the backend reports it complete', () => {
-  assert.equal(setupNeeded(null), false) // not known yet: nothing flashes
+test('the guided setup shows until the backend is known to report it complete', () => {
+  // A6-2: no answer yet (or a failed read) is not "complete": the pane shows the setup's loading or
+  // error state with Try again, and the chip opens the pane.
+  assert.equal(setupNeeded(null), true)
+  assert.equal(setupNeeded(undefined), true)
   assert.equal(setupNeeded(SETUP), true)
   assert.equal(setupNeeded({ ...SETUP, complete: true }), false)
+  assert.equal(setupKnownComplete(null), false)
+  // A Desktop on another computer: setup happens on the Mac (A6-7), its normal controls show.
+  assert.equal(setupNeeded({ remote: true, complete: null }), false)
+})
+
+test('the tick re-reads setup every tick with no answer, every third while open, every fifteenth when done', () => {
+  for (const tick of [1, 2, 3, 4]) {
+    assert.equal(setupTickDue(null, tick), true)
+    assert.equal(setupTickDue({ ...SETUP, complete: true, audio: { state: 'running' } }, tick), true)
+  }
+
+  assert.deepEqual([1, 2, 3, 6].map(tick => setupTickDue(SETUP, tick)), [false, false, true, true])
+  const done = { ...SETUP, complete: true }
+
+  assert.deepEqual([3, 14, 15, 30].map(tick => setupTickDue(done, tick)), [false, false, true, true])
 })
 
 test('the default source is the whole-system tap, else the only source', () => {
@@ -257,4 +277,133 @@ test('while setup is open the tick re-reads it every third tick, so a key added 
   assert.equal(reads(), before)
   ctrl.tick()
   assert.equal(reads(), before + 1)
+})
+
+// -- A6-2 / A6-3: no answer, reconnect, chip start ---------------------------------------
+
+test('a GET /setup that fails at connect is retried by the next tick until it answers', async () => {
+  let fail = true
+  const ctx = fakeCtx({
+    '/setup': () => (fail ? Promise.reject(new Error('404: plugin routes not mounted yet')) : Promise.resolve(SETUP)),
+    '/lines': { seq: 0, events: [] },
+    '/status': { state: 'idle' },
+    '/overlay': { visible: false, armed: true }
+  })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}) })
+
+  ctrl.connect()
+  await settle()
+  assert.equal(ctrl.setup.get().data, null)
+  assert.match(ctrl.setup.get().loadError, /not mounted/)
+  assert.equal(setupNeeded(ctrl.setup.get().data), true) // the pane shows the error with Try again
+
+  const reads = () => ctx.calls.filter(c => c.path.startsWith('/setup')).length
+  const before = reads()
+
+  ctx.interval()
+  await settle()
+  assert.equal(reads(), before + 1)
+  fail = false
+  ctx.interval()
+  await settle()
+  assert.equal(ctrl.setup.get().loadError, '')
+  assert.equal(ctrl.setup.get().data.complete, false)
+})
+
+test('the chip opens the pane instead of starting while setup has not answered', async () => {
+  const revealed = []
+  const ctx = fakeCtx({ '/setup': () => Promise.reject(new Error('Hermes gateway unavailable')), '/start': { state: 'starting' } })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}), revealPane: id => revealed.push(id) })
+
+  await ctrl.toggle()
+  assert.equal(ctx.calls.some(c => c.path === '/start'), false)
+  assert.equal(revealed.length, 1)
+})
+
+test('a chip start re-reads setup first and opens the pane when the backend no longer reports it complete', async () => {
+  // A6-3: the backend restarted; the audio check it had (or the libraries) are gone.
+  let data = { ...SETUP, key: { set: true }, audio: { state: 'ok' }, complete: true }
+  const revealed = []
+  const ctx = fakeCtx({ '/setup': () => Promise.resolve(data), '/start': { state: 'starting' } })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}), revealPane: id => revealed.push(id) })
+
+  await ctrl.refreshSetup()
+  assert.equal(setupNeeded(ctrl.setup.get().data), false)
+  data = { ...data, audio: { state: 'unknown' }, complete: false }
+  await ctrl.toggle()
+  assert.equal(ctx.calls.some(c => c.path === '/start'), false)
+  assert.equal(revealed.length, 1)
+  assert.equal(setupNeeded(ctrl.setup.get().data), true) // the pane shows the audio step again
+
+  data = { ...data, audio: { state: 'ok' }, complete: true }
+  await ctrl.toggle()
+  assert.equal(ctx.calls.filter(c => c.path === '/start').length, 1)
+  const order = ctx.calls.map(c => c.path.split('?')[0])
+
+  assert.equal(order.at(-2), '/setup') // read right before the start
+})
+
+test('setup is read again when the backend comes back after being offline', async () => {
+  let up = true
+  let data = { ...SETUP, key: { set: true }, audio: { state: 'ok' }, complete: true }
+  const ctx = fakeCtx({
+    '/setup': () => Promise.resolve(data),
+    '/lines': () => (up ? Promise.resolve({ seq: 0, events: [] }) : Promise.reject(new Error('ECONNREFUSED'))),
+    '/status': { state: 'idle' }
+  })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}) })
+
+  await ctrl.resync()
+  await ctrl.refreshSetup()
+  up = false
+  await ctrl.resync()
+  assert.equal(ctrl.link.get().state, 'offline')
+  // The gateway restarted and loads the libraries now; the saved check is not there.
+  data = { ...data, audio: { state: 'unknown' }, complete: false }
+  up = true
+  await ctrl.resync()
+  await settle()
+  assert.equal(ctrl.link.get().state, 'online')
+  assert.equal(ctrl.setup.get().data.audio.state, 'unknown')
+  assert.equal(setupNeeded(ctrl.setup.get().data), true)
+})
+
+test('a hello frame from a reconnected socket reads the setup again', async () => {
+  const ctx = fakeCtx({ '/setup': SETUP, '/lines': { seq: 0, events: [] }, '/status': { state: 'idle' } })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}) })
+  const reads = () => ctx.calls.filter(c => c.path.startsWith('/setup')).length
+
+  ctrl.onFrame({ type: 'hello', seq: 0 })
+  await settle()
+  assert.equal(reads(), 1)
+})
+
+test('a slow setup answer never overwrites a newer one', async () => {
+  const pending = []
+  const ctx = fakeCtx({ '/setup': () => new Promise(resolve => pending.push(resolve)) })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}) })
+
+  const first = ctrl.refreshSetup()
+  const second = ctrl.refreshSetup()
+
+  pending[1]({ ...SETUP, complete: true })
+  await second
+  pending[0]({ ...SETUP, complete: false })
+  await first
+  assert.equal(ctrl.setup.get().data.complete, true)
+})
+
+// -- A6-8: System Settings through the backend route -----------------------------------
+
+test('Open System Settings calls the backend route directly, never openExternal with the privacy URL', async () => {
+  const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+
+  assert.doesNotMatch(source, /open\(str\(data\.audio\?\.settings_url\)\)/)
+  assert.match(source, /onClick: \(\) => void ctrl\.openPrivacySettings\(\)/)
+
+  const ctx = fakeCtx({ '/setup': SETUP, '/setup/open-privacy-settings': { ok: true } })
+  const ctrl = createController(ctx, () => 0, { request: async () => ({}) })
+
+  await ctrl.openPrivacySettings()
+  assert.deepEqual(ctx.calls[0], { path: '/setup/open-privacy-settings', method: 'POST', body: {} })
 })

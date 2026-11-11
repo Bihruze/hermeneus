@@ -470,9 +470,28 @@ export function setupSteps(setup) {
   }
 }
 
-/** Whether the pane shows the guided setup: until GET /setup reports it complete. */
+/** Whether GET /setup has said setup is complete. A Desktop on another computer gets
+ *  `{remote: true}` (setup happens on the Mac itself), which counts as nothing to guide here. */
+export function setupKnownComplete(setup) {
+  return Boolean(setup && typeof setup === 'object' && (setup.complete === true || setup.remote === true))
+}
+
+/** Whether the pane shows the guided setup and the chip opens the pane: until GET /setup is known
+ *  to report it complete. Before the first answer (or while it fails) the setup shows its loading
+ *  or error state with Try again, never the normal controls. */
 export function setupNeeded(setup) {
-  return Boolean(setup && typeof setup === 'object' && setup.complete !== true)
+  return !setupKnownComplete(setup)
+}
+
+/** Whether a tick re-reads GET /setup: every tick while there is no answer yet or the audio check
+ *  runs, every third tick while setup is open, and every fifteenth (30 s) otherwise, so a backend
+ *  that lost its libraries or its saved check is noticed even without a reconnect. */
+export function setupTickDue(setup, tick) {
+  if (!setup || typeof setup !== 'object' || setup.audio?.state === 'running') {
+    return true
+  }
+
+  return tick % (setupNeeded(setup) ? 3 : 15) === 0
 }
 
 /** The source the pane preselects when none was chosen: the whole-system tap, else the only source. */
@@ -713,6 +732,7 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
   let lastFrameAt = 0
   let lastResyncAt = 0
   let setupTicks = 0
+  let setupReads = 0
 
   // While a resync is in flight, socket frames wait in `pending` and are
   // replayed after the page, so a live frame can never move the seq past
@@ -747,7 +767,15 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
         store.set(next)
       } while (resyncAgain)
 
+      const wasOffline = link.get().state === 'offline'
+
       link.set({ state: 'online', error: '' })
+
+      // The backend is back (a gateway restart, for example): it may now load the plugin's
+      // libraries or have lost the saved check, so the setup is read again.
+      if (wasOffline) {
+        void refreshSetup()
+      }
     } catch (error) {
       // The frames held back are recovered by the next resync from the server buffer.
       pending = []
@@ -781,9 +809,11 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
 
     store.set(applyEvent(store.get(), frame))
 
-    // hello opens every (re)connected socket: catch up on what was missed while it was down.
+    // hello opens every (re)connected socket: catch up on what was missed while it was down,
+    // and read the setup again (a restarted backend can answer differently).
     if (frame.type === 'hello') {
       void resync()
+      void refreshSetup()
     } else if (link.get().state !== 'online') {
       link.set({ state: 'online', error: '' })
     }
@@ -806,18 +836,25 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
     // a key added in Settings > Tools & Keys shows up within a few seconds.
     setupTicks += 1
 
-    if (setup.get().data?.audio?.state === 'running' || (setupNeeded(setup.get().data) && setupTicks % 3 === 0)) {
+    if (setupTickDue(setup.get().data, setupTicks)) {
       void refreshSetup()
     }
   }
 
+  // Only the newest read is applied, so a slow answer never overwrites a newer one.
   async function refreshSetup() {
+    const read = ++setupReads
+
     try {
       const data = await ctx.rest(setupPath(clientLocales()))
 
-      setup.set({ ...setup.get(), data: data && typeof data === 'object' ? data : null, loadError: '' })
+      if (read === setupReads) {
+        setup.set({ ...setup.get(), data: data && typeof data === 'object' ? data : null, loadError: '' })
+      }
     } catch (error) {
-      setup.set({ ...setup.get(), loadError: errorText(error) })
+      if (read === setupReads) {
+        setup.set({ ...setup.get(), loadError: errorText(error) })
+      }
     }
   }
 
@@ -864,6 +901,12 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
 
   /** Bring the Hermeneus pane forward (the chip's click while setup is not complete). */
   function revealPane() {
+    if (deps.revealPane) {
+      deps.revealPane(PANE_ID)
+
+      return
+    }
+
     try {
       host.undismissPane?.(PANE_ID)
       host.revealPane?.(PANE_ID)
@@ -872,15 +915,29 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
     }
   }
 
-  /** One click on the status bar item. */
-  function toggle() {
+  /** One click on the status bar item. A start first reads the setup again: if it is not known
+   *  to be complete (the backend restarted, lost its libraries, or never answered), the click
+   *  opens the pane instead, so macOS is never asked for the permission unannounced. */
+  async function toggle() {
     const what = chipClick(store.get().status)
 
     if (what === 'stop') {
       return stop()
     }
 
-    return what === 'start' ? quickStart() : Promise.resolve()
+    if (what !== 'start') {
+      return
+    }
+
+    await refreshSetup()
+
+    if (setupNeeded(setup.get().data)) {
+      revealPane()
+
+      return
+    }
+
+    return quickStart()
   }
 
   function takeOverlay(result) {
@@ -1072,7 +1129,7 @@ const EN = {
   subtitlesIn: lang => `subtitles: ${lang}`,
   offline: 'Hermeneus backend unreachable',
   offlineHint:
-    'Turn on Hermeneus in Capabilities > Plugins (its Agent switch), then press Try again. If it stays unreachable, quit and reopen Hermes so it loads the plugin.',
+    'Turn on Hermeneus in Capabilities > Plugins (its Agent switch), then press Try again. If it stays unreachable, open the gateway item in the status bar and click Restart gateway so it loads the plugin.',
   source: 'Source',
   sourcePlaceholder: 'Choose a source',
   refreshSources: 'Refresh sources and devices',
@@ -1156,7 +1213,7 @@ const EN = {
   stepDone: 'Done',
   keyTitle: 'ElevenLabs API key',
   keyTodo:
-    'Speech to text runs on ElevenLabs. Create a key with Speech to Text access (add Text to Speech and Voices read for spoken translation), then paste it in Hermes under Tools & Keys. The key stays in Hermes; this pane never sees it.',
+    'Speech to text runs on ElevenLabs. Create a key with Speech to Text access (add Text to Speech and Voices read for spoken translation), then press Add key in Hermes: in Tools & Keys, click the ELEVENLABS_API_KEY field, paste the key and press Save. The key stays in Hermes; this pane never sees it.',
   keyDone: 'Added in Hermes. The value is not shown here.',
   keyUnknown: 'Hermes could not say whether the key is set.',
   keyCreate: 'Create a key',
@@ -2266,14 +2323,9 @@ function SetupPanel({ ctrl, os }) {
     })
   }
 
-  const open = url => {
-    // The OS opens the link; if the desktop shell cannot, the backend opens System Settings itself.
-    void Promise.resolve(os?.openExternal ? os.openExternal(url) : false).then(opened => {
-      if (!opened && url === data.audio?.settings_url) {
-        void ctrl.openPrivacySettings()
-      }
-    })
-  }
+  // Desktop opens only http, https and mailto links (apps/shared/src/external-url.ts:10,38), so
+  // System Settings is opened by the backend route; the key page is an https link.
+  const open = url => void Promise.resolve(os?.openExternal ? os.openExternal(url) : false).catch(() => false)
   const busy = setup.busy
   const done = jsx(StepState, { label: t('stepDone'), tone: 'good' })
   const languages = Array.isArray(state.status?.languages) ? state.status.languages.filter(l => l && typeof l.code === 'string') : []
@@ -2331,7 +2383,7 @@ function SetupPanel({ ctrl, os }) {
       children: [
         audio === 'denied'
           ? jsxs(Button, {
-              onClick: () => open(str(data.audio?.settings_url)),
+              onClick: () => void ctrl.openPrivacySettings(),
               size: 'xs',
               variant: 'secondary',
               children: [jsx(icons.Settings, {}), t('audioOpenSettings')]
