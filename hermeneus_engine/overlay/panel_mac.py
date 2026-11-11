@@ -91,7 +91,8 @@ FADE_S = 0.15
 TAB_H = 22.0  # the history and "back to live" tabs above the strip's top edge
 TAB_GAP = 3.0
 LABEL_PAD = 4.0  # the speaker number's pill reaches this far beyond its digits
-DOT_R = 2.2  # the "translation coming" dots
+DOT_R = 2.6  # the "translation coming" dot
+PENDING_SLOT = 18.0  # rows end this far before the right inset: the dot's own spot, apart from the text
 LEVEL = NSFloatingWindowLevel
 BEHAVIOUR = (NSWindowCollectionBehaviorCanJoinAllSpaces | NSWindowCollectionBehaviorFullScreenAuxiliary
              | NSWindowCollectionBehaviorStationary | NSWindowCollectionBehaviorIgnoresCycle)
@@ -419,6 +420,9 @@ class MacPanel:
     def text_inset(self) -> float:
         return PAD_X
 
+    def pending_slot(self) -> float:
+        return PENDING_SLOT
+
     def set_frame(self, frame: Rect) -> None:
         target = NSMakeRect(frame.x, frame.y, frame.w, frame.h)
         current = self.strip.frame()
@@ -581,8 +585,7 @@ class MacPanel:
         if not lines and self.view.notice:
             lines = ((Run(self.view.notice, "notice"),),)
         y = PAD_Y
-        bottom_w = 0.0
-        for index, line in enumerate(reversed(lines)):
+        for line in reversed(lines):
             text = NSMutableAttributedString.alloc().init()
             for run in line:
                 text.appendAttributedString_(self._run_text(run, p, s, shadow))
@@ -590,11 +593,9 @@ class MacPanel:
             if line and line[0].kind == LABEL:
                 self._draw_label_pill(line[0], p, s, point)
             self._draw_legible(text, p, point)
-            if index == 0:
-                bottom_w = text.size().width if line else 0.0
             y += line_h
         if self.view.pending and not self.view.history:
-            self._draw_pending(view, p, main, bottom_w, bool(lines))
+            self._draw_pending(view, p, main)
         if self.view.original:
             font = self._font_for("original", s)
             ink = theme.ink(p.text_secondary, p.surface, theme.text_edge(s.opacity))
@@ -619,16 +620,21 @@ class MacPanel:
         pill.setLineWidth_(1.2)
         pill.stroke()
 
-    def _draw_pending(self, view, p: theme.Palette, main, bottom_w: float, has_rows: bool) -> None:
-        """Three small dots after the bottom row: speech was heard and its translation is on its way."""
+    def _draw_pending(self, view, p: theme.Palette, main) -> None:
+        """Speech was heard and its translation is on its way: one small dot in a faint ring, in its own
+        spot at the strip's right end (the rows stop ``PENDING_SLOT`` short of it), centred on the bottom
+        row. It sits apart from the text, so it never reads as a "..." continuation of the words."""
         line_h = self._line_h(main)
-        x = PAD_X + bottom_w + DOT_R * 4 if has_rows else PAD_X
-        x = min(x, view.bounds().size.width - PAD_X - DOT_R * 10)
-        cy = PAD_Y + line_h / 2 - main.descender() * 0.0 - line_h * 0.12
-        _color(theme.ink(p.text_tertiary, p.surface, theme.text_edge(self.settings.opacity))).setFill()
-        for i in range(3):
-            NSBezierPath.bezierPathWithOvalInRect_(
-                NSMakeRect(x + i * DOT_R * 3.2, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
+        cx = view.bounds().size.width - PAD_X - PENDING_SLOT / 2 + 3.0
+        cy = PAD_Y + line_h / 2
+        ink = theme.ink(p.text_tertiary, p.surface, theme.text_edge(self.settings.opacity))
+        ring_r = DOT_R * 2.1
+        ring = NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(cx - ring_r, cy - ring_r, ring_r * 2, ring_r * 2))
+        _color(ink.with_alpha(0.45)).setStroke()
+        ring.setLineWidth_(1.0)
+        ring.stroke()
+        _color(ink).setFill()
+        NSBezierPath.bezierPathWithOvalInRect_(NSMakeRect(cx - DOT_R, cy - DOT_R, DOT_R * 2, DOT_R * 2)).fill()
 
     def _draw_tab(self, view) -> None:
         """A small rounded tab in the strip's colours: an upward chevron (history) or "back to live"."""

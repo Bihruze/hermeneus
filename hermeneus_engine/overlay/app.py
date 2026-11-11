@@ -26,6 +26,9 @@ class Panel(Protocol):
     def strip_height(self, settings: OverlaySettings, rows: Optional[int] = None,
                      original: Optional[bool] = None) -> float: ...
     def text_inset(self) -> float: ...
+    # Optional: the width kept free at the right end of the rows for the "translating" indicator, so it
+    # has its own spot and never reads as the text's "..." (a panel without it keeps none).
+    def pending_slot(self) -> float: ...
     def set_frame(self, frame: Rect) -> None: ...
     def render(self, view: View, settings: OverlaySettings) -> None: ...
     def set_visible(self, visible: bool) -> None: ...
@@ -231,7 +234,8 @@ class OverlayApp:
         if self.frame is None:
             self.place()
         s = self.settings
-        width = max(0.0, self.frame.w - 2 * self.panel.text_inset())
+        slot = getattr(self.panel, "pending_slot", None)
+        width = max(0.0, self.frame.w - 2 * self.panel.text_inset() - (slot() if slot else 0.0))
         view = self.build(now, width)
         if view != self.view:
             self.view = view
