@@ -4,6 +4,8 @@ Adds one catalog entry, `plugin-catalog/hermeneus.yaml`, for Hermeneus (https://
 
 Hermeneus live-translates the audio playing on a Mac. It captures one app, or all system audio except itself, through a Core Audio process tap (macOS 14.2 and later, no driver). It streams that audio to ElevenLabs Scribe v3 Live for transcription with diarization, translates each committed line with the user's own Hermes model, and shows the subtitles in a Desktop pane, in a floating overlay above other apps, in a terminal, through a slash command, or on an opt-in 127.0.0.1 page for OBS. Spoken translation through ElevenLabs Flash v2.5 is opt-in. Language, mode (subtitles, both, voice), voice, output device and source change while a session runs. On older macOS it can read a virtual loopback device (BlackHole 2ch or VB-Cable) that the user installs. Listening covers 100 languages and speaking covers 32.
 
+Hermeneus captures the audio playing on your Mac, so it works with any app that plays sound. Examples are YouTube, Twitch and X Spaces in the browser, Discord, meeting apps and podcast apps. Verified on real audio: YouTube live in Google Chrome.
+
 This entry lists macOS only. macOS is tested on real audio. The repository also holds a Windows backend that is implemented and reviewed against documentation, not yet run on a Windows machine; the entry does not list `windows`, so a catalog install refuses on Windows.
 
 ## Hermes surfaces used
