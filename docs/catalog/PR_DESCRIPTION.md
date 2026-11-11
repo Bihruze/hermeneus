@@ -112,8 +112,8 @@ scripts/check.sh 2>&1 | grep -E "passed|failed|^ℹ (pass|fail)|^ok:|FAIL|Valida
 ```
 
 ```text
-662 passed, 1 warning
-ℹ pass 49
+796 passed, 1 warning
+ℹ pass 68
 ℹ fail 0
 ok: no em dashes
 ok: no binaries tracked
