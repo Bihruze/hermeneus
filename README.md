@@ -318,21 +318,22 @@ The full tables, with their sources, are in `hermeneus_engine/languages.py`. Sta
 
 ## Latency
 
-Measured with the project's latency harness. Times run from the end of a spoken line to the event named in each row.
+Measured end to end on this Mac with real ElevenLabs Scribe v3 Live and Claude Haiku 5.5 (provider `anthropic`) as the translation model. Times run from the end of a spoken sentence, taken from the audio itself, to the event named in each row.
 
-| Stage | Median | p95 |
-| --- | --- | --- |
-| Committed transcript | `<from G1>` | `<from G1>` |
-| Translated subtitle | `<from G1>` | `<from G1>` |
-| First spoken audio (with `--speak`) | `<from G1>` | `<from G1>` |
+| Stage | Median | p95 | Audio |
+| --- | --- | --- | --- |
+| Sentence released for translation | 1.01 s | 1.37 s | both, from the plugin's own `latency_ms` |
+| Translated subtitle | 2.33 s | 2.64 s | speech with pauses between sentences (32 sentences) |
+| Translated subtitle | 2.12 s | 2.68 s | continuous news-style speech (21 sentences) |
+| First spoken audio after the request (with `--speak`) | 1.07 s | 1.89 s | 2 utterances only, a weak sample |
 
-Test setup: `<from G1>`.
+Test setup: English synthetic speech played into a virtual input and captured from it, translated into Turkish; an independent auditor's run on 2026-11-11 (`hermes hermeneus status --json` reports the same figures live under `metrics.latency_ms`, within about 0.15 s of the audio-based measurement). Real streams, other voices and other models will differ.
 
 ## Cost
 
 Hermeneus uses your own accounts. It has no account of its own and charges nothing.
 
-- Scribe v3 Live: $0.22 per hour of audio on the ElevenLabs API price list (https://elevenlabs.io/pricing/api). ElevenLabs bills all audio you stream, including silence (https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/transcripts-and-commit-strategies). Hermeneus streams for as long as the session runs, so an hour of session costs about the same whether or not anything plays. Stop the session when you are done.
+- Scribe v3 Live: $0.22 per hour of audio on the ElevenLabs API price list (https://elevenlabs.io/pricing/api). ElevenLabs bills all audio you stream, including silence (https://elevenlabs.io/docs/eleven-api/guides/how-to/speech-to-text/realtime/transcripts-and-commit-strategies). Hermeneus stops sending audio after about 10 seconds of digital silence from the source and starts again with the first sound, so a paused video costs little; quiet but not silent audio is still sent. Stop the session when you are done.
 - Spoken translation: the same price list gives $0.04 per 1,000 characters for Flash / Turbo text to speech. You pay only while `--speak` is on, for the characters of the translated lines.
 - Translation: one request to your Hermes model per committed segment, billed by your model provider at its rates.
 
