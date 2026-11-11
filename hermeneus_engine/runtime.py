@@ -7,6 +7,9 @@ kernel releases a ``flock`` when its holder dies, so a crashed owner never
 leaves a lock that blocks the next start; the PID written into the file is
 only for messages.
 
+On Windows the lock is a ``msvcrt.locking`` byte-range lock and the socket is
+a token-guarded loopback endpoint (see ``_windows``); the rules are the same.
+
 ``SessionRuntime`` is the async core (used directly by ``hermes hermeneus
 run`` on its own ``asyncio.run`` loop). ``SessionHost`` runs one runtime on a
 dedicated thread with its own loop, for owners inside Hermes processes whose
@@ -18,11 +21,11 @@ from __future__ import annotations
 import asyncio
 import contextvars
 import errno
-import fcntl
 import json
 import logging
 import os
 import stat
+import sys
 import threading
 import time
 from pathlib import Path
@@ -30,7 +33,7 @@ from typing import Callable, Optional
 
 from .bus import SubtitleBus
 from .ipc import BusServer
-from .session import SessionComponents, SessionOptions, TranslationSession
+from .session import SessionComponents, SessionOptions, SettingRefused, TranslationSession
 
 logger = logging.getLogger(__name__)
 
@@ -56,6 +59,10 @@ class SessionBusy(RuntimeError):
                          "Stop it with /translate stop or hermes hermeneus run, then start again.")
 
 
+def _windows() -> bool:
+    return sys.platform == "win32"
+
+
 def run_dir(data_dir: Path) -> Path:
     """``<data dir>/run``, created with mode 0700."""
     path = Path(data_dir) / RUN_DIR_NAME
@@ -75,6 +82,10 @@ def lock_path(data_dir: Path) -> Path:
 def pid_alive(pid: int) -> bool:
     if pid <= 0:
         return False
+    if _windows():
+        # os.kill(pid, 0) sends CTRL_C_EVENT on Windows; ask the kernel instead.
+        from ._windows.process import pid_alive as windows_pid_alive
+        return windows_pid_alive(pid)
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -93,14 +104,28 @@ class SessionLock:
 
     def acquire(self, info: dict) -> None:
         run_dir(self.path.parent.parent)
-        fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError as exc:
-            os.close(fd)
-            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                raise SessionBusy(read_lock_info(self.path)) from None
-            raise
+        if _windows():
+            from ._windows import lock as winlock
+            fd = os.open(self.path, winlock.open_flags(), 0o600)
+            try:
+                locked = winlock.try_lock(fd)
+            except OSError:
+                os.close(fd)
+                raise
+            if not locked:
+                os.close(fd)
+                raise SessionBusy(read_lock_info(self.path))
+            os.lseek(fd, 0, os.SEEK_SET)
+        else:
+            import fcntl
+            fd = os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600)
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)  # type: ignore[attr-defined]  # POSIX branch
+            except OSError as exc:
+                os.close(fd)
+                if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise SessionBusy(read_lock_info(self.path)) from None
+                raise
         # A previous owner that died left its content and maybe its socket.
         os.ftruncate(fd, 0)
         os.write(fd, json.dumps(info).encode("utf-8"))
@@ -114,8 +139,15 @@ class SessionLock:
         try:
             os.ftruncate(fd, 0)
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
-            os.close(fd)
+            try:
+                if _windows():
+                    from ._windows import lock as winlock
+                    winlock.unlock(fd)
+                else:
+                    import fcntl
+                    fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]  # POSIX branch
+            finally:
+                os.close(fd)
 
     @property
     def held(self) -> bool:
@@ -141,21 +173,30 @@ def lock_holder(data_dir: Path) -> Optional[dict]:
     except OSError:
         return None
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
-        except OSError as exc:
-            if exc.errno in (errno.EWOULDBLOCK, errno.EAGAIN):
-                info = read_lock_info(path)
-                info["pid_alive"] = pid_alive(int(info.get("pid") or 0))
-                return info
-            raise
-        fcntl.flock(fd, fcntl.LOCK_UN)
-        return None
+        if _windows():
+            from ._windows import lock as winlock
+            if winlock.try_lock(fd):
+                winlock.unlock(fd)
+                return None
+        else:
+            import fcntl
+            try:
+                fcntl.flock(fd, fcntl.LOCK_SH | fcntl.LOCK_NB)  # type: ignore[attr-defined]  # POSIX branch
+                fcntl.flock(fd, fcntl.LOCK_UN)  # type: ignore[attr-defined]  # POSIX branch
+                return None
+            except OSError as exc:
+                if exc.errno not in (errno.EWOULDBLOCK, errno.EAGAIN):
+                    raise
+        info = read_lock_info(path)
+        info["pid_alive"] = pid_alive(int(info.get("pid") or 0))
+        return info
     finally:
         os.close(fd)
 
 
 def check_socket_path(path: Path) -> None:
+    if _windows():
+        return  # the Windows endpoint is an ordinary file, not a sockaddr_un path
     if len(os.fsencode(str(path))) > MAX_SOCKET_PATH_BYTES:
         raise RuntimeError(
             f"the session socket path {path} is longer than the {MAX_SOCKET_PATH_BYTES} bytes macOS allows. "
@@ -166,6 +207,9 @@ def remove_stale_socket(path: Path) -> None:
     try:
         mode = os.lstat(path).st_mode
     except FileNotFoundError:
+        return
+    if _windows() and stat.S_ISREG(mode):
+        os.unlink(path)  # the endpoint file of an owner that died; this process holds the lock now
         return
     if stat.S_ISSOCK(mode):
         os.unlink(path)
@@ -204,7 +248,8 @@ class SessionRuntime:
                             "socket": str(sock)})
         try:
             remove_stale_socket(sock)
-            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_overlay=self._overlay_request)
+            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_set=self.apply_settings,
+                                     on_overlay=self._overlay_request)
             await self._server.start()
             loop = asyncio.get_running_loop()
 
@@ -232,6 +277,13 @@ class SessionRuntime:
             return {"type": "overlay", "running": False, "url": None, "port": None,
                     "error": "this session was started without the overlay page"}
         return await asyncio.to_thread(self.overlay_page.switch, on, port)
+
+    def apply_settings(self, changes: dict) -> dict:
+        """Live change for the running session (socket op ``set``). Raises SettingRefused."""
+        session = self.session
+        if session is None:
+            raise SettingRefused("The session is still starting; try the change again in a moment.")
+        return session.apply_settings(changes)
 
     def request_stop(self) -> None:
         """Ask the run to stop. Safe from the runtime's loop thread."""

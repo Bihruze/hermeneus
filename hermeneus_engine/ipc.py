@@ -14,11 +14,17 @@ reads JSON lines back:
     is disconnected and should subscribe again with its last seq.
 ``{"op": "stop"}``
     ``{"type": "ok"}``, then the session stops.
+``{"op": "set", "changes": {"mode"?, "speak"?, "target_language"?, "voice_id"?, "output_device"?, "source"?}}``
+    ``{"type": "set", "ok": true, "accepted": {...}, "applying": [...], "status": {...}}`` at once, or
+    ``{"type": "error", "ok": false, "message": "<why, and the fix>"}``.
 ``{"op": "overlay", "on": <true, false or null>, "port": <int or null>}``
     switches the 127.0.0.1 overlay page (null only asks) and answers
     ``{"type": "overlay", "running", "url", "port", "error"}``.
 
 Event shapes are documented in ``docs/events.md``.
+
+On Windows the same requests travel over loopback TCP, and every request
+carries the session token from the endpoint file (``_windows/ipc.py``).
 """
 
 from __future__ import annotations
@@ -28,8 +34,9 @@ import contextlib
 import json
 import logging
 import os
+import sys
 from pathlib import Path
-from typing import AsyncIterator, Awaitable, Callable, Optional
+from typing import Any, AsyncIterator, Awaitable, Callable, Optional
 
 from .bus import SubtitleBus
 
@@ -41,8 +48,21 @@ CONNECT_TIMEOUT_S = 1.0
 STREAM_LIMIT = 1 << 20
 
 
+def _use_tcp() -> bool:
+    """Windows has no asyncio Unix sockets; it uses the token-guarded loopback transport."""
+    return sys.platform == "win32"
+
+
 class SessionUnavailable(ConnectionError):
     """No session answers on the socket."""
+
+
+class SettingsRefused(ValueError):
+    """The session refused a ``set`` request. The message says why and what to do."""
+
+
+# set handler: takes the changes, returns {"accepted", "applying", "status"} or raises ValueError.
+SetHandler = Callable[[dict], dict]
 
 
 def _encode(event: dict) -> bytes:
@@ -51,16 +71,24 @@ def _encode(event: dict) -> bytes:
 
 class BusServer:
     def __init__(self, path: Path, bus: SubtitleBus, *, on_stop: Callable[[], None],
+                 on_set: Optional[SetHandler] = None,
                  on_overlay: Optional[Callable[[Optional[bool], Optional[int]], Awaitable[dict]]] = None) -> None:
         self.path = Path(path)
         self._bus = bus
         self._on_stop = on_stop
+        self._on_set = on_set
         self._on_overlay = on_overlay
         self._server: Optional[asyncio.AbstractServer] = None
         self._clients: set[asyncio.Task] = set()
+        self._token: Optional[str] = None
 
     async def start(self) -> None:
-        self._server = await asyncio.start_unix_server(self._handle, path=str(self.path), limit=STREAM_LIMIT)
+        if _use_tcp():
+            from ._windows.ipc import start_server
+            self._server, self._token = await start_server(self._handle, self.path, STREAM_LIMIT)
+            return
+        self._server = await asyncio.start_unix_server(  # type: ignore[attr-defined]  # POSIX branch
+            self._handle, path=str(self.path), limit=STREAM_LIMIT)
         # The run directory is 0700, so nobody else can reach the socket in
         # the moment before this chmod.
         os.chmod(self.path, 0o600)
@@ -97,6 +125,10 @@ class BusServer:
                 writer.write(_encode({"type": "error", "message": "bad request"}))
                 await writer.drain()
                 return
+            if self._token is not None and not _token_matches(self._token, request.get("token")):
+                writer.write(_encode({"type": "error", "message": "unauthorized"}))
+                await writer.drain()
+                return
             await self._serve(request, writer)
         except (ConnectionError, asyncio.CancelledError):
             pass
@@ -122,6 +154,8 @@ class BusServer:
         elif op == "subscribe":
             await self._stream(request, writer)
             return
+        elif op == "set":
+            writer.write(_encode(self._set(request.get("changes"))))
         elif op == "overlay":
             on, port = request.get("on"), request.get("port")
             if self._on_overlay is None:
@@ -133,6 +167,20 @@ class BusServer:
         else:
             writer.write(_encode({"type": "error", "message": f"unknown op {op!r}"}))
         await writer.drain()
+
+    def _set(self, changes: Any) -> dict:
+        if not isinstance(changes, dict) or not changes:
+            return {"type": "error", "ok": False, "message": "set needs a non-empty changes object"}
+        if self._on_set is None:
+            return {"type": "error", "ok": False, "message": "this session does not take changes while running"}
+        try:
+            result = self._on_set(changes)
+        except ValueError as exc:
+            return {"type": "error", "ok": False, "message": str(exc)}
+        except Exception as exc:  # a broken change must not take the socket down
+            logger.exception("hermeneus: set request failed")
+            return {"type": "error", "ok": False, "message": f"the change failed: {exc}"}
+        return {"type": "set", "ok": True, **result}
 
     async def _stream(self, request: dict, writer: asyncio.StreamWriter) -> None:
         sub = self._bus.subscribe()
@@ -158,6 +206,11 @@ class BusServer:
             sub.close()
 
 
+def _token_matches(expected: str, given) -> bool:
+    from ._windows.ipc import token_ok
+    return token_ok(expected, given)
+
+
 def _as_seq(value) -> int:
     try:
         return max(int(value), 0)
@@ -170,18 +223,25 @@ class SessionClient:
 
     def __init__(self, path: Path) -> None:
         self.path = Path(path)
+        self._token: Optional[str] = None
 
     async def _open(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         try:
+            if _use_tcp():
+                from ._windows.ipc import open_connection
+                reader, writer, self._token = await asyncio.wait_for(
+                    open_connection(self.path, STREAM_LIMIT), CONNECT_TIMEOUT_S)
+                return reader, writer
             return await asyncio.wait_for(
-                asyncio.open_unix_connection(str(self.path), limit=STREAM_LIMIT), CONNECT_TIMEOUT_S)
+                asyncio.open_unix_connection(  # type: ignore[attr-defined]  # POSIX branch
+                    str(self.path), limit=STREAM_LIMIT), CONNECT_TIMEOUT_S)
         except (FileNotFoundError, ConnectionRefusedError, asyncio.TimeoutError, OSError) as exc:
             raise SessionUnavailable(str(exc) or type(exc).__name__) from None
 
     async def _request(self, request: dict) -> dict:
         reader, writer = await self._open()
         try:
-            writer.write(_encode(request))
+            writer.write(_encode(self._signed(request)))
             await writer.drain()
             raw = await asyncio.wait_for(reader.readline(), REQUEST_TIMEOUT_S)
         except (ConnectionError, asyncio.TimeoutError) as exc:
@@ -194,6 +254,9 @@ class SessionClient:
             raise SessionUnavailable("the session closed the connection")
         return json.loads(raw)
 
+    def _signed(self, request: dict) -> dict:
+        return {**request, "token": self._token} if self._token is not None else request
+
     async def status(self) -> dict:
         return await self._request({"op": "status"})
 
@@ -204,6 +267,13 @@ class SessionClient:
         reply = await self._request({"op": "stop"})
         if reply.get("type") != "ok":
             raise SessionUnavailable(f"stop refused: {reply}")
+
+    async def set(self, changes: dict) -> dict:
+        """Apply live changes. Returns the ``set`` reply; raises SettingsRefused or SessionUnavailable."""
+        reply = await self._request({"op": "set", "changes": changes})
+        if reply.get("type") != "set":
+            raise SettingsRefused(str(reply.get("message") or reply))
+        return reply
 
     async def overlay(self, on: Optional[bool] = None, port: Optional[int] = None) -> dict:
         """Switch the overlay page (None only asks). Raises SessionUnavailable when the owner cannot."""
@@ -216,7 +286,7 @@ class SessionClient:
         """Yield events until the session ends or the connection drops."""
         reader, writer = await self._open()
         try:
-            writer.write(_encode({"op": "subscribe", "after": after}))
+            writer.write(_encode(self._signed({"op": "subscribe", "after": after})))
             await writer.drain()
             while True:
                 raw = await reader.readline()

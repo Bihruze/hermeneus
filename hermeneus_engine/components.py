@@ -11,6 +11,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import os
+import sys
 from dataclasses import dataclass
 from typing import Any, Callable, Optional
 
@@ -23,6 +24,7 @@ SECRET_NAME = "ELEVENLABS_API_KEY"
 REGISTRY: dict[str, tuple[str, str]] = {
     "capture.virtual-device": (".capture.virtual_device", "VirtualDeviceBackend"),
     "capture.process-tap": (".capture.process_tap", "ProcessTapBackend"),
+    "capture.process-loopback": (".capture.process_loopback", "ProcessLoopbackBackend"),
     "capture.multi_output": (".capture.virtual_device", "detect_multi_output_setup"),
     # W02 seam: starts and stops a tap once while another process plays a test
     # sound, and reports whether real non-zero audio arrived. The lead sets the
@@ -39,8 +41,14 @@ REGISTRY: dict[str, tuple[str, str]] = {
     "routing.safe_outputs": (".tts.routing", "safe_output_devices"),
 }
 
-# Backends in the order the doctor and the source picker try them.
-CAPTURE_BACKENDS = ("capture.virtual-device", "capture.process-tap")
+# Backends in the order the doctor and the source picker try them. Each
+# platform loads only its own driverless backend, so no macOS module is
+# imported on Windows and the reverse.
+CAPTURE_BACKENDS = (("capture.virtual-device", "capture.process-loopback") if sys.platform == "win32"
+                    else ("capture.virtual-device", "capture.process-tap"))
+# Backends that capture processes rather than a device; spoken translation is
+# safe on any output when they leave out this process.
+PROCESS_BACKENDS = ("process-tap", "process-loopback")
 
 CaptureErrorCallback = Callable[[CaptureError], None]
 
@@ -130,7 +138,7 @@ def own_process_excluded(source: CaptureSource) -> bool:
     runs here), so its own speech is not captured. A ``pid:`` source excludes
     nothing; it is safe only when it names another process.
     """
-    if source.backend != "process-tap":
+    if source.backend not in PROCESS_BACKENDS:
         return True
     if source.source_id.startswith("pid:"):
         return source.source_id[4:] != str(os.getpid())
@@ -175,21 +183,27 @@ class HermesServices:
 
 def build(options: SessionOptions, services: HermesServices,
           on_capture_error: Optional[CaptureErrorCallback] = None) -> SessionComponents:
-    """Real components for one session. Raises FeedbackRiskError, ComponentUnavailable or ValueError."""
+    """Real components for one session. Raises FeedbackRiskError, ComponentUnavailable or ValueError.
+
+    The factories in the result let the session start spoken translation,
+    change its voice or output device, and change its source while it runs.
+    """
+
+    def speaker_factory(voice_id: str, output_device: str, source: CaptureSource) -> Any:
+        # options.resolve fills voice_id (flag, setting, default); FlashConfig has the same default.
+        config = load("speaker.config")(**({"voice_id": voice_id} if voice_id else {}))
+
+        def route_check():
+            return route_verdict(output_device or "", source)
+
+        playback = load("speaker.playback")(output_device, sample_rate=config.sample_rate, route_check=route_check)
+        return load("speaker")(config, lambda: services.get_secret(SECRET_NAME), playback)
+
     speaker: Optional[Any] = None
     if options.speak:
         # Checked before anything opens a device or a socket.
         check_feedback_risk(options.output_device or "", options.source)
-        # options.resolve fills voice_id (flag, setting, default); FlashConfig has the same default.
-        config = load("speaker.config")(**({"voice_id": options.voice_id} if options.voice_id else {}))
-        source = options.source
-
-        def route_check():
-            return route_verdict(options.output_device or "", source)
-
-        playback = load("speaker.playback")(options.output_device, sample_rate=config.sample_rate,
-                                            route_check=route_check)
-        speaker = load("speaker")(config, lambda: services.get_secret(SECRET_NAME), playback)
+        speaker = speaker_factory(options.voice_id or "", options.output_device or "", options.source)
 
     capture = capture_backend(options.source.backend, on_capture_error)
     stt = load("stt")(SttConfig(commit_strategy=options.commit_strategy), services.get_secret)
@@ -199,4 +213,9 @@ def build(options: SessionOptions, services: HermesServices,
     def scheduler_factory(on_line: Callable) -> Any:
         return scheduler_cls(translator, target_language=options.target_language, on_line=on_line)
 
-    return SessionComponents(capture=capture, stt=stt, scheduler_factory=scheduler_factory, speaker=speaker)
+    def capture_factory(source: CaptureSource) -> Any:
+        return capture_backend(source.backend, on_capture_error)
+
+    return SessionComponents(capture=capture, stt=stt, scheduler_factory=scheduler_factory, speaker=speaker,
+                             speaker_factory=speaker_factory,
+                             capture_factory=capture_factory, route_check=check_feedback_risk)

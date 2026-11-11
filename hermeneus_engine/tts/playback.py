@@ -166,6 +166,18 @@ class PlaybackQueue:
             raise PlaybackError(f"Could not open '{self.device_name}' for spoken output: {exc}") from exc
         self._stream = stream
 
+    def health(self) -> str:
+        """Empty while the device plays; otherwise why it stopped.
+
+        PortAudio ends a stream whose device disappears (unplugged headphones,
+        a Bluetooth device that went away); ``active`` is then False although
+        this queue never stopped it.
+        """
+        stream = self._stream
+        if stream is None or getattr(stream, "active", True):
+            return ""
+        return f"Output device '{self.device_name}' stopped playing; it may have been unplugged or switched off."
+
     def stop(self) -> None:
         """Stop the device and cancel everything queued. Safe to call more than once."""
         stream, self._stream = self._stream, None

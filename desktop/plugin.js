@@ -27,7 +27,6 @@ import {
   SelectValue,
   STATUSBAR_AREAS,
   StatusDot,
-  Switch,
   Tip,
   usePluginI18n,
   useTheme,
@@ -441,10 +440,12 @@ export const FONT_SCALES = Object.freeze([0.85, 1, 1.15, 1.3, 1.5, 1.75, 2])
 
 const DEFAULT_PREFS = Object.freeze({
   fontScale: 1,
+  mode: 'subtitles',
   outputDevice: '',
   source: '',
   speak: false,
-  targetLanguage: ''
+  targetLanguage: '',
+  voiceId: ''
 })
 
 // Desktop's REST bridge rejects with "<status>: <body>" (apps/desktop/electron/api-transport.ts:185-186).
@@ -488,6 +489,46 @@ export function devicesPath(key) {
 
 export function sourceKey(source) {
   return source && typeof source === 'object' ? `${str(source.backend)}:${str(source.source_id)}` : ''
+}
+
+// ---------------------------------------------------------------------------
+// Pure control model: what the controls row shows and what a choice changes
+// ---------------------------------------------------------------------------
+
+export const MODES = Object.freeze(['subtitles', 'both', 'voice'])
+
+/** The mode the Mode select shows: what the session runs while running, the saved choice while idle. */
+export function shownMode(status, prefs, running) {
+  if (running) {
+    const mode = str(status?.mode)
+
+    return MODES.includes(mode) ? mode : status?.speak === true ? 'both' : 'subtitles'
+  }
+
+  return prefs.speak ? (prefs.mode === 'voice' ? 'voice' : 'both') : 'subtitles'
+}
+
+/** What picking `mode` saves (prefs patch) and, while running, asks the session for (POST /settings body).
+ *  A mode with voice needs an output device: the chosen one, else the first safe one the backend listed. */
+export function modeChoice(mode, { outputId = '', outputs = [], voiceId = '' } = {}) {
+  if (mode === 'subtitles') {
+    return { patch: { speak: false }, change: { mode: 'subtitles' } }
+  }
+
+  const listed = outputs.filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
+  const output = listed.some(o => o.device_id === outputId) ? outputId : listed[0]?.device_id ?? ''
+  const patch = { speak: true, mode, ...(output ? { outputDevice: output } : {}) }
+  const change = { mode, ...(output ? { output_device: output } : {}), ...(voiceId ? { voice_id: voiceId } : {}) }
+
+  return { patch, change }
+}
+
+/** Label of the voice popover trigger: the chosen voice's name, else the default voice's, else a fallback. */
+export function voiceLabel(voices, voiceId, fallback) {
+  const list = Array.isArray(voices) ? voices : []
+  const chosen = list.find(v => v && v.voice_id === voiceId) ?? (voiceId ? null : list.find(v => v && v.is_default))
+
+  return chosen ? str(chosen.name) || chosen.voice_id : voiceId || fallback
 }
 
 /** Overlay look settings the pane offers (plugin.yaml overlay_* keys, hermeneus_engine/overlay_settings.py). */
@@ -710,9 +751,13 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
 
     try {
       const result = await ctx.rest(path, { method: 'POST', body })
+      // POST /start and /stop answer a status; POST /settings answers {accepted, applying, status}.
+      const status = result && typeof result === 'object' && result.status && typeof result.status === 'object'
+        ? result.status
+        : result
 
-      if (result && typeof result === 'object' && typeof result.state === 'string') {
-        store.set(applyEvent(store.get(), { ...result, type: 'status', seq: undefined }))
+      if (status && typeof status === 'object' && typeof status.state === 'string') {
+        store.set(applyEvent(store.get(), { ...status, type: 'status', seq: undefined }))
       }
 
       action.set({ busy: false, error: '' })
@@ -727,6 +772,12 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
 
   function stop() {
     return control('/stop', {})
+  }
+
+  /** Change the running session (POST /settings). The answer comes at once; background changes
+   *  (speech on, voice, output, source) report through later status events. */
+  function settings(changes) {
+    return control('/settings', changes)
   }
 
   function connect() {
@@ -754,6 +805,7 @@ export function createController(ctx, clock = () => Date.now(), deps = { request
     setOverlay,
     setOverlayLook,
     setPrefs,
+    settings,
     start,
     stop,
     store,
@@ -788,10 +840,17 @@ const EN = {
   target: 'Subtitle language',
   targetPlaceholder: 'Choose a language',
   noLanguages: 'Language list unavailable',
-  speak: 'Speak translation',
   notSpeakable: 'Spoken output is not available for this language',
   output: 'Output device',
   outputPlaceholder: 'Choose an output',
+  // Proposal for Seher (W26): mode and voice pickers, reachable while running.
+  mode: 'Mode',
+  modes: { subtitles: 'Subtitles only', both: 'Subtitles and voice', voice: 'Voice only' },
+  voiceSettings: 'Voice and output device',
+  needsVoiceMode: 'Choose a mode with voice',
+  voice: 'Voice',
+  voicePlaceholder: 'Default voice',
+  voicesError: error => `Could not list voices: ${error}`,
   start: 'Start',
   stop: 'Stop',
   devicesError: error => `Could not list sources: ${error}`,
@@ -838,6 +897,8 @@ const EN = {
   overlaySpeaker: 'Speaker names',
   overlayOpacity: 'Background',
   percent: n => `${n}%`,
+  on: 'On',
+  off: 'Off',
   overlayHint: 'Floats the current line above other apps on this Mac',
   showOverlay: 'Show subtitle overlay',
   hideOverlay: 'Hide subtitle overlay',
@@ -877,7 +938,7 @@ const S = {
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
   },
-  statusState: { color: 'var(--ui-text-primary)', fontWeight: 500, flexShrink: 0 },
+  statusState: { color: 'var(--ui-text-primary)', fontWeight: 'var(--font-weight-medium)', flexShrink: 0 },
   statusPart: { color: 'var(--ui-text-tertiary)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' },
   statusMessage: {
     color: 'var(--ui-text-tertiary)',
@@ -892,13 +953,8 @@ const S = {
   controls: { display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: sp(2) },
   field: { display: 'flex', alignItems: 'center', gap: sp(1), minWidth: 0 },
   select: { width: sp(44) },
-  switchLabel: {
-    display: 'flex',
-    alignItems: 'center',
-    gap: sp(1.5),
-    fontSize: 'var(--conversation-caption-base-size)',
-    color: 'var(--ui-text-secondary)'
-  },
+  popover: { display: 'flex', flexDirection: 'column', gap: sp(2) },
+  startStop: { marginLeft: 'auto' },
   topRow: { display: 'flex', alignItems: 'center', gap: sp(3), minWidth: 0 },
   topStatus: { flex: 1, minWidth: 0 },
   fontControls: { display: 'flex', alignItems: 'center', gap: sp(0.5) },
@@ -926,14 +982,24 @@ const S = {
   // scrolled up" mid-glide; `overflow: clip` on the box around it keeps the scroll height true.
   // What it clips is the part below the scroll end, which is off screen anyway.
   contentClip: { overflow: 'clip' },
-  content: { willChange: 'transform' },
-  row: { display: 'grid', gridTemplateColumns: '6.5em minmax(0, 1fr)', columnGap: sp(3), padding: `${sp(1)} 0` },
+  // One grid for every line: the speaker column is as wide as the widest speaker name
+  // (max-content), and each row takes the columns as a subgrid, so names and text align
+  // across rows without a fixed column width.
+  content: { display: 'grid', gridTemplateColumns: 'max-content minmax(0, 1fr)', columnGap: sp(3), willChange: 'transform' },
+  row: { display: 'grid', gridColumn: '1 / -1', gridTemplateColumns: 'subgrid', padding: `${sp(1)} 0` },
   turnGap: { paddingTop: sp(2.5) },
-  speaker: { overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', fontWeight: 500 },
+  speaker: { whiteSpace: 'nowrap', fontWeight: 'var(--font-weight-medium)' },
   // Long lines wrap at word boundaries first; a single unbroken token (a URL) still breaks
   // instead of widening the pane. `lang` on the row lets hyphenation pick the right rules.
   text: { overflowWrap: 'anywhere', hyphens: 'auto', textWrap: 'pretty' },
-  langTag: { color: 'var(--ui-text-quaternary)', fontWeight: 500, marginRight: sp(1.5), letterSpacing: '0.04em' },
+  // Weight, tracking and width tokens are the Tailwind theme variables the app is built with
+  // (--font-weight-medium 500, --tracking-wider .05em, --container-xl 36rem in dist main CSS).
+  langTag: {
+    color: 'var(--ui-text-quaternary)',
+    fontWeight: 'var(--font-weight-medium)',
+    marginRight: sp(1.5),
+    letterSpacing: 'var(--tracking-wider)'
+  },
   state: {
     display: 'flex',
     flex: 1,
@@ -952,10 +1018,10 @@ const S = {
     color: 'var(--ui-text-primary)',
     fontSize: 'var(--conversation-text-base-size)',
     lineHeight: 'var(--conversation-base-line-height)',
-    fontWeight: 500
+    fontWeight: 'var(--font-weight-medium)'
   },
   stateDescription: {
-    maxWidth: '36rem',
+    maxWidth: 'var(--container-xl)',
     color: 'var(--ui-text-tertiary)',
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
@@ -975,13 +1041,13 @@ const S = {
   },
   noticeText: { flex: 1, minWidth: 0, overflowWrap: 'anywhere' },
   endMarker: {
+    gridColumn: '1 / -1',
     padding: `${sp(3)} 0 ${sp(1)}`,
     textAlign: 'center',
     color: 'var(--ui-text-quaternary)',
     fontSize: 'var(--conversation-caption-base-size)',
     lineHeight: 'var(--conversation-caption-base-line-height)'
   },
-  jump: { position: 'absolute', right: sp(4), bottom: sp(3) },
   doctor: { flex: 1, minHeight: 0, overflowY: 'auto', padding: `${sp(2)} ${sp(3)}` },
   doctorHead: { display: 'flex', alignItems: 'center', justifyContent: 'flex-end', gap: sp(2), marginBottom: sp(2) },
   check: { display: 'grid', gridTemplateColumns: `${sp(4)} minmax(0, 1fr)`, columnGap: sp(2), padding: `${sp(1.5)} 0` },
@@ -997,7 +1063,8 @@ const S = {
     gap: sp(1.5),
     height: '100%',
     padding: `0 ${sp(1.5)}`,
-    // The core status bar's own item size and gaps (apps/desktop/src/app/shell/statusbar-controls.tsx:31).
+    // The core status bar's own item size, a literal in core too: STATUSBAR_ACTION_CLASS
+    // `text-[0.6875rem]` (apps/desktop/src/app/shell/statusbar-controls.tsx:31). No token carries it.
     fontSize: '0.6875rem',
     color: 'var(--ui-text-tertiary)'
   },
@@ -1138,29 +1205,61 @@ function Controls({ ctrl }) {
 
   const status = state.status
   const running = RUNNING_STATES.has(status?.state)
+  // GET /voices is cached 60 s on the backend; ask only once speech is on or chosen.
+  const wantsVoice = running ? status?.speak === true : prefs.speak
+  const voicesQuery = useQuery({
+    queryKey: [ID, 'voices'],
+    queryFn: () => ctrl.rest('/voices'),
+    enabled: wantsVoice,
+    staleTime: 60000,
+    retry: false
+  })
   const sources = Array.isArray(devices.data?.sources) ? devices.data.sources : []
   const outputs = Array.isArray(devices.data?.outputs) ? devices.data.outputs : []
+  const voices = Array.isArray(voicesQuery.data?.voices) ? voicesQuery.data.voices.filter(v => v && typeof v.voice_id === 'string') : []
   const languages = Array.isArray(status?.languages) ? status.languages.filter(l => l && typeof l.code === 'string') : []
 
   // While a session runs, show what the backend runs; while idle, show the user's choice.
   const target = running ? str(status?.target_language) : prefs.targetLanguage
   const speak = running ? status?.speak === true : prefs.speak
+  const mode = running ? str(status?.mode) || (speak ? 'both' : 'subtitles') : prefs.speak ? prefs.mode === 'voice' ? 'voice' : 'both' : 'subtitles'
   const chosenLanguage = languages.find(l => l.code === target)
   const speakable = chosenLanguage ? chosenLanguage.speakable !== false : true
-  const source = sources.find(s => sourceKey(s) === prefs.source) ?? null
-  const output = outputs.find(o => o && o.device_id === prefs.outputDevice) ?? null
+  const sourceValue = running && status?.source ? sourceKey(status.source) : prefs.source
+  const source = sources.find(s => sourceKey(s) === sourceValue) ?? null
+  const outputValue = running && status?.output_device ? str(status.output_device) : prefs.outputDevice
+  const output = outputs.find(o => o && o.device_id === outputValue) ?? null
+  const voiceValue = running && status?.voice_id ? str(status.voice_id) : prefs.voiceId
+  const applying = running && Array.isArray(status?.applying) ? status.applying : []
 
   const canStart =
     !action.busy && source !== null && target !== '' && (!prefs.speak || (speakable && output !== null))
 
+  // Each control saves the choice; while running it also changes the session (POST /settings).
+  const choose = (patch, change) => {
+    ctrl.setPrefs(patch)
+
+    if (running && change) {
+      void ctrl.settings(change)
+    }
+  }
+
+  const onMode = value => {
+    const { patch, change } = modeChoice(value, { outputId: outputValue, outputs, voiceId: voiceValue })
+    choose(patch, change)
+  }
+
   const onStart = () => {
     const current = ctrl.prefs.get()
+    const speakNow = current.speak && speakable
 
     void ctrl.start({
       source: { backend: source.backend, source_id: source.source_id },
       target_language: current.targetLanguage,
-      speak: current.speak && speakable,
-      output_device: current.speak && speakable ? output.device_id : null
+      speak: speakNow,
+      mode: speakNow ? (current.mode === 'voice' ? 'voice' : 'both') : 'subtitles',
+      output_device: speakNow ? output.device_id : null,
+      ...(speakNow && current.voiceId ? { voice_id: current.voiceId } : {})
     })
   }
 
@@ -1173,12 +1272,15 @@ function Controls({ ctrl }) {
             style: S.field,
             children: [
               jsx(Picker, {
-                disabled: running || sources.length === 0,
+                disabled: sources.length === 0 || applying.includes('source'),
                 label: t('source'),
-                onChange: value => ctrl.setPrefs({ source: value }),
+                onChange: value => {
+                  const picked = sources.find(s => sourceKey(s) === value)
+                  choose({ source: value }, picked ? { source: { backend: picked.backend, source_id: picked.source_id } } : null)
+                },
                 options: sources.map(s => ({ value: sourceKey(s), label: str(s.label) || sourceKey(s) })),
                 placeholder: t('sourcePlaceholder'),
-                value: source ? prefs.source : ''
+                value: source ? sourceValue : ''
               }),
               jsx(Tip, {
                 label: t('refreshSources'),
@@ -1195,68 +1297,109 @@ function Controls({ ctrl }) {
           }),
           languages.length > 0
             ? jsx(Picker, {
-                disabled: running,
                 label: t('target'),
-                onChange: value => ctrl.setPrefs({ targetLanguage: value }),
+                onChange: value => choose({ targetLanguage: value }, { target_language: value }),
                 options: languages.map(l => ({ value: l.code, label: typeof l.name === 'string' ? l.name : l.code })),
                 placeholder: t('targetPlaceholder'),
                 value: target
               })
             : jsx('span', { style: S.statusPart, children: running && target ? target : t('noLanguages') }),
-          jsxs('label', {
-            style: S.switchLabel,
-            title: speakable ? undefined : t('notSpeakable'),
+          jsx(Tip, {
+            label: speakable ? t('mode') : t('notSpeakable'),
+            children: jsx('span', {
+              children: jsx(Picker, {
+                disabled: !speakable && mode === 'subtitles',
+                label: t('mode'),
+                onChange: onMode,
+                options: MODES.filter(m => m === 'subtitles' || speakable).map(m => ({ value: m, label: t(`modes.${m}`) })),
+                placeholder: t('mode'),
+                value: mode
+              })
+            })
+          }),
+          // Voice and output device sit behind one popover; they matter only in a mode with voice.
+          jsxs(Popover, {
             children: [
-              jsx(Switch, {
-                'aria-label': t('speak'),
-                checked: speak && speakable,
-                disabled: running || !speakable,
-                onCheckedChange: on => ctrl.setPrefs({ speak: on }),
-                size: 'xs'
+              jsx(Tip, {
+                label: speak ? t('voiceSettings') : t('needsVoiceMode'),
+                children: jsx('span', {
+                  children: jsx(PopoverTrigger, {
+                    asChild: true,
+                    children: jsxs(Button, {
+                      'aria-label': t('voiceSettings'),
+                      disabled: !speak || !speakable,
+                      size: 'xs',
+                      variant: 'ghost',
+                      children: [jsx(icons.Volume2, {}), voiceLabel(voices, voiceValue, t('voicePlaceholder'))]
+                    })
+                  })
+                })
               }),
-              t('speak')
+              jsx(PopoverContent, {
+                align: 'start',
+                children: jsxs('div', {
+                  style: S.popover,
+                  children: [
+                    jsx(Picker, {
+                      disabled: outputs.length === 0 || applying.includes('output_device'),
+                      label: t('output'),
+                      onChange: value => choose({ outputDevice: value }, speak ? { output_device: value } : null),
+                      options: outputs
+                        .filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
+                        .map(o => ({ value: o.device_id, label: str(o.label) || o.device_id })),
+                      placeholder: t('outputPlaceholder'),
+                      value: output ? outputValue : ''
+                    }),
+                    jsx(Picker, {
+                      disabled: voices.length === 0 || applying.includes('voice_id'),
+                      label: t('voice'),
+                      onChange: value => choose({ voiceId: value }, speak ? { voice_id: value } : null),
+                      options: voices.map(v => ({ value: v.voice_id, label: str(v.name) || v.voice_id })),
+                      placeholder: t('voicePlaceholder'),
+                      value: voices.some(v => v.voice_id === voiceValue) ? voiceValue : ''
+                    }),
+                    voicesQuery.isError
+                      ? jsx('div', { role: 'alert', style: S.alert, children: t('voicesError', errorText(voicesQuery.error)) })
+                      : null
+                  ]
+                })
+              })
             ]
           }),
-          // Look-and-feel proposal for Seher: the overlay switch sits with the session controls.
-          jsxs('label', {
-            style: S.switchLabel,
-            title: running ? t('overlayHint') : t('overlayArmed'),
-            children: [
-              jsx(Switch, {
+          // Look-and-feel proposal for Seher: while a session runs the button shows or hides the overlay;
+          // while idle it arms the overlay for the next session.
+          jsx(Tip, {
+            label: running ? t('overlay') : `${t('overlay')}: ${t('overlayArmed')}`,
+            children: jsx('span', {
+              children: jsx(Button, {
                 'aria-label': t('overlay'),
-                checked: running ? overlay.visible : overlay.armed,
+                'aria-pressed': running ? overlay.visible : overlay.armed,
                 disabled: overlay.busy,
-                onCheckedChange: on => void ctrl.setOverlay(on),
-                size: 'xs'
-              }),
-              t('overlay')
-            ]
+                onClick: () => void ctrl.setOverlay(!(running ? overlay.visible : overlay.armed)),
+                size: 'icon-xs',
+                variant: (running ? overlay.visible : overlay.armed) ? 'secondary' : 'ghost',
+                children: jsx(icons.PanelBottom, {})
+              })
+            })
           }),
           jsx(OverlayLook, { ctrl }),
-          jsx(Picker, {
-            disabled: running || !prefs.speak || !speakable || outputs.length === 0,
-            label: t('output'),
-            onChange: value => ctrl.setPrefs({ outputDevice: value }),
-            options: outputs
-              .filter(o => o && typeof o.device_id === 'string' && o.device_id !== '')
-              .map(o => ({ value: o.device_id, label: str(o.label) || o.device_id })),
-            placeholder: t('outputPlaceholder'),
-            value: output ? prefs.outputDevice : ''
-          }),
-          running
-            ? jsxs(Button, {
-                disabled: action.busy || status?.state === 'stopping',
-                onClick: () => void ctrl.stop(),
-                size: 'sm',
-                variant: 'secondary',
-                children: [jsx(icons.StopFilled, {}), t('stop')]
-              })
-            : jsxs(Button, {
-                disabled: !canStart,
-                onClick: onStart,
-                size: 'sm',
-                children: [jsx(icons.Play, {}), t('start')]
-              })
+          jsx('div', {
+            style: S.startStop,
+            children: running
+              ? jsxs(Button, {
+                  disabled: action.busy || status?.state === 'stopping',
+                  onClick: () => void ctrl.stop(),
+                  size: 'sm',
+                  variant: 'secondary',
+                  children: [jsx(icons.StopFilled, {}), t('stop')]
+                })
+              : jsxs(Button, {
+                  disabled: !canStart,
+                  onClick: onStart,
+                  size: 'sm',
+                  children: [jsx(icons.Play, {}), t('start')]
+                })
+          })
         ]
       }),
       devices.isError
@@ -1478,7 +1621,7 @@ function Notice({ ctrl, kind, link, onDoctor, status, t }) {
   })
 }
 
-function SubtitleList({ ctrl, onDoctor }) {
+function SubtitleList({ ctrl, onDoctor, onJumpChange }) {
   const t = usePluginI18n(ID)
   const state = useValue(ctrl.store)
   const link = useValue(ctrl.link)
@@ -1609,6 +1752,18 @@ function SubtitleList({ ctrl, onDoctor }) {
 
   const live = state.lastTranslated
   const unseen = follow ? 0 : unseenCount(lines, anchorId)
+  const paused = !follow && view.body === 'lines'
+  const jumpRef = useRef(jumpToLive)
+  jumpRef.current = jumpToLive
+
+  // The way back to live sits in the pane's top row (HermeneusPane), outside the list, so it
+  // never covers a line. The list tells it when following stopped and how many lines arrived.
+  useLayoutEffect(() => {
+    onJumpChange?.(paused ? { unseen, jump: () => jumpRef.current() } : null)
+  }, [paused, unseen])
+
+  useLayoutEffect(() => () => onJumpChange?.(null), [])
+
 
   return jsxs('div', {
     style: S.listWrap,
@@ -1654,20 +1809,6 @@ function SubtitleList({ ctrl, onDoctor }) {
             })
           })
         : jsx(EmptyBody, { ctrl, kind: view.body, link, onDoctor, status: state.status, t }),
-      follow || view.body !== 'lines'
-        ? null
-        : jsx('div', {
-            style: S.jump,
-            children: jsxs(Button, {
-              onClick: jumpToLive,
-              size: 'xs',
-              variant: 'secondary',
-              children: [
-                jsx(icons.ArrowBarToDown, {}),
-                unseen > 0 ? `${t('jumpToLive')} · ${t('newLines', unseen)}` : t('jumpToLive')
-              ]
-            })
-          }),
       // Screen readers hear each new translation once; partial updates stay silent.
       jsx('div', {
         'aria-live': 'polite',
@@ -1783,6 +1924,7 @@ function DoctorPanel({ ctrl }) {
 function HermeneusPane({ ctrl }) {
   const t = usePluginI18n(ID)
   const [view, setView] = useState('subtitles')
+  const [jump, setJump] = useState(null)
 
   return jsxs('div', {
     'data-hermeneus-pane': view,
@@ -1796,6 +1938,17 @@ function HermeneusPane({ ctrl }) {
             style: S.topRow,
             children: [
               jsx('div', { style: S.topStatus, children: jsx(StatusLine, { ctrl }) }),
+              view === 'subtitles' && jump
+                ? jsxs(Button, {
+                    onClick: jump.jump,
+                    size: 'xs',
+                    variant: 'secondary',
+                    children: [
+                      jsx(icons.ArrowBarToDown, {}),
+                      jump.unseen > 0 ? `${t('jumpToLive')} · ${t('newLines', jump.unseen)}` : t('jumpToLive')
+                    ]
+                  })
+                : null,
               view === 'subtitles' ? jsx(FontSize, { ctrl }) : null,
               jsx(SegmentedControl, {
                 onChange: setView,
@@ -1811,7 +1964,7 @@ function HermeneusPane({ ctrl }) {
         ]
       }),
       view === 'subtitles'
-        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor') })
+        ? jsx(SubtitleList, { ctrl, onDoctor: () => setView('doctor'), onJumpChange: setJump })
         : jsx(DoctorPanel, { ctrl })
     ]
   })
@@ -1931,16 +2084,18 @@ function OverlayLook({ ctrl }) {
       ]
     })
   const toggle = (key, label) =>
-    jsxs('label', {
+    jsxs('div', {
       style: S.lookRow,
       children: [
         jsx('span', { style: S.lookLabel, children: label }),
-        jsx(Switch, {
-          'aria-label': label,
-          checked: look[key] === true,
+        jsx(SegmentedControl, {
           disabled: overlay.busy,
-          onCheckedChange: on => void ctrl.setOverlayLook({ [`overlay_${key}`]: on }),
-          size: 'xs'
+          onChange: id => void ctrl.setOverlayLook({ [`overlay_${key}`]: id === 'on' }),
+          options: [
+            { id: 'off', label: t('off') },
+            { id: 'on', label: t('on') }
+          ],
+          value: look[key] === true ? 'on' : 'off'
         })
       ]
     })

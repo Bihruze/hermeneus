@@ -27,8 +27,9 @@ import threading
 import time
 from collections import Counter, OrderedDict, deque
 from dataclasses import dataclass, field, replace
-from typing import AsyncIterator, Awaitable, Callable, Optional, Protocol
+from typing import Any, AsyncIterator, Awaitable, Callable, Mapping, Optional, Protocol
 
+from . import languages, messages
 from .bus import SubtitleBus, wire_language
 from .sentences import DEFAULT_STABLE_MS, DEFAULT_STABLE_PARTIALS, SentenceSplitter
 from .contracts import (
@@ -50,6 +51,7 @@ from .contracts import (
     SttStatus,
     SubtitleLine,
 )
+from .tts.voices import DEFAULT_VOICE_ID
 
 logger = logging.getLogger(__name__)
 
@@ -63,6 +65,10 @@ DEFAULT_MAX_QUEUED_SECONDS = 2.0
 # stop() closes every stage in parallel under this deadline, which keeps a
 # stop (including a SIGINT in ``hermes hermeneus run``) under two seconds.
 STOP_TIMEOUT_S = 1.5
+# The STT client's own close budget (stt/scribe.py close(timeout=)). It
+# commits trailing audio and waits for that transcript; 1.2 s leaves room
+# inside STOP_TIMEOUT_S for the last line to reach the bus.
+STT_CLOSE_TIMEOUT_S = 1.2
 
 METRICS_INTERVAL_S = 2.0
 
@@ -70,12 +76,41 @@ METRICS_INTERVAL_S = 2.0
 # once and when it changes, and repeats the same reason at most this often.
 FAILURE_MESSAGE_INTERVAL_S = 30.0
 
+# The model counts as slow when this many lines are skipped or time out
+# within the window. One late line is noise; two in 20 s is a pattern.
+SLOW_MODEL_LINES = 2
+SLOW_MODEL_WINDOW_S = 20.0
+
+# A spoken translation that starts (playback device, ElevenLabs socket) gets
+# this long before the change is reported as failed.
+SPEAKER_START_TIMEOUT_S = 15.0
+
+# Session modes. "voice" keeps the subtitle bus running (the overlay, the
+# pane and hermes hermeneus run still receive every line); it tells displays
+# to hide subtitle text while the translation is spoken.
+MODES = ("subtitles", "both", "voice")
+_MODE_ALIASES = {"subtitles": "subtitles", "subtitles-only": "subtitles", "text": "subtitles",
+                 "both": "both", "subtitles+voice": "both", "subtitles-and-voice": "both",
+                 "voice": "voice", "voice-only": "voice"}
+SETTING_FIELDS = frozenset({"mode", "speak", "target_language", "voice_id", "output_device", "source"})
+
+
+class SettingRefused(ValueError):
+    """A live change cannot be applied. The message says why and what to do instead."""
+
+
+def parse_mode(value: Any) -> str:
+    mode = _MODE_ALIASES.get(str(value or "").strip().lower())
+    if mode is None:
+        raise SettingRefused(f"Unknown mode {value!r}. Use one of: subtitles, both, voice.")
+    return mode
+
 
 class SttClient(Protocol):
     async def start(self) -> None: ...
     def send_audio(self, pcm: bytes, captured_ns: int) -> None: ...
     def events(self) -> AsyncIterator[SttEvent]: ...
-    async def close(self) -> None: ...
+    async def close(self, timeout: Optional[float] = None) -> None: ...
 
 
 class LineScheduler(Protocol):
@@ -107,6 +142,14 @@ class SessionOptions:
     # stable_ms turns it off: lines are then whole Scribe segments.
     sentence_stable_ms: float = DEFAULT_STABLE_MS
     sentence_stable_partials: int = DEFAULT_STABLE_PARTIALS
+    # False only in mode "voice": displays hide the subtitle text.
+    subtitles: bool = True
+
+    @property
+    def mode(self) -> str:
+        if not self.speak:
+            return "subtitles"
+        return "both" if self.subtitles else "voice"
 
     def source_dict(self) -> dict:
         return {"backend": self.source.backend, "source_id": self.source.source_id,
@@ -119,6 +162,31 @@ class SessionComponents:
     stt: SttClient
     scheduler_factory: SchedulerFactory
     speaker: Optional[Speaker] = None
+    # For changes while running. Each may be None; the change is then refused.
+    # speaker_factory(voice_id, output_device, source) returns a new, unstarted Speaker.
+    speaker_factory: Optional[Callable[[str, str, CaptureSource], Speaker]] = None
+    # capture_factory(source) returns a new, unstarted CaptureBackend for that source.
+    capture_factory: Optional[Callable[[CaptureSource], CaptureBackend]] = None
+    # route_check(output_device, source) raises FeedbackRiskError for a route that would be captured again.
+    route_check: Optional[Callable[[str, CaptureSource], None]] = None
+
+
+class _SwitchSink:
+    """Sink for a capture started by a source change: drops audio until the old capture has stopped.
+
+    The cost on the capture thread is one attribute test per chunk (measured
+    in the W26 report, probe_hop.py --switch).
+    """
+
+    __slots__ = ("_put", "open")
+
+    def __init__(self, put: Callable[[bytes, int], None]) -> None:
+        self._put = put
+        self.open = False
+
+    def put(self, pcm: bytes, captured_ns: int) -> None:
+        if self.open:
+            self._put(pcm, captured_ns)
 
 
 class FrameQueue:
@@ -245,6 +313,32 @@ def _in_daemon_thread(fn: Callable[[], object], name: str) -> "asyncio.Future":
     return fut
 
 
+def _source_from(value: Any) -> Optional[CaptureSource]:
+    if value is None or isinstance(value, CaptureSource):
+        return value
+    if isinstance(value, Mapping):
+        backend = str(value.get("backend") or "").strip()
+        source_id = str(value.get("source_id") or "").strip()
+        if not backend or not source_id:
+            raise SettingRefused("A source needs both backend and source_id (see: hermes hermeneus devices).")
+        return CaptureSource(backend=backend, source_id=source_id,
+                             label=str(value.get("label") or source_id), detail=str(value.get("detail") or ""))
+    raise SettingRefused("Pass the source as a name (hermes hermeneus set --source NAME) "
+                         "or as {backend, source_id}.")
+
+
+async def _close_quietly(obj: Any, what: str) -> None:
+    close = getattr(obj, "close", None)
+    if close is None:
+        return
+    try:
+        await asyncio.wait_for(close(), STOP_TIMEOUT_S)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        logger.warning("hermeneus: %s close failed: %s", what, exc)
+
+
 def _ms(nbytes: int) -> int:
     return int(nbytes * 1000 / BYTES_PER_SECOND)
 
@@ -281,9 +375,20 @@ class TranslationSession:
         self._segment_lines: list[str] = []      # lines of the segment being spoken
         self._segments: "OrderedDict[int, list[str]]" = OrderedDict()  # segment_index -> its lines
         self._failure_published_ns = 0
+        self._speak_message = ""
+        self._speak_message_ns = 0
+        self._speaker_error_seen = ""
+        self._slow_ns: deque = deque()
+        self._speech_task: Optional[asyncio.Task] = None
+        self._stt_task: Optional[asyncio.Task] = None
+        self._speaking = False
+        self._want_speech = False
+        self._settings_lock: Optional[asyncio.Lock] = None
+        self._applying: list[str] = []
+        self._jobs: set[asyncio.Task] = set()
         self.stats: dict[str, int] = {"lines_committed": 0, "lines_translated": 0,
                                       "lines_failed": 0, "speak_errors": 0,
-                                      "sentences_released_early": 0}
+                                      "sentences_released_early": 0, "settings_changes": 0}
 
     # -- status -----------------------------------------------------------
 
@@ -311,11 +416,16 @@ class TranslationSession:
             self._state = state
         if message is not None:
             self._message = message
+        opts = self.options
         self.bus.publish_status(state=self._state, message=self._message,
-                                source=self.options.source_dict(),
-                                target_language=self.options.target_language,
-                                speak=self.options.speak, detected_language=self._detected,
-                                metrics=self.metrics())
+                                source=opts.source_dict(),
+                                target_language=opts.target_language,
+                                speak=opts.speak, detected_language=self._detected,
+                                metrics=self.metrics(),
+                                extra={"mode": opts.mode, "subtitles": opts.subtitles,
+                                       "voice_id": opts.voice_id if opts.speak else None,
+                                       "output_device": opts.output_device if opts.speak else None,
+                                       "applying": list(self._applying)})
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -326,6 +436,7 @@ class TranslationSession:
         self._loop = asyncio.get_running_loop()
         self._done = asyncio.Event()
         self._stop_lock = asyncio.Lock()
+        self._settings_lock = asyncio.Lock()
         self._started_ns = self._clock()
         self._frames = FrameQueue(self._loop, int(self.options.max_queued_seconds * BYTES_PER_SECOND),
                                   self._c.stt.send_audio)
@@ -333,14 +444,17 @@ class TranslationSession:
         try:
             self._scheduler = self._c.scheduler_factory(self._on_translated)
             await self._c.stt.start()
-            self._tasks.append(asyncio.create_task(self._stt_loop(), name="hermeneus:stt-events"))
+            self._stt_task = asyncio.create_task(self._stt_loop(), name="hermeneus:stt-events")
+            self._tasks.append(self._stt_task)
             self._tasks.append(asyncio.create_task(self._metrics_loop(), name="hermeneus:metrics"))
             if self.options.speak and self._c.speaker is not None:
                 start_speaker = getattr(self._c.speaker, "start", None)
                 if start_speaker is not None:
                     await start_speaker(self.options.target_language)
-                self._speech = asyncio.Queue()
-                self._tasks.append(asyncio.create_task(self._speech_loop(), name="hermeneus:speech"))
+                self._ensure_speech_loop()
+                self._speaking = self._want_speech = True
+            elif self.options.speak:
+                self.options = replace(self.options, speak=False, subtitles=True)
             await asyncio.to_thread(self._c.capture.start, self.options.source, self._frames.put)
             self._capture_started = True
         except BaseException as exc:
@@ -368,8 +482,18 @@ class TranslationSession:
             if self._frames is not None:
                 self._frames.close()
             current = asyncio.current_task()
-            for task in self._tasks:
+            self._speaking = self._want_speech = False
+            for task in list(self._jobs):
                 if task is not current:
+                    task.cancel()
+            if self._speech_task is not None and self._speech_task not in self._tasks:
+                self._tasks.append(self._speech_task)
+            # The STT event loop keeps running: the client emits the transcript
+            # of the trailing audio while it closes, and that last sentence
+            # must reach the bus. It ends with the client's CLOSED event, or
+            # is cancelled at the deadline below.
+            for task in self._tasks:
+                if task is not current and task is not self._stt_task:
                     task.cancel()
             # The stages are independent once audio stops, so they close in
             # parallel under one deadline. A step that overruns is logged and
@@ -378,12 +502,15 @@ class TranslationSession:
             if self._capture_started:
                 self._capture_started = False
                 steps["capture stop"] = _in_daemon_thread(self._c.capture.stop, "hermeneus-capture-stop")
-            steps["speech to text close"] = self._c.stt.close()
+            steps["speech to text close"] = self._c.stt.close(timeout=STT_CLOSE_TIMEOUT_S)
             if self._scheduler is not None:
                 steps["translation close"] = self._scheduler.aclose()
             if self._c.speaker is not None:
                 steps["speaker close"] = self._c.speaker.close()
             pending = {asyncio.ensure_future(aw): what for what, aw in steps.items()}
+            for task in list(self._jobs):
+                if task is not current:
+                    pending[task] = task.get_name()
             for task in self._tasks:
                 if task is not current:
                     pending[task] = task.get_name()
@@ -394,12 +521,14 @@ class TranslationSession:
             for fut in late:
                 logger.warning("hermeneus: %s took longer than %.1fs; continuing shutdown", pending[fut],
                                STOP_TIMEOUT_S)
+                if fut is self._stt_task:
+                    fut.cancel()
             self._publish_status(final_state, message)
             self._done.set()
 
     def capture_failed(self, error: BaseException) -> None:
         """Capture stopped on its own. Call on the session's loop."""
-        self._fail_soon(str(error) or "audio capture stopped")
+        self._fail_soon(messages.capture_stopped(str(error), self.options.source.label))
 
     def _fail_soon(self, message: str) -> None:
         """Shut down from inside a stage task without awaiting itself."""
@@ -415,8 +544,9 @@ class TranslationSession:
             # stopped in ``failure``.
             failure = getattr(self._c.capture, "failure", "") if self._capture_started else ""
             if failure:
-                self._fail_soon(str(failure))
+                self._fail_soon(messages.capture_stopped(str(failure), self.options.source.label))
                 return
+            self._check_speaker_health()
             # W02 seam: the tap's zero-buffer watchdog reports what it is doing
             # (for example rebuilding a silent tap) in ``status_message``.
             note = str(getattr(self._c.capture, "status_message", "") or "") if self._capture_started else ""
@@ -431,17 +561,52 @@ class TranslationSession:
             if self._state in ("live", "reconnecting"):
                 self._publish_status()
 
+    def _ensure_speech_loop(self) -> None:
+        if self._speech is None:
+            self._speech = asyncio.Queue()
+        if self._speech_task is None or self._speech_task.done():
+            self._speech_task = asyncio.create_task(self._speech_loop(), name="hermeneus:speech")
+
     async def _speech_loop(self) -> None:
-        assert self._speech is not None and self._c.speaker is not None
+        assert self._speech is not None
         while True:
-            text = await self._speech.get()
+            text, language = await self._speech.get()
+            speaker = self._c.speaker
+            if speaker is None or not self._speaking:
+                continue
             try:
-                await self._c.speaker.speak(text, language=self.options.target_language)
+                await speaker.speak(text, language=language)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:
                 self.stats["speak_errors"] += 1
                 logger.warning("hermeneus: spoken translation failed: %s", exc)
+                self._note_speak_failure(messages.speak_error(str(exc)))
+
+    def _note_speak_failure(self, message: str) -> None:
+        """Show a spoken translation failure in the status, at most once per reason per 30 s."""
+        now = self._clock()
+        if message != self._speak_message or now - self._speak_message_ns >= FAILURE_MESSAGE_INTERVAL_S * 1e9:
+            self._speak_message = message
+            self._speak_message_ns = now
+            if self._state in ("live", "reconnecting"):
+                self._publish_status(message=message)
+
+    def _check_speaker_health(self) -> None:
+        """Server-side speech errors and a vanished output device, read every metrics tick."""
+        speaker = self._c.speaker
+        if speaker is None or not self._speaking:
+            return
+        error = str(getattr(speaker, "last_error", "") or "")
+        if error and error != self._speaker_error_seen:
+            self._speaker_error_seen = error
+            self._note_speak_failure(messages.speak_error(error))
+        health = getattr(speaker, "health", None)
+        problem = health() if callable(health) else ""
+        if problem and not self._applying:
+            device = self.options.output_device or ""
+            logger.warning("hermeneus: spoken output stopped: %s", problem)
+            self._turn_speech_off(messages.output_device_gone(device))
 
     async def _stt_loop(self) -> None:
         try:
@@ -532,6 +697,11 @@ class TranslationSession:
         if early:
             self.stats["sentences_released_early"] += 1
         assert self._scheduler is not None
+        if self._state == "stopping":
+            # The last sentence arrived while the session closes; translation is already shutting down.
+            self._store(replace(line, state=LineState.FAILED,
+                                error="Not translated: the session stopped while this sentence arrived."))
+            return line
         try:
             self._scheduler.submit(replace(line, timings_ns=dict(timings)))
         except Exception as exc:
@@ -588,21 +758,33 @@ class TranslationSession:
 
     def _on_stt_status(self, event: SttStatus) -> None:
         if event.state == SttState.FAILED:
-            self._fail_soon(event.message or "speech to text failed")
+            self._fail_soon(messages.stt_failed(event.message, event.error_type))
             return
         if event.state == SttState.CLOSED:
             if self._state not in ("stopping", "idle", "failed"):
-                self._fail_soon(event.message or "speech to text closed the connection")
+                self._fail_soon(messages.stt_failed(event.message or "the connection closed", event.error_type))
             return
         mapped = _STT_TO_SESSION.get(event.state)
         if mapped and self._state not in ("stopping", "idle", "failed"):
-            self._publish_status(mapped, event.message or ("live" if mapped == "live" else ""))
+            if mapped == "reconnecting":
+                message = messages.stt_reconnecting(event.message, event.error_type)
+            else:
+                message = event.message or ("live" if mapped == "live" else "")
+            self._publish_status(mapped, message)
 
     def _note_translation_failure(self, error: str) -> None:
         """Show why translation fails in the status, without one status per failed line."""
-        if not error or error.startswith("Skipped to keep up"):
-            return  # backlog skips are a choice, not a fault
+        if not error:
+            return
         now = self._clock()
+        if messages.is_slow_failure(error):
+            # One late line is noise; several within the window mean the model is too slow.
+            self._slow_ns.append(now)
+            while self._slow_ns and now - self._slow_ns[0] > SLOW_MODEL_WINDOW_S * 1e9:
+                self._slow_ns.popleft()
+            if len(self._slow_ns) < SLOW_MODEL_LINES:
+                return
+            error = messages.model_slow(len(self._slow_ns), SLOW_MODEL_WINDOW_S)
         if (error != self._failure_message
                 or now - self._failure_published_ns >= FAILURE_MESSAGE_INTERVAL_S * 1e9):
             self._failure_message = error
@@ -620,7 +802,7 @@ class TranslationSession:
         if done.state == LineState.TRANSLATED:
             timings.setdefault("translated", self._clock())
             self.stats["lines_translated"] += 1
-            if self._failure_message:
+            if self._failure_message and not self._recently_slow():
                 self._failure_message = ""
                 if self._state in ("live", "reconnecting"):
                     self._publish_status(message="")
@@ -629,6 +811,246 @@ class TranslationSession:
             self._note_translation_failure(done.error)
         line = replace(done, original=original, speaker_id=speaker, timings_ns=timings)
         self._store(line)
-        if (line.state == LineState.TRANSLATED and line.translation and self._speech is not None
-                and not self.closed):
-            self._speech.put_nowait(line.translation)
+        if (line.state == LineState.TRANSLATED and line.translation and self._speaking
+                and self._speech is not None and not self.closed):
+            self._speech.put_nowait((line.translation, line.target_language or self.options.target_language))
+
+    def _recently_slow(self) -> bool:
+        now = self._clock()
+        while self._slow_ns and now - self._slow_ns[0] > SLOW_MODEL_WINDOW_S * 1e9:
+            self._slow_ns.popleft()
+        return len(self._slow_ns) >= SLOW_MODEL_LINES
+
+    # -- changes while running -----------------------------------------------------
+
+    def apply_settings(self, changes: Mapping[str, Any]) -> dict:
+        """Accept or refuse a change of mode, target language, voice, output device or source.
+
+        Call on the session's loop. Returns at once: changes that need no I/O
+        (target language, showing or hiding subtitles, speech off) are in
+        effect when this returns; the rest (speech on, a new voice or output
+        device, a new source) run in the background, listed in
+        ``applying``, and the status reports how they ended. Raises
+        SettingRefused with the reason and the fix.
+        """
+        if self._loop is None or self._done is None or self._done.is_set() \
+                or self._state in ("stopping", "idle", "failed"):
+            raise SettingRefused(messages.NOT_RUNNING)
+        unknown = sorted(set(changes) - SETTING_FIELDS)
+        if unknown:
+            raise SettingRefused(f"Unknown setting {unknown[0]!r}. These can change while running: "
+                                 "mode, speak, target_language, voice_id, output_device, source.")
+        opts = self.options
+        accepted: dict[str, Any] = {}
+
+        speak, subtitles = opts.speak, opts.subtitles
+        if changes.get("mode") is not None:
+            mode = parse_mode(changes["mode"])
+            speak, subtitles = mode != "subtitles", mode != "voice"
+        if changes.get("speak") is not None:
+            want = bool(changes["speak"])
+            if changes.get("mode") is not None and want != speak:
+                raise SettingRefused(f"--speak {'on' if want else 'off'} does not fit mode "
+                                     f"{parse_mode(changes['mode'])!r}; pass only one of them.")
+            if want != speak:
+                speak, subtitles = want, True
+
+        target = opts.target_language
+        raw_target = str(changes.get("target_language") or "").strip()
+        if raw_target:
+            try:
+                lang = languages.get(raw_target)
+            except languages.UnknownLanguageError as exc:
+                raise SettingRefused(f"Subtitle language: {exc}") from None
+            target = lang.iso639_1 or lang.iso639_3
+        if speak:
+            lang = languages.get(target)
+            if not lang.tts_flash_v2_5_supported:
+                raise SettingRefused(messages.not_speakable(lang.english_name))
+
+        voice = str(changes.get("voice_id") or "").strip() or opts.voice_id or DEFAULT_VOICE_ID
+        if "/" in voice or any(ch.isspace() for ch in voice):
+            raise SettingRefused(f"{voice!r} is not an ElevenLabs voice id. List the voices with: "
+                                 "hermes hermeneus voices")
+        device = str(changes.get("output_device") or "").strip() or opts.output_device or ""
+        if speak and not device:
+            raise SettingRefused(messages.NEED_DEVICE)
+
+        source = _source_from(changes.get("source"))
+        if source is not None and (source.backend, source.source_id) == (opts.source.backend, opts.source.source_id):
+            source = None  # already capturing it
+        if source is not None and self._c.capture_factory is None:
+            raise SettingRefused("This session cannot change its source while running. Stop translation and "
+                                 "start it again with --source.")
+
+        cur_voice, cur_device = opts.voice_id or DEFAULT_VOICE_ID, opts.output_device or ""
+        speaker_needed = speak and (not self._speaking or self._c.speaker is None
+                                    or voice != cur_voice or device != cur_device)
+        if speaker_needed and self._c.speaker_factory is None:
+            raise SettingRefused("This session cannot start or change spoken translation while running. "
+                                 "Stop translation and start it again with --speak, --voice or --device.")
+
+        # In effect now: the target language, showing or hiding subtitles while
+        # speech stays on, and speech off.
+        if target != opts.target_language:
+            accepted["target_language"] = target
+        new_subtitles = subtitles if (opts.speak and speak) else opts.subtitles
+        if opts.speak and not speak:
+            accepted["mode"] = "subtitles"
+        elif opts.speak and speak and new_subtitles != opts.subtitles:
+            accepted["mode"] = "both" if new_subtitles else "voice"
+        self.options = replace(self.options, target_language=target, subtitles=new_subtitles)
+        self._want_speech = speak
+        stop_speech = opts.speak and not speak
+        if stop_speech:
+            self._stop_speaking_now()
+
+        # In the background, one request after another.
+        applying: list[str] = []
+        if source is not None:
+            applying.append("source")
+        if speaker_needed:
+            if not self._speaking or self._c.speaker is None:
+                applying.append("speak")
+            else:
+                if voice != cur_voice:
+                    applying.append("voice_id")
+                if device != cur_device:
+                    applying.append("output_device")
+        if applying or stop_speech:
+            self._applying.extend(f for f in applying if f not in self._applying)
+            self._start_job(self._apply_job(source=source, speaker=(voice, device, subtitles) if speaker_needed else None,
+                                            close_speaker=stop_speech, fields=applying))
+        if accepted or applying:
+            self.stats["settings_changes"] += 1
+        self._publish_status()
+        return {"accepted": accepted, "applying": applying, "status": self.bus.status()}
+
+    def _stop_speaking_now(self) -> None:
+        """No new sentence is queued or spoken from here on; the speaker closes in the background."""
+        self._speaking = False
+        self.options = replace(self.options, speak=False, subtitles=True)
+        if self._speech is not None:
+            while not self._speech.empty():
+                self._speech.get_nowait()
+
+    def _start_job(self, coro: Awaitable) -> None:
+        job = asyncio.get_running_loop().create_task(coro, name="hermeneus:settings")
+        self._jobs.add(job)
+        job.add_done_callback(self._jobs.discard)
+
+    def _turn_speech_off(self, message: str) -> None:
+        if not self._speaking:
+            return
+        self._want_speech = False
+        self._stop_speaking_now()
+        self._start_job(self._apply_job(source=None, speaker=None, close_speaker=True, fields=[]))
+        self._publish_status(message=message)
+
+    async def _apply_job(self, *, source: Optional[CaptureSource], speaker: Optional[tuple],
+                         close_speaker: bool, fields: list[str]) -> None:
+        assert self._settings_lock is not None
+        problems: list[str] = []
+        try:
+            async with self._settings_lock:
+                if close_speaker and not self._want_speech:
+                    await self._close_speaker()
+                if source is not None:
+                    try:
+                        await self._switch_source(source)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        problems.append(f"Source not changed: {exc} Still capturing "
+                                        f"{self.options.source.label}.")
+                if speaker is not None and not self.closed:
+                    try:
+                        await self._switch_speaker(*speaker)
+                    except asyncio.CancelledError:
+                        raise
+                    except Exception as exc:
+                        what = "Spoken translation not changed" if self._speaking else "Spoken translation not started"
+                        problems.append(f"{what}: {str(exc).rstrip('.')}." )
+        finally:
+            for f in fields:
+                if f in self._applying:
+                    self._applying.remove(f)
+        if self.closed:
+            return
+        if problems:
+            self._publish_status(message=" ".join(problems))
+        elif fields:
+            self._publish_status(message="")
+
+    async def _close_speaker(self) -> None:
+        task, self._speech_task = self._speech_task, None
+        if task is not None:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        old, self._c.speaker = self._c.speaker, None
+        if old is not None:
+            await _close_quietly(old, "speaker")
+
+    async def _switch_speaker(self, voice: str, device: str, subtitles: bool) -> None:
+        """Start a speaker with the new voice or device, then retire the old one. The old one keeps
+        speaking until the new one is ready, and stays when the new one cannot start."""
+        source = self.options.source
+        assert self._c.speaker_factory is not None
+        speaker = self._c.speaker_factory(voice, device, source)
+        try:
+            start = getattr(speaker, "start", None)
+            if start is not None:
+                await asyncio.wait_for(start(self.options.target_language), SPEAKER_START_TIMEOUT_S)
+        except BaseException:
+            await _close_quietly(speaker, "new speaker")
+            raise
+        if not self._want_speech or self.closed:
+            await _close_quietly(speaker, "new speaker")  # speech was turned off while this one started
+            return
+        old = self._c.speaker
+        task, self._speech_task = self._speech_task, None
+        if task is not None:
+            # The sentence the old speaker is sending is cut; the queue keeps its order.
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        self._c.speaker = speaker
+        self._speaker_error_seen = ""
+        self.options = replace(self.options, speak=True, subtitles=subtitles, voice_id=voice, output_device=device)
+        self._speaking = True
+        self._ensure_speech_loop()
+        if old is not None:
+            await _close_quietly(old, "previous speaker")
+
+    async def _switch_source(self, source: CaptureSource) -> None:
+        """Start capture of ``source`` next to the old one, then stop the old one. Same STT session.
+
+        Audio of the new source is dropped until the old capture has
+        stopped, so the two never mix; the gap is the old capture's stop
+        time. When the new source cannot start, the old one keeps running.
+        """
+        assert self._c.capture_factory is not None and self._frames is not None
+        if self._speaking and self._c.route_check is not None and self.options.output_device:
+            # Spoken translation must not be captured again from the new source.
+            await asyncio.to_thread(self._c.route_check, self.options.output_device, source)
+        backend = self._c.capture_factory(source)
+        sink = _SwitchSink(self._frames.put)
+        starting = asyncio.ensure_future(asyncio.to_thread(backend.start, source, sink.put))
+        try:
+            await asyncio.shield(starting)
+        except asyncio.CancelledError:
+            # The session is stopping while the new capture starts; stop it once it is up.
+            starting.add_done_callback(
+                lambda f: None if f.cancelled() or f.exception() is not None
+                else threading.Thread(target=backend.stop, daemon=True).start())
+            raise
+        old = self._c.capture
+        self._c.capture = backend
+        self.options = replace(self.options, source=source)
+        self._capture_note = ""
+        try:
+            await asyncio.wait_for(_in_daemon_thread(old.stop, "hermeneus-capture-switch"), STOP_TIMEOUT_S)
+        except asyncio.TimeoutError:
+            logger.warning("hermeneus: the previous capture took longer than %.1fs to stop", STOP_TIMEOUT_S)
+        except Exception as exc:
+            logger.warning("hermeneus: the previous capture failed to stop: %s", exc)
+        sink.open = True

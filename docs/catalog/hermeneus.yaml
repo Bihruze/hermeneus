@@ -14,6 +14,11 @@ version: "0.1.0"
 # screenshots:
 #   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/screenshots/pane-subtitles.png
 readme: true
+# macos only: macOS is tested on real audio. The Windows backend is implemented
+# and reviewed against documentation but has not run on a Windows machine, so
+# it stays out of this entry; `hermes plugins install` refuses an OS the entry
+# does not list (hermes_cli/plugins_cmd_catalog.py _refuse_unsupported_catalog_platform).
+# Add windows only after a real Windows run (see the W24 report).
 platforms:
   - macos
 capabilities:

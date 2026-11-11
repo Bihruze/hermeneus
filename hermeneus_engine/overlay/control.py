@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import ctypes
 import errno
-import fcntl
 import importlib.util
 import json
 import os
@@ -128,6 +127,9 @@ def check_platform(platform: Optional[str]) -> None:
 
 def running_pid(data_dir: Path) -> Optional[int]:
     """The overlay's pid while one holds the lock, else None."""
+    if sys.platform != "darwin":
+        return None  # the overlay runs only on macOS; fcntl does not exist on Windows
+    import fcntl
     path = lock_file(data_dir)
     try:
         fd = os.open(path, os.O_RDONLY)

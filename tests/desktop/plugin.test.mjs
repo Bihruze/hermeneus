@@ -453,6 +453,18 @@ test('register contributes one pane and one status bar item and opens the event 
   assert.equal(ctx.socketPath, '/events')
 })
 
+test('settings posts the change and applies the status inside the answer', async () => {
+  const reply = { ok: true, accepted: { target_language: 'de' }, applying: ['speak'], status: { state: 'live', target_language: 'de', applying: ['speak'] } }
+  const ctx = fakeCtx({ '/settings': reply })
+  const ctrl = createController(ctx)
+
+  await ctrl.settings({ target_language: 'de', speak: true, output_device: 'Speakers' })
+
+  assert.deepEqual(ctx.calls, [{ path: '/settings', opts: { method: 'POST', body: { target_language: 'de', speak: true, output_device: 'Speakers' } } }])
+  assert.equal(ctrl.store.get().status.target_language, 'de')
+  assert.deepEqual(ctrl.store.get().status.applying, ['speak'])
+})
+
 function live(ctrl) {
   ctrl.store.set({ ...ctrl.store.get(), status: { state: 'live' } })
 }
@@ -560,4 +572,47 @@ test('the theme is sent once per change, in the shape POST /overlay/theme takes'
 test('the pane resolves the same tokens the backend table names', () => {
   assert.deepEqual(Object.keys(OVERLAY_COLOR_TOKENS), ['surface', 'text', 'text_secondary', 'text_tertiary', 'stroke'])
   assert.deepEqual([...OVERLAY_TEXT_SIZES], [20, 26, 34, 44])
+})
+
+test('the mode select shows the running mode, or the saved choice while idle', () => {
+  const { shownMode } = plugin
+  assert.equal(shownMode({ mode: 'voice', speak: true }, {}, true), 'voice')
+  assert.equal(shownMode({ speak: true }, {}, true), 'both')
+  assert.equal(shownMode({}, {}, true), 'subtitles')
+  assert.equal(shownMode(null, { speak: true, mode: 'voice' }, false), 'voice')
+  assert.equal(shownMode(null, { speak: true, mode: 'subtitles' }, false), 'both')
+  assert.equal(shownMode(null, { speak: false, mode: 'voice' }, false), 'subtitles')
+})
+
+test('one mode choice carries speech, output and voice; no separate speak switch', () => {
+  const { modeChoice } = plugin
+  const outputs = [{ device_id: 'Speakers', label: 'Speakers' }, { device_id: 'AirPods', label: 'AirPods' }]
+  assert.deepEqual(modeChoice('subtitles', { outputs }), { patch: { speak: false }, change: { mode: 'subtitles' } })
+  assert.deepEqual(modeChoice('voice', { outputId: 'AirPods', outputs, voiceId: 'v1' }), {
+    patch: { speak: true, mode: 'voice', outputDevice: 'AirPods' },
+    change: { mode: 'voice', output_device: 'AirPods', voice_id: 'v1' }
+  })
+  // No output chosen yet: the first safe output the backend listed.
+  assert.deepEqual(modeChoice('both', { outputId: 'Gone', outputs }).change, { mode: 'both', output_device: 'Speakers' })
+  // No safe output at all: the backend refuses with its own message.
+  assert.deepEqual(modeChoice('both', { outputs: [] }).change, { mode: 'both' })
+})
+
+test('the voice popover trigger names the chosen voice, the default voice, or the fallback', () => {
+  const { voiceLabel } = plugin
+  const voices = [{ voice_id: 'a', name: 'Ada' }, { voice_id: 'OZ0', name: 'Talia', is_default: true }]
+  assert.equal(voiceLabel(voices, 'a', 'Default voice'), 'Ada')
+  assert.equal(voiceLabel(voices, '', 'Default voice'), 'Talia')
+  assert.equal(voiceLabel(voices, 'zz', 'Default voice'), 'zz')
+  assert.equal(voiceLabel([], '', 'Default voice'), 'Default voice')
+})
+
+test('the controls row imports the SDK popover and no switch', async () => {
+  const { readFileSync } = await import('node:fs')
+  const source = readFileSync(new URL('../../desktop/plugin.js', import.meta.url), 'utf8')
+  const sdk = /import\s*\{([^}]*)\}\s*from\s*'@hermes\/plugin-sdk'/.exec(source)[1]
+  for (const name of ['Popover', 'PopoverContent', 'PopoverTrigger']) {
+    assert.match(sdk, new RegExp(`\\b${name}\\b`))
+  }
+  assert.doesNotMatch(sdk, /\bSwitch\b/)
 })
