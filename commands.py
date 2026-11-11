@@ -12,7 +12,7 @@ import json
 import sys
 from typing import Any, Callable, Optional, TextIO
 
-from . import glue
+from . import glue, onboarding
 from .hermeneus_engine import components, doctor, overlay_page, stop_signals
 from .hermeneus_engine.platform_words import the_machine, this_machine
 from .hermeneus_engine.contracts import FeedbackRiskError
@@ -128,6 +128,9 @@ class Plugin:
     async def start(self, choices: Choices, *, platform: Optional[str] = None) -> dict:
         if refusal := remote_refusal(platform, self.settings()):
             raise RemoteStartRefused(refusal)
+        if onboarding.audio_check_running(self.controller.data_dir):
+            # The first-run check is capturing with its own tap and test tone; never overlap it.
+            raise onboarding.AudioCheckRunning(onboarding.AUDIO_CHECK_RUNNING_MESSAGE)
         options = await self.resolve_options(choices)
         if self._build is None:
             await asyncio.to_thread(glue.model_preflight)
@@ -667,6 +670,9 @@ async def cmd_run(plugin: Plugin, args: argparse.Namespace, *, out: TextIO = sys
         except UsageError as exc:
             print(f"hermeneus: {exc}", file=err)
             return 2
+        if onboarding.audio_check_running(data_dir):
+            print(f"hermeneus: could not start: {onboarding.AUDIO_CHECK_RUNNING_MESSAGE}", file=err)
+            return 1
         runtime = SessionRuntime(data_dir, options, plugin.builder(), owner="cli", overlay_page=plugin.overlay_page())
         sub = runtime.bus.subscribe()
         try:

@@ -224,7 +224,8 @@ def test_api_voices_lists_the_account_and_reports_errors(api, monkeypatch):
 def test_api_overlay_routes(api):
     client, module, plugin, _rig = api
     answer = client.get("/api/plugins/hermeneus/overlay").json()
-    assert answer["visible"] is False and answer["armed"] is False and answer["settings"]["max_lines"] == 2
+    # The overlay setting defaults to on, so it is armed for the first session.
+    assert answer["visible"] is False and answer["armed"] is True and answer["settings"]["max_lines"] == 2
     assert client.post("/api/plugins/hermeneus/overlay", json={"visible": "yes"}).status_code == 400
     # A client that is not on 127.0.0.1 is a remote Desktop: the overlay is refused, not opened there.
     answer = _client(api, "192.168.1.20").post("/api/plugins/hermeneus/overlay", json={"visible": True})
@@ -311,3 +312,146 @@ def test_api_remote_start_with_opt_in(api, data_dir, monkeypatch):
     remote = _client(api, "192.168.1.20")
     r = remote.post("/api/plugins/hermeneus/start", json=START_BODY)
     assert r.status_code == 200 and r.json()["state"] in ("starting", "live")
+
+
+# -- first-run setup (W29) ------------------------------------------------------------
+
+@pytest.fixture
+def setup_api(api, monkeypatch):
+    client, module, plugin, rig = api
+    monkeypatch.setattr(module._glue, "get_secret", lambda name: None)
+    monkeypatch.setattr(module._glue, "aux_config", lambda: {})
+    monkeypatch.setattr(module._glue, "main_config", lambda: {"model": {"default": "big", "provider": "nous"}})
+    monkeypatch.setattr(module._glue, "display_language", lambda: "")
+    monkeypatch.setattr(module._onboarding, "system_locale", lambda: "C")
+    results = []
+    check = module._onboarding.AudioCheck(lambda timeout_s: results.pop(0), lambda: plugin.controller.data_dir,
+                                          available=lambda: (True, ""), clock=lambda: 5.0)
+    monkeypatch.setattr(module, "audio_check", check)
+    return client, module, plugin, results
+
+
+def test_api_setup_reports_each_step_and_never_the_key(setup_api, monkeypatch):
+    client, module, _plugin, _results = setup_api
+    state = client.get("/api/plugins/hermeneus/setup", params=[("locale", "tr-TR"), ("locale", "en")]).json()
+    assert state["complete"] is False
+    assert state["key"]["set"] is False and state["key"]["url"].startswith("https://elevenlabs.io/")
+    assert state["audio"]["state"] == "unknown" and "Privacy_ScreenCapture" in state["audio"]["settings_url"]
+    # No live_translate pin: the main Hermes model translates, a faster one is only suggested.
+    assert state["model"] == {"route": "main", "provider": "nous", "model": "big", "suggest_faster": True,
+                              "ready": True}
+    # No Hermes display language chosen: the system language the Desktop app reports.
+    assert state["language"] == {"code": "tr", "from": "system"}
+    monkeypatch.setattr(module._glue, "display_language", lambda: "de")
+    monkeypatch.setattr(module._glue, "get_secret", lambda name: "sk-not-shown")
+    state = client.get("/api/plugins/hermeneus/setup", params={"locale": "tr-TR"}).json()
+    assert state["language"] == {"code": "de", "from": "hermes"} and state["key"]["set"] is True
+    assert "sk-not-shown" not in json.dumps(state)
+
+
+def test_api_setup_audio_check_denied_then_retry_then_complete(setup_api, monkeypatch):
+    from hermeneus_engine.capture import tap_doctor
+    client, module, _plugin, results = setup_api
+    monkeypatch.setattr(module._glue, "get_secret", lambda name: "k")
+    results.extend([tap_doctor.DoctorResult(False, tap_doctor.PERMISSION_DENIED, "macOS is giving silence"),
+                    tap_doctor.DoctorResult(True, tap_doctor.OK, "System audio capture works.")])
+
+    def settle():
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = client.get("/api/plugins/hermeneus/setup").json()
+            if state["audio"]["state"] != "running":
+                return state
+            time.sleep(0.02)
+        raise AssertionError("the audio check never ended")
+
+    assert client.post("/api/plugins/hermeneus/setup/audio-check").json()["state"] in ("running", "denied")
+    state = settle()
+    assert state["audio"]["state"] == "denied" and state["complete"] is False
+    assert client.post("/api/plugins/hermeneus/setup/audio-check").status_code == 200
+    state = settle()
+    assert state["audio"]["state"] == "ok" and state["complete"] is True
+
+
+def test_api_setup_audio_check_and_settings_refused_from_remote_and_while_running(setup_api, monkeypatch):
+    client, module, _plugin, results = setup_api
+    remote = _client(setup_api[:1] + (None, None, None), "192.168.1.20")
+    assert remote.post("/api/plugins/hermeneus/setup/audio-check").status_code == 403
+    assert remote.post("/api/plugins/hermeneus/setup/open-privacy-settings").status_code == 403
+    assert results == []  # nothing ran
+    assert client.post("/api/plugins/hermeneus/start", json=START_BODY).status_code == 200
+    r = client.post("/api/plugins/hermeneus/setup/audio-check")
+    assert r.status_code == 409 and "stop it first" in r.json()["detail"]
+    client.post("/api/plugins/hermeneus/stop")
+
+
+def test_api_open_privacy_settings_failure_names_the_pane(setup_api, monkeypatch):
+    client, module, _plugin, _results = setup_api
+    opened = []
+    monkeypatch.setattr(module._onboarding, "open_privacy_settings", lambda: opened.append(True))
+    assert client.post("/api/plugins/hermeneus/setup/open-privacy-settings").json() == {"ok": True}
+
+    def broken():
+        raise RuntimeError("open failed")
+
+    monkeypatch.setattr(module._onboarding, "open_privacy_settings", broken)
+    r = client.post("/api/plugins/hermeneus/setup/open-privacy-settings")
+    assert r.status_code == 500 and "Screen & System Audio Recording" in r.json()["detail"]
+    assert opened == [True]
+
+
+# -- A6 fixes ------------------------------------------------------------------------
+
+def test_api_start_is_409_while_the_audio_check_runs(setup_api, monkeypatch, data_dir):
+    """A6-6: the chip, its popover and the pane all start through POST /start."""
+    import threading
+    from hermeneus_engine.capture import tap_doctor
+    client, module, plugin, _results = setup_api
+    gate = threading.Event()
+
+    def slow(timeout_s):
+        gate.wait(5)
+        return tap_doctor.DoctorResult(True, tap_doctor.OK, "works")
+
+    check = module._onboarding.AudioCheck(slow, lambda: plugin.controller.data_dir, available=lambda: (True, ""))
+    monkeypatch.setattr(module, "audio_check", check)
+    assert client.post("/api/plugins/hermeneus/setup/audio-check").json()["state"] == "running"
+    r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 409 and "audio check is running" in r.json()["detail"]
+    assert lock_holder(data_dir) is None
+    gate.set()
+    deadline = time.monotonic() + 5
+    while check.busy() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+    assert r.status_code == 200
+    client.post("/api/plugins/hermeneus/stop")
+
+
+def test_slash_and_api_start_refuse_while_another_copy_runs_the_check(api, data_dir):
+    """A6-6: /translate start runs in another copy of the plugin; the marker file reaches it."""
+    import os
+    client, module, plugin, _rig = api
+    marker = Path(plugin.controller.data_dir) / module._onboarding.MARKER_FILE
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    marker.write_text(json.dumps({"pid": os.getpid(), "at": time.time()}))
+    try:
+        r = client.post("/api/plugins/hermeneus/start", json=START_BODY)
+        assert r.status_code == 409 and "audio check is running" in r.json()["detail"]
+        reply = asyncio.run(plugin.slash("start --to tr", platform="desktop"))
+        assert "audio check is running" in reply
+    finally:
+        marker.unlink()
+    assert lock_holder(data_dir) is None
+
+
+def test_api_setup_tells_another_computer_nothing(setup_api, monkeypatch):
+    """A6-7: GET /setup is local only; a remote or proxied client learns no key, model or language."""
+    client, module, _plugin, _results = setup_api
+    monkeypatch.setattr(module._glue, "get_secret", lambda name: "sk-not-shown")
+    for remote in (_client(setup_api[:1] + (None, None, None), "192.168.1.20"),
+                   _client(setup_api[:1] + (None, None, None), "127.0.0.1", headers={"X-Forwarded-For": "1.2.3.4"})):
+        body = remote.get("/api/plugins/hermeneus/setup").json()
+        assert body["remote"] is True and set(body) == {"remote", "complete", "message"}
+        assert "key" not in body and "model" not in body and "language" not in body
+    assert "key" in client.get("/api/plugins/hermeneus/setup").json()

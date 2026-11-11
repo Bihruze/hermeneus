@@ -30,13 +30,13 @@ OPACITY_MIN, OPACITY_MAX = 0, 100
 STYLES = ("theme", "banner")
 
 DEFAULTS: dict[str, Any] = {
-    KEY_AUTO: False,
+    KEY_AUTO: True,
     KEY_TEXT_SIZE: 26,
     KEY_MAX_LINES: 2,
     KEY_SHOW_ORIGINAL: True,
     KEY_OPACITY: 80,
     KEY_SHOW_SPEAKER: True,
-    KEY_STYLE: "theme",
+    KEY_STYLE: "banner",
 }
 
 

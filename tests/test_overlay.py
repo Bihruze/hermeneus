@@ -41,7 +41,7 @@ def chars(text, run):  # one unit per character; labels are as wide as their tex
 
 def test_settings_defaults_and_clamping():
     s = ovs.from_settings({})
-    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (False, 26, 2, True, 80, True)
+    assert (s.auto, s.text_size, s.max_lines, s.show_original, s.opacity, s.show_speaker) == (True, 26, 2, True, 80, True)
     s = ovs.from_settings({"overlay_text_size": 200, "overlay_max_lines": 0, "overlay_opacity": "-5",
                            "overlay_show_original": "off", "overlay": "yes", "overlay_show_speaker": 0})
     assert (s.text_size, s.max_lines, s.opacity, s.show_original, s.auto, s.show_speaker) == (64, 1, 0, False, True, False)
@@ -413,8 +413,12 @@ def test_service_auto_opens_only_when_the_setting_is_on(data_dir):
         shown.append(session_running)
         return {"visible": True, "pid": 1, "message": "the overlay is open"}
 
-    off = OverlayService(lambda: data_dir, lambda: {}, status, show_fn=show_fn)
+    off = OverlayService(lambda: data_dir, lambda: {"overlay": False}, status, show_fn=show_fn)
     assert run(off.auto("cli")) == "" and shown == []
+    # Never chosen: on, so the first Start opens the overlay (W29, one-click requirement).
+    default = OverlayService(lambda: data_dir, lambda: {}, status, show_fn=show_fn)
+    assert run(default.auto("cli")) == "The subtitle overlay is open." and shown == [True]
+    shown.clear()
     on = OverlayService(lambda: data_dir, lambda: {"overlay": True}, status, show_fn=show_fn)
     assert run(on.auto("cli")) == "The subtitle overlay is open." and shown == [True]
     assert "did not open" in run(on.auto("discord"))
@@ -703,11 +707,13 @@ def test_ink_is_opaque_below_50_percent_so_the_outline_never_shows_through_the_l
 
 # -- banner style ----------------------------------------------------------------------
 
-def test_overlay_style_defaults_to_theme_and_accepts_banner_only():
-    assert ovs.from_settings({}).style == "theme"
+def test_overlay_style_defaults_to_banner_and_accepts_theme():
+    # banner is the default since W29 (Seher's decision); theme follows the Hermes Desktop theme.
+    assert ovs.from_settings({}).style == "banner"
     assert ovs.from_settings({"overlay_style": " Banner "}).style == "banner"
-    assert ovs.from_settings({"overlay_style": "neon"}).style == "theme"
-    assert ovs.from_settings({"overlay_style": 3}).style == "theme"
+    assert ovs.from_settings({"overlay_style": " Theme "}).style == "theme"
+    assert ovs.from_settings({"overlay_style": "neon"}).style == "banner"
+    assert ovs.from_settings({"overlay_style": 3}).style == "banner"
     s = ovs.from_settings({"overlay_style": "banner"})
     assert ovs.OverlaySettings.from_json(s.to_json()) == s
 
@@ -747,3 +753,15 @@ def test_banner_text_and_speakers_meet_wcag_aa_on_the_navy_and_stay_apart():
     for i, a in enumerate(colors):
         for b in colors[i + 1:]:
             assert _delta_e(a, b) > 20
+
+
+def test_pane_style_picker_offers_the_settings_choices_with_the_default_first():
+    import re
+    from pathlib import Path
+    source = (Path(__file__).resolve().parents[1] / "desktop" / "plugin.js").read_text()
+    m = re.search(r"export const OVERLAY_STYLES = Object\.freeze\(\[([^\]]*)\]\)", source)
+    offered = [s.strip().strip("'") for s in m.group(1).split(",")]
+    assert set(offered) == set(ovs.STYLES)
+    assert offered[0] == ovs.DEFAULTS[ovs.KEY_STYLE] == "banner"
+    # The pane writes it through the same settings route as the other look controls.
+    assert "setOverlayLook({ overlay_style: id })" in source

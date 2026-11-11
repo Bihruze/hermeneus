@@ -249,3 +249,24 @@ def settings(ctx: Any = None) -> dict:
 def aux_config() -> dict:
     cfg = (_config().get("auxiliary") or {}).get(AUX_TASK) or {}
     return cfg if isinstance(cfg, dict) else {}
+
+
+def display_language() -> str:
+    """Hermes's display language (``display.language``; "en" by default, hermes_cli/config_defaults.py:884-886).
+
+    Desktop reads the same key for its UI language (apps/desktop/src/i18n/context.tsx:48).
+    """
+    try:
+        display = _config().get("display") or {}
+    except Exception:
+        return ""
+    value = display.get("language") if isinstance(display, dict) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def main_config() -> dict:
+    """The parts of config.yaml the first-run setup shows: the main ``model`` entry only."""
+    try:
+        return {"model": _config().get("model")}
+    except Exception:
+        return {}
