@@ -1,28 +1,100 @@
-![Hermeneus: a winged figure beside a glowing globe wrapped in lines of text in many scripts](docs/banner.jpg)
+<p align="center"><img src="docs/banner.jpg" alt="Hermeneus: a winged figure beside a glowing globe wrapped in lines of text in many scripts" width="100%"></p>
 
-# Hermeneus
+<h1 align="center">HERMENEUS</h1>
 
-Live translation for Hermes.
+<p align="center"><strong>Live translation for Hermes</strong></p>
+
+Hermeneus listens to any voice playing on your computer and shows it in your language as subtitles. It can also speak the translation to you. It listens in 100 languages and speaks in 32.
 
 Hermeneus is a plugin for [Hermes Agent](https://hermes-agent.nousresearch.com/), an open-source AI agent that you use from a terminal, from chat apps or from the Hermes Desktop app.
 
-In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* means interpreter, a person who carries speech from one language into another. English *hermeneutics*, the study of interpretation, comes from the same word family. The Greeks linked the word to Hermes; modern scholars find no agreed origin for it. Hermes Agent carries the messenger's name. Hermeneus is the interpreter that works beside it: it listens to any voice playing on your computer and gives it to you in your own language, as subtitles or as speech.
+<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build with the owner. -->
+<p align="center"><img src="docs/media/strip-live.gif" alt="The floating subtitle strip translating a live news stream into Turkish" width="100%"></p>
 
-<!-- CAPTURE-PENDING: docs/media/strip-live.gif, the floating subtitle strip over a live news stream, recorded from this build. -->
-![The floating subtitle strip translating a live news stream into Turkish](docs/media/strip-live.gif)
+## The name
 
-<!-- CAPTURE-PENDING: docs/media/pane.png, the Hermeneus pane in Hermes Desktop during a session. -->
-![The Hermeneus pane in Hermes Desktop during a session](docs/media/pane.png)
+In Greek myth, Hermes is the messenger of the gods. The Greek word *hermeneus* means interpreter, a person who carries speech from one language into another. English *hermeneutics*, the study of interpretation, comes from the same word family. The Greeks linked the word to Hermes; modern scholars find no agreed origin for it. Hermes Agent carries the messenger's name. Hermeneus is the interpreter that works beside it.
 
-## What it does
+## Works with
 
-- Hermeneus captures the audio of one app, or of all system audio, on your Mac.
-- ElevenLabs Scribe v3 Live turns the speech into text as it is spoken.
-- The model you already use in Hermes translates each finished sentence.
-- The translation appears as a subtitle in a floating strip, in a Hermes Desktop pane, on a local page for OBS and in your terminal.
-- Spoken translation is optional. When you turn it on, ElevenLabs Flash v2.5 reads each translated line aloud on an output device you choose.
+### Apps and platforms
 
-This release is tested on macOS with real audio. Windows support is a preview that has not yet run on a Windows machine (see [Windows (preview)](#windows-preview)). Linux support is planned.
+Hermeneus captures the sound an app plays, so it does not depend on the site or app. The marks below say what has run on real audio with this release.
+
+| App or platform | Status |
+| --- | --- |
+| YouTube | Tested with three YouTube videos (news, a talk show, a late-night monologue) downloaded and played by a local player app. Not yet tested on the YouTube page in a browser. |
+| Twitch | Not yet tested. |
+| Discord | Not yet tested. |
+| X Spaces | Not yet tested. |
+| Any app that plays audio | Tested with a local player app through the process tap (the YouTube videos above), and with synthetic speech through a virtual audio device. Google Chrome was captured only with a test tone. |
+
+### Devices
+
+| Device | Status |
+| --- | --- |
+| Mac with macOS 14.2 or later | Tested on real audio (on macOS 27.0.1). Driverless capture through a Core Audio process tap. |
+| Mac with macOS 13 to 14.1 | Uses a virtual audio device that you install yourself, such as BlackHole 2ch (see [the fallback](#fallback-virtual-device-with-a-multi-output-device)). The fallback ran on real speech on a newer macOS, not yet on macOS 13 to 14.1 itself. |
+| Windows | Preview, not yet run on a Windows machine. See [docs/windows.md](docs/windows.md). |
+| Linux | Planned. |
+
+### Where subtitles appear
+
+- **Floating strip:** a subtitle strip above every other app on your Mac, including full-screen video.
+- **Hermes Desktop pane:** the subtitles with their originals and the controls.
+- **OBS page:** a local page for OBS or a second screen, off by default.
+- **Terminal:** `hermes hermeneus run` prints each translated line.
+
+Details for each are under [Using Hermeneus](#using-hermeneus).
+
+## Screenshots
+
+<!-- CAPTURE-PENDING: the eight files below come from the C1 captures of this build (light and dark). -->
+<table>
+<tr>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane in Hermes Desktop during a session" width="100%"></picture><br><sub>The Desktop pane during a session</sub></td>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/strip-dark.png"><img src="docs/media/strip-light.png" alt="The floating subtitle strip with its grip, resize handles and history tab labelled" width="100%"></picture><br><sub>The floating strip and its controls</sub></td>
+</tr>
+<tr>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/setup-dark.png"><img src="docs/media/setup-light.png" alt="The first-run setup in the Hermeneus pane" width="100%"></picture><br><sub>The first-run setup</sub></td>
+<td width="50%" align="center"><picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/look-menu-dark.png"><img src="docs/media/look-menu-light.png" alt="The overlay look menu with style, text size, lines, opacity and pace" width="100%"></picture><br><sub>The look menu for the strip</sub></td>
+</tr>
+</table>
+
+## Languages
+
+Hermeneus listens in 100 languages and speaks in 32. Subtitles can be shown in any of the 100. Translation quality in a language depends on your model.
+
+<!-- languages:start (generated by scripts/readme_languages.py; do not edit by hand) -->
+<details>
+<summary>Listens in 100 languages (subtitles in any of them)</summary>
+
+Afrikaans, Amharic, Arabic, Armenian, Assamese, Asturian, Azerbaijani, Belarusian, Bengali, Bosnian, Bulgarian, Burmese, Cantonese, Catalan, Cebuano, Chichewa, Croatian, Czech, Danish, Dutch, English, Estonian, Filipino, Finnish, French, Fulah, Galician, Ganda, Georgian, German, Greek, Gujarati, Hausa, Hebrew, Hindi, Hungarian, Icelandic, Igbo, Indonesian, Irish, Italian, Japanese, Javanese, Kabuverdianu, Kannada, Kazakh, Khmer, Korean, Kurdish, Kyrgyz, Lao, Latvian, Lingala, Lithuanian, Luo, Luxembourgish, Macedonian, Malay, Malayalam, Maltese, Mandarin Chinese, Māori, Marathi, Mongolian, Nepali, Northern Sotho, Norwegian, Occitan, Odia, Pashto, Persian, Polish, Portuguese, Punjabi, Romanian, Russian, Serbian, Shona, Sindhi, Sinhala, Slovak, Slovenian, Somali, Spanish, Swahili, Swedish, Tajik, Tamil, Telugu, Thai, Turkish, Ukrainian, Umbundu, Urdu, Uzbek, Vietnamese, Welsh, Wolof, Xhosa, Zulu.
+
+</details>
+<details>
+<summary>Speaks in 32 languages</summary>
+
+Arabic, Bulgarian, Croatian, Czech, Danish, Dutch, English, Filipino, Finnish, French, German, Greek, Hindi, Hungarian, Indonesian, Italian, Japanese, Korean, Malay, Mandarin Chinese, Norwegian, Polish, Portuguese, Romanian, Russian, Slovak, Spanish, Swedish, Tamil, Turkish, Ukrainian, Vietnamese.
+
+</details>
+<!-- languages:end -->
+
+The lists come from [`hermeneus_engine/languages.py`](hermeneus_engine/languages.py), which copies them from the ElevenLabs documentation: the Scribe v3 languages at https://elevenlabs.io/docs/capabilities/speech-to-text and the `eleven_flash_v2_5` languages at https://elevenlabs.io/docs/overview/models. Language codes are ISO 639-1 or ISO 639-3, for example `tr`, `de` or `fil`. Starting with `--speak` and a target outside the speaking list ends with a message that names the problem.
+
+## How it works
+
+```text
+  app audio  -->  Scribe v3 Live  -->  your Hermes model  -->  subtitles or speech
+  (capture)       (transcribe)         (translate)             (show or speak)
+```
+
+1. **Capture.** Hermeneus records the sound that one app, or the whole Mac, plays.
+2. **Transcribe.** ElevenLabs Scribe v3 Live turns the speech into text as it is spoken and tells speakers apart.
+3. **Translate.** Your Hermes model translates each finished sentence, with up to 3 earlier lines as context.
+4. **Show or speak.** The line appears in the strip, the pane, the OBS page and the terminal, and ElevenLabs Flash v2.5 can read it aloud.
+
+A translated line is ready about 2.1 to 2.3 s after the sentence ends (median on real ElevenLabs and Claude Haiku 5.5; see [Measured latency](#measured-latency)).
 
 ## Quick start
 
@@ -46,6 +118,9 @@ You need:
 
 4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again** (see [the permission](#the-system-audio-recording-permission) if it still fails).
 5. **Start.** The translation model is your main Hermes model, unless you pinned one for **Live translation**. The subtitle language is your Hermes or system language. Both are filled in. The source is all system audio by default. Press **Start**, then play a video or a stream with speech in it. Subtitles appear in the pane and in the floating strip above your other apps.
+
+   <!-- CAPTURE-PENDING: docs/media/pane-live-light.png and docs/media/pane-live-dark.png from the C1 captures. -->
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/pane-live-dark.png"><img src="docs/media/pane-live-light.png" alt="The Hermeneus pane during a session, with translated lines" width="100%"></picture>
 
 If the pane is closed, click **Hermeneus** in the status bar. Until setup is complete, that click opens the pane instead of starting. After the first run, one click on **Hermeneus** starts or stops translation with your last settings. The arrow next to it opens the source, language, mode, voice and overlay controls.
 
@@ -97,7 +172,7 @@ Without the permission macOS delivers silence instead of audio. The setup, the d
 
 Apps cannot read this permission directly: macOS keeps it in a database that apps can read only by asking for it or with Full Disk Access. The setup and the doctor therefore prove it with a test capture (see [The permission it asks for](#the-permission-it-asks-for)).
 
-## Where subtitles appear
+## Using Hermeneus
 
 Every place that shows the session shows the same lines. Every way of starting a session needs a target language: the setup fills it in, `--to` passes it, or the `target_language` setting holds it.
 
@@ -116,7 +191,7 @@ The strip floats near the bottom of the screen, above every other app, including
 
 The strip opens only on the Mac where the request comes from. A slash command from a chat platform, or a Desktop connected to a remote backend, is refused with a message.
 
-#### Subtitle pace
+### Subtitle pace
 
 The strip and the overlay page show text through a display queue that follows professional subtitle practice. The queue changes when text is shown, not how fast it is produced.
 
@@ -247,37 +322,7 @@ In a Hermes session:
 
 From a chat platform such as Telegram or Slack, `/translate start` and `/translate set --source` are refused with "Hermeneus captures audio on this Mac, so start it from the Mac (terminal or Hermes Desktop)." A start from chat would turn on capture on the Mac that runs Hermes while nobody may be at it. The `allow_remote_start` setting allows it. `/translate status`, `/translate stop` and the other `set` changes work from anywhere. The overlay is refused from a chat platform either way.
 
-## Languages
-
-Hermeneus listens in 100 languages and speaks in 32.
-
-- **Listening and subtitles:** the 100 languages ElevenLabs lists for Scribe v3 at https://elevenlabs.io/docs/capabilities/speech-to-text. Subtitles can be shown in any of them. Translation quality in a language depends on your model.
-- **Speaking:** the 32 languages of `eleven_flash_v2_5` listed at https://elevenlabs.io/docs/overview/models: Arabic, Bulgarian, Croatian, Czech, Danish, Dutch, English, Filipino, Finnish, French, German, Greek, Hindi, Hungarian, Indonesian, Italian, Japanese, Korean, Malay, Mandarin Chinese, Norwegian, Polish, Portuguese, Romanian, Russian, Slovak, Spanish, Swedish, Tamil, Turkish, Ukrainian, Vietnamese.
-
-The full tables and their sources are in [`hermeneus_engine/languages.py`](hermeneus_engine/languages.py). Language codes are ISO 639-1 or ISO 639-3, for example `tr`, `de` or `fil`. Starting with `--speak` and a target outside the speaking list ends with a message that names the problem.
-
-## How it works
-
-```text
-  app or system audio
-          |
-          v
-  capture on this Mac            Core Audio process tap (macOS 14.2+), or a virtual device
-          |
-          |  audio
-          v
-  ElevenLabs Scribe v3 Live      speech to text, speaker labels, language of each segment
-          |
-          |  finished sentence
-          v
-  your Hermes model              task live_translate, with up to 3 earlier lines as context
-          |
-          |  translated line
-          +------------------------> pane, terminal, /translate status
-          |                          strip and OBS page, at reading pace
-          v  (optional)
-  ElevenLabs Flash v2.5          spoken translation on the output device you choose
-```
+## How it works in detail
 
 1. A capture backend reads the audio. On macOS 14.2 and later it is a Core Audio process tap, which needs no driver. It follows one app with its helper processes, or all system audio except Hermeneus itself. On older macOS, or when you choose it, Hermeneus reads a virtual loopback device such as BlackHole 2ch that you install yourself.
 2. The audio streams to ElevenLabs Scribe v3 Live (`wss://api.elevenlabs.io/v1/speech-to-text/realtime`) with speaker diarization (telling speakers apart) and multilingual mode on. Scribe returns partial and committed transcripts, a language code for each segment, and a speaker label.
