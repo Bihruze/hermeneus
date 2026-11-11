@@ -9,11 +9,11 @@ category: voice
 requires_hermes: ">=0.23.1"
 docs_url: https://github.com/Bihruze/hermeneus#readme
 version: "0.1.0"
-# image and screenshots, pinned to the same sha (docs/media/pane.png lands with the demo captures):
+# image and screenshots, pinned to the same sha:
 # image: https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/banner.jpg
 # screenshots:
-#   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/media/pane.png
-#   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/media/setup-pane.png
+#   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/media/pane-live-light.png
+#   - https://raw.githubusercontent.com/Bihruze/hermeneus/<FINAL_SHA>/docs/media/setup-light.png
 readme: true
 # macos only: macOS is tested on real audio. The Windows backend is implemented
 # and reviewed against documentation but has not run on a Windows machine, so

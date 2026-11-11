@@ -109,12 +109,15 @@ You need:
 
 1. **Install.** Open **Capabilities > Plugins** and press **Install from Git**. Enter `https://github.com/Bihruze/hermeneus`, press **Review repository**, then **Install**. Hermes installs the Python libraries Hermeneus needs and turns on the plugin, its pane and its status bar item. The pane opens by itself on **Set up live subtitles**. Once the catalog lists Hermeneus, the **Install** button on its card does the same without the address.
 
-   ![The setup in the Hermeneus pane: the ElevenLabs API key step and the System audio step](docs/media/setup-pane.png)
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/step1-install-dark.png"><img src="docs/media/step1-install-light.png" alt="The Install plugin dialog in Capabilities > Plugins with the Hermeneus repository address and the Review repository button" width="100%"></picture>
 
 2. **Restart the gateway once.** The gateway is the Hermes process in the background that serves Hermes Desktop, `hermes chat` and your chat apps. Hermes puts the new libraries in a fresh environment that the running gateway cannot load yet, so the pane's **System audio** step says the audio libraries are not loaded. Click **Backend** in Hermes's status bar at the bottom of the window, then the power button in its menu (its tooltip says **Restart gateway**). Quitting and reopening Hermes Desktop may not be enough, because a gateway running in the background survives it. When the gateway is back, the pane reads the setup again by itself.
+
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/step2-backend-menu-dark.png"><img src="docs/media/step2-backend-menu-light.png" alt="The Backend menu opened from the status bar, with the Restart gateway tooltip on its power button" width="100%"></picture>
+
 3. **Add your ElevenLabs key.** Press **Create a key**. Your browser opens ElevenLabs. Give the key Speech to Text access, and also Text to Speech and Voices read if you want spoken translation. Back in the pane, press **Add key in Hermes**. Hermes opens **Settings > Tools & Keys**. Click the `ELEVENLABS_API_KEY` field, paste the key and press **Save**. Hermes shows "Credential saved", and within a few seconds the pane shows the key step as **Done**. The key goes into Hermes's own key store, never into a chat or into the pane.
 
-   ![The ELEVENLABS key field in Settings > Tools & Keys, holding a test key](docs/media/setup-key-saved.png)
+   <picture><source media="(prefers-color-scheme: dark)" srcset="docs/media/step3-key-saved-dark.png"><img src="docs/media/step3-key-saved-light.png" alt="The ELEVENLABS key field in Settings > Tools & Keys, holding a test key" width="100%"></picture>
 
 4. **Allow system audio.** In the pane, press **Allow system audio**. macOS asks for the System Audio Recording permission for Hermes. Click **Allow**. Hermeneus then runs a short test capture with a quiet test tone and shows **Done** when real audio arrives. If you clicked **Don't Allow**, press **Open System Settings**, turn on Hermes under **System Audio Recording Only**, and press **Check again** (see [the permission](#the-system-audio-recording-permission) if it still fails).
 
