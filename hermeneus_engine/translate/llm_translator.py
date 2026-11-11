@@ -108,6 +108,8 @@ class LlmTranslator:
             raise
         except TimeoutError as exc:
             raise TranslationError(f"Translation timed out after {budget:g} s.") from exc
+        except TranslationError:
+            raise  # the LlmCall already explained the failure in plain words
         except Exception as exc:
             raise TranslationError(f"Translation failed: {_plain(exc)}") from exc
 

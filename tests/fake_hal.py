@@ -25,6 +25,9 @@ class FakeHAL:
         self.callback = None
         self.tap_processes: dict[int, tuple[list[int], bool]] = {}
         self._next = 1000
+        self.default_out = 50
+        self.devices = [50, 51]
+        self.device_names = {50: "Speakers", 51: "BlackHole 2ch", 52: "AirPods"}
         self._lock = threading.Lock()
 
     # helpers for tests
@@ -64,18 +67,28 @@ class FakeHAL:
                 return obj
         return 0
 
+    def default_output_device(self):
+        return self.default_out
+
+    def device_ids(self):
+        return tuple(self.devices)
+
+    def device_name(self, device_id):
+        return self.device_names.get(device_id, "")
+
     def app_info(self, pid):
         return self.apps.get(pid)
 
-    def create_tap(self, objects, exclude, name):
+    def create_tap(self, objects, exclude, name, mute=False):
         self._maybe_fail("create_tap")
+        self.muted = mute
         tap = self._id()
         self.live_taps.add(tap)
         self.tap_processes[tap] = (list(objects), exclude)
         self.calls.append(("create_tap", tuple(objects), exclude))
         return TapHandle(tap, f"uid-{tap}")
 
-    def set_tap_processes(self, tap_id, objects, exclude, name):
+    def set_tap_processes(self, tap_id, objects, exclude, name, mute=False):
         self._maybe_fail("set_tap_processes")
         self.tap_processes[tap_id] = (list(objects), exclude)
         self.calls.append(("set_tap_processes", tuple(objects), exclude))

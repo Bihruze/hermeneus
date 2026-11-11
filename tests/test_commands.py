@@ -211,3 +211,44 @@ def test_devices_payload_never_offers_a_risky_output(monkeypatch):
     assert [o["device_id"] for o in commands.devices_payload()["outputs"]] == ["AirPods"]
     chosen = commands.devices_payload("virtual-device", "BlackHole 2ch")
     assert [o["device_id"] for o in chosen["outputs"]] == ["AirPods", "VB-Cable"]
+
+
+def test_cli_numbers_speakers_by_first_appearance_and_follows_relabels():
+    out, err = io.StringIO(), io.StringIO()
+    p = commands._Printer(False, out, err)
+    def line(i, spk):
+        return {"type": "line", "seq": i, "line": {"line_id": str(i), "state": "translated", "translation": f"t{i}",
+                                                   "speaker_id": spk}}
+    p(line(1, "s1:speaker_3"))
+    p(line(2, "s1:speaker_0"))
+    p({"type": "relabel", "seq": 3, "from": "s1:speaker_3", "to": "s2:speaker_0"})
+    p(line(4, "s2:speaker_0"))
+    p(line(5, "s1:speaker_7"))
+    assert out.getvalue().splitlines() == ["[Speaker 1] t1", "[Speaker 2] t2", "[Speaker 1] t4", "[Speaker 3] t5"]
+    assert "s1:" not in out.getvalue() + err.getvalue()
+
+
+def test_llm_errors_become_plain_reasons_with_the_fix():
+    glue = pkg.glue
+    credit = RuntimeError("Error code: 404 - {'message': \"Model requires available credits.\", "
+                          "'code': 'insufficient_credits_for_paid_model'}")
+    assert glue.describe_llm_error(credit, "nous") == (
+        "Translation failed: the model provider reports insufficient credits (nous). "
+        "Pick another model under auxiliary.live_translate.")
+    InstallError = type("InstallError", (RuntimeError,), {})
+    err = InstallError("venv: installation of extra 'anthropic' declined")
+    err.cause = "installation of extra 'anthropic' declined"
+    assert glue.describe_llm_error(err) == ("Translation failed: the translation model needs Hermes' 'anthropic' "
+                                            "feature. Run: hermes pm install --extra anthropic")
+    assert "rate limiting" in glue.describe_llm_error(RuntimeError("429 Too Many Requests"), "openrouter")
+
+
+async def test_llm_call_turns_provider_errors_into_translation_errors():
+    from hermeneus_engine.contracts import TranslationError
+
+    class Failing:
+        async def acomplete(self, **kw):
+            raise RuntimeError("401 Unauthorized")
+    call = pkg.glue.make_llm_call(Failing(), provider="openai")
+    with pytest.raises(TranslationError, match="rejected the credentials"):
+        await call([{"role": "user", "content": "x"}])

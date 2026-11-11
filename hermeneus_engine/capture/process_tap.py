@@ -37,7 +37,8 @@ from pathlib import Path
 from typing import Callable, Optional
 
 from ..contracts import CaptureError, CaptureSource, FrameSink
-from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, read_frame
+from ._tap_engine import STATUS_NO_AUDIO, STATUS_RECOVERED, STATUS_STALLED
+from ._tap_worker import KIND_AUDIO, KIND_ERROR, KIND_READY, KIND_STATS, KIND_STATUS, read_frame
 
 log = logging.getLogger(__name__)
 
@@ -47,6 +48,10 @@ SYSTEM_SOURCE_LABEL = "All system audio except Hermeneus"
 # AudioHardwareCreateProcessTap is API_AVAILABLE(macos(14.2)) in AudioHardwareTapping.h.
 MIN_MACOS = (14, 2)
 START_TIMEOUT_S = 30.0
+PERMISSION_PANE = "System Settings > Privacy & Security > Screen & System Audio Recording"
+
+# (code, message, details) for watchdog and format events; called on a reader thread.
+StatusCallback = Callable[[str, str, dict], None]
 STOP_TIMEOUT_S = 5.0
 
 _PACKAGE_ROOT = Path(__file__).resolve().parents[2]
@@ -82,10 +87,36 @@ def macos_version() -> Optional[tuple[int, ...]]:
         return None
 
 
-def spawn_worker() -> subprocess.Popen:
-    env = dict(os.environ)
-    env["PYTHONPATH"] = os.pathsep.join(p for p in (str(_PACKAGE_ROOT), env.get("PYTHONPATH", "")) if p)
+# The worker gets only these variables from the parent. It holds no secrets and
+# needs none: measured, the worker captures with nothing but PYTHONPATH and
+# PYTHONUNBUFFERED set; the rest keep paths, temp files and text encoding
+# behaving as in the parent.
+WORKER_ENV_ALLOWLIST = ("PATH", "HOME", "TMPDIR", "LANG", "LC_ALL", "LC_CTYPE")
+
+
+def worker_env(parent: Optional[dict] = None, path: Optional[list] = None) -> dict:
+    """Minimal environment for the capture worker; never carries API keys, tokens or secrets.
+
+    PYTHONPATH carries this package and every directory on the parent's ``sys.path``. Hermes
+    puts a plugin's dependencies on ``sys.path`` at runtime, from an environment the bare
+    interpreter does not know (measured: inside Hermes, CoreAudio and numpy import from
+    ``~/.hermes/installs/.../venv/lib/python3.14/site-packages`` while ``python3 -c "import
+    CoreAudio"`` with the same interpreter fails), so the worker needs the same search path.
+    """
+    parent = os.environ if parent is None else parent
+    path = sys.path if path is None else path
+    env = {k: parent[k] for k in WORKER_ENV_ALLOWLIST if k in parent}
+    dirs = [str(_PACKAGE_ROOT)]
+    for p in path:
+        if p and p not in dirs and os.path.isdir(p):
+            dirs.append(p)
+    env["PYTHONPATH"] = os.pathsep.join(dirs)
     env["PYTHONUNBUFFERED"] = "1"
+    return env
+
+
+def spawn_worker() -> subprocess.Popen:
+    env = worker_env()
     return subprocess.Popen(
         [sys.executable, "-m", "hermeneus_engine.capture._tap_worker"],
         stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
@@ -112,7 +143,9 @@ class ProcessTapBackend:
 
     def __init__(self, hal_factory: Optional[Callable[[], object]] = None, *,
                  spawn: Callable[[], object] = spawn_worker, own_pid: Optional[int] = None,
-                 start_timeout: float = START_TIMEOUT_S) -> None:
+                 start_timeout: float = START_TIMEOUT_S, on_status: Optional[StatusCallback] = None,
+                 responsible_app: Optional[Callable[[], Optional[str]]] = None,
+                 reader: Optional[str] = None, mute_tapped: bool = False) -> None:
         self._hal_factory = hal_factory
         self._hal = None
         self._spawn = spawn
@@ -120,7 +153,14 @@ class ProcessTapBackend:
         self._start_timeout = start_timeout
         self._lock = threading.RLock()
         self._run: Optional[_Run] = None
+        self.on_status = on_status
+        self._reader = reader  # None uses the worker default (the IOProc reader); "portaudio" on request
+        # Silence tapped app or pid sources on their device while tapped (the doctor's test tone).
+        self._mute_tapped = mute_tapped
+        self._responsible_app = responsible_app or responsible_app_name
         self.last_stats: Optional[dict] = None
+        self.last_status: Optional[tuple[str, str]] = None
+        self.status_message: str = ""  # latest non-fatal watchdog note; the session shows it
         self.failure: str = ""  # set when the worker stops on its own during capture
 
     # ------------------------------------------------------------------ helpers
@@ -172,6 +212,10 @@ class ProcessTapBackend:
             if self._run is not None:
                 raise CaptureError("Capture is already running. Stop it before starting another source.")
             spec = self._spec_for(source)
+            if self._reader:
+                spec["reader"] = self._reader
+            if self._mute_tapped and spec["mode"] != "system":
+                spec["mute"] = True
             self.failure = ""
             try:
                 proc = self._spawn()
@@ -197,6 +241,7 @@ class ProcessTapBackend:
                 self._finish(run)
                 raise CaptureError(run.error)
             self._run = run
+            self.status_message = ""
             _live.add(self)
             _register_atexit()
 
@@ -283,6 +328,8 @@ class ProcessTapBackend:
             elif kind == KIND_ERROR:
                 run.error = _message(payload) or "The capture worker reported an error."
                 run.ready.set()
+            elif kind == KIND_STATUS:
+                self._handle_status(run, payload)
             elif kind == KIND_STATS:
                 try:
                     run.final_stats = json.loads(payload)
@@ -295,6 +342,33 @@ class ProcessTapBackend:
         elif not run.stopping and not run.error:
             self.failure = f"Capture from {run.source.label} stopped unexpectedly."
             log.error("%s %s", self.failure, " ".join(run.stderr_tail))
+
+    def _handle_status(self, run: _Run, payload: bytes) -> None:
+        try:
+            msg = json.loads(payload)
+            code, text, details = str(msg["code"]), str(msg.get("message", "")), dict(msg.get("details") or {})
+        except (ValueError, KeyError, TypeError):
+            return
+        if code == STATUS_NO_AUDIO:
+            text = permission_message(self._responsible_app())
+        elif code == STATUS_STALLED:
+            text = f"Capture from {run.source.label} stopped receiving audio. Stop and start translation again."
+        self.last_status = (code, text)
+        if code in (STATUS_NO_AUDIO, STATUS_STALLED):
+            self.failure = text
+            self.status_message = text
+            log.error("%s", text)
+        elif code == STATUS_RECOVERED:
+            self.status_message = ""
+            log.info("process tap: %s", text)
+        else:
+            self.status_message = text
+            log.info("process tap: %s: %s", code, text)
+        if self.on_status is not None:
+            try:
+                self.on_status(code, text, details)
+            except Exception:
+                log.exception("on_status callback failed")
 
     def _read_stderr(self, run: _Run) -> None:
         err = run.proc.stderr
@@ -334,6 +408,53 @@ class ProcessTapBackend:
         self.last_stats = stats
         if stats.get("teardown_failures"):
             log.error("process tap teardown reported failures: %s", stats["teardown_failures"])
+
+
+def verify_system_audio_capture(timeout_s: float = 30.0) -> tuple[bool, str]:
+    """Doctor seam (components "capture.verify_tap_audio"): one real capture of a test tone.
+
+    Plays a short quiet tone with afplay in a separate process, captures it through the
+    full backend and worker, and returns (ok, plain-language detail). The first run on a
+    Mac shows the System Audio Recording prompt.
+    """
+    from .tap_doctor import check_process_tap
+
+    result = check_process_tap(timeout_s=timeout_s)
+    return result.ok, result.message
+
+
+def permission_message(app: Optional[str]) -> str:
+    who = f"'{app}'" if app else "the app that runs Hermes"
+    return (f"macOS is giving Hermeneus silence instead of audio. Open {PERMISSION_PANE}, "
+            f"turn on {who} under System Audio Recording, then start translation again.")
+
+
+def responsible_app_name(pid: Optional[int] = None) -> Optional[str]:
+    """Best guess at the app macOS asks about: the nearest ancestor that runs from an .app bundle.
+
+    Returns None when no ancestor is an app (for example a gateway started by launchd).
+    """
+    pid = os.getpid() if pid is None else pid
+    for _ in range(32):
+        try:
+            out = subprocess.run(["/bin/ps", "-o", "ppid=,comm=", "-p", str(pid)], capture_output=True,
+                                 text=True, timeout=2).stdout.strip()
+        except (OSError, subprocess.SubprocessError):
+            return None
+        if not out:
+            return None
+        ppid_text, _, comm = out.partition(" ")
+        marker = ".app/Contents/MacOS/"
+        if marker in comm:
+            # the outermost .app wins for helpers nested inside an app bundle
+            return Path(comm.split(".app/")[0]).name
+        try:
+            pid = int(ppid_text)
+        except ValueError:
+            return None
+        if pid <= 1:
+            return None
+    return None
 
 
 def _message(payload: bytes) -> str:

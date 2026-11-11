@@ -282,3 +282,60 @@ async def test_speaker_status_message_reaches_session_status():
     speaker.status_message = "Voice v1 is not available on this ElevenLabs account; using the default voice Talia."
     await wait_for(lambda: "default voice Talia" in (bus.status().get("message") or ""))
     await s.stop()
+
+
+# -- early translation at sentence boundaries --------------------------------------------
+
+async def test_stable_sentence_is_translated_before_the_commit_and_nothing_twice(data_dir):
+    rt, rig = await started(data_dir)
+    rig.stt.emit(PartialTranscript("Heavy rain flooded the roads. Schools", received_ns=1))
+    rig.stt.emit(PartialTranscript("Heavy rain flooded the roads. Schools closed", received_ns=2))
+    await wait_for(lambda: any(l.state == LineState.TRANSLATED for l in rt.bus.lines()))
+    first = [l for l in rt.bus.lines() if l.state == LineState.TRANSLATED]
+    assert [l.original for l in first] == ["Heavy rain flooded the roads."]
+    assert first[0].timings_ns["sentence_released"] == 2
+    partial = [l for l in rt.bus.lines() if l.state == LineState.PARTIAL]
+    assert [l.original for l in partial] == ["Schools closed"]
+    rig.stt.emit(CommittedTranscript("Heavy rain flooded several roads. Schools closed for a second day. "
+                                     "Officials expect more rain", segment_index=0))
+    await wait_for(lambda: sum(l.state == LineState.TRANSLATED for l in rt.bus.lines()) == 3)
+    assert [l.original for l in rt.bus.lines()] == [
+        "Heavy rain flooded the roads.", "Schools closed for a second day.", "Officials expect more rain"]
+    assert [l.original for l in rig.scheduler.submitted] == [l.original for l in rt.bus.lines()]
+    assert rt.session.metrics()["sentences_released_early"] == 1
+    # the schools line kept the partial line's id: one line per sentence, in order
+    assert partial[0].line_id == rt.bus.lines()[1].line_id
+    rig.stt.emit(DiarizedTranscript(0, "", tuple(
+        [Word(w, speaker_id="s1:speaker_0") for w in "Heavy rain flooded several roads.".split()]
+        + [Word(w, speaker_id="s1:speaker_1") for w in "Schools closed for a second day. Officials expect more rain".split()])))
+    await wait_for(lambda: rt.bus.lines()[1].speaker_id == "s1:speaker_1")
+    assert [l.speaker_id for l in rt.bus.lines()] == ["s1:speaker_0", "s1:speaker_1", "s1:speaker_1"]
+    await rt.close()
+
+
+async def test_splitting_off_keeps_one_line_per_segment(data_dir):
+    rt, rig = await started(data_dir, sentence_stable_ms=-1)
+    rig.stt.emit(PartialTranscript("One two three four. Five six", received_ns=1))
+    rig.stt.emit(PartialTranscript("One two three four. Five six seven", received_ns=2))
+    rig.stt.emit(CommittedTranscript("One two three four. Five six seven.", segment_index=0))
+    await wait_for(lambda: any(l.state == LineState.TRANSLATED for l in rt.bus.lines()))
+    assert [l.original for l in rt.bus.lines()] == ["One two three four. Five six seven."]
+    await rt.close()
+
+
+async def test_model_failure_reason_reaches_the_status_once(data_dir):
+    def broke(_text):
+        raise RuntimeError("Translation failed: the model provider reports insufficient credits (nous).")
+
+    rt, rig = await started(data_dir, make_rig(translate=broke))
+    await wait_for(lambda: rt.bus.status()["state"] == "live")
+    sub = rt.bus.subscribe()
+    for i in range(3):
+        rig.stt.emit(CommittedTranscript(f"line number {i}", segment_index=i))
+    await wait_for(lambda: rt.session.stats["lines_failed"] == 3)
+    messages = []
+    while (e := await sub.get(timeout=0.2)) is not None:
+        if e["type"] == "status":
+            messages.append(e["message"])
+    assert messages.count("Translation failed: the model provider reports insufficient credits (nous).") == 1
+    await rt.close()

@@ -31,8 +31,11 @@ Identifiers exposed to consumers:
 
 from __future__ import annotations
 
+import array
 import asyncio
 import base64
+import math
+import sys
 import json
 import logging
 import random
@@ -130,17 +133,35 @@ class ScribeTuning:
       behind ``session_time_limit_exceeded`` (UNVERIFIED). Rotation pre-opens
       the next session, so a short interval costs only one extra handshake.
       ``SttConfig.max_session_seconds`` overrides it when non-zero.
-    * ``boundary_wait=20``: how long a rotation waits for the next commit
-      before it forces one. The guide says the model commits by itself after
-      about 36 s of accumulated audio, so 20 s stays below that.
-    * ``language_wait=1.0``: how long a committed segment waits for its
+    * ``boundary_wait=20``: how long a rotation waits for a pause in the sent
+      audio (``pause_ms`` below ``pause_dbfs``) before it switches anyway.
+    * ``language_wait=0.25``: how long a committed segment waits for its
       ``committed_transcript_with_timestamps`` (the only event that carries
-      ``language_code``). It ends as soon as that event arrives.
-    * ``drain_quiet=1.0``, ``drain_timeout=5.0``: an old session is closed once
-      it has been quiet for ``drain_quiet`` after its final commit, or after
-      ``drain_timeout`` at most.
+      ``language_code``). It ends as soon as that event arrives. Live, the two
+      events were at most 7 ms apart in either order over 41 commits.
+    * ``drain_timeout=5.0``: a session that received ``commit: true`` from the
+      client (rotation or close) is closed as soon as the server has answered
+      that commit with its committed segment, the language event and, with
+      diarization, the diarized segment. ``drain_timeout`` bounds that wait
+      for rotations. ``drain_quiet=1.0`` is the fallback for a commit the
+      server does not answer: the session closes after that much silence from
+      the server.
+    * ``close_budget=2.0``: total time ``close()`` may take when the caller
+      passes no ``timeout``.
     * ``previous_text_chars=50``: the guide says previous_text "works best
       when it's under 50 characters long" and recommends it after reconnects.
+    * ``vad_silence_threshold_secs=None`` keeps the server default (1.5 s, as
+      echoed in ``session_started.config``). The guide accepts 0.192 to 3.0.
+    * ``segment_soft_seconds=10``, ``segment_hard_seconds=20``, ``pause_dbfs=-40``,
+      ``pause_ms=120``: segment length cap. Continuous speech without a pause
+      as long as the VAD silence threshold is only committed by the server's
+      own cap, about 36 s of audio (guide), which measured 35 s per segment
+      live. Once a segment holds ``segment_soft_seconds`` of audio, the client
+      sends ``commit: true`` as soon as the audio it has sent ends in
+      ``pause_ms`` below ``pause_dbfs``; at ``segment_hard_seconds`` it commits
+      without waiting for a pause. The guide calls committing every 20 to 30 s
+      good practice and warns against several commits in a short sequence.
+      Set either value to 0 to disable that trigger.
     """
 
     chunk_ms: int = 100
@@ -151,13 +172,19 @@ class ScribeTuning:
     rotation_seconds: float = 600.0
     rotation_retry_seconds: float = 30.0
     boundary_wait: float = 20.0
-    language_wait: float = 1.0
+    language_wait: float = 0.25
     drain_quiet: float = 1.0
     drain_timeout: float = 5.0
     open_timeout: float = 10.0
     close_timeout: float = 2.0
+    close_budget: float = 2.0
     send_previous_text: bool = True
     previous_text_chars: int = 50
+    vad_silence_threshold_secs: Optional[float] = None
+    segment_soft_seconds: float = 10.0
+    segment_hard_seconds: float = 20.0
+    pause_dbfs: float = -40.0
+    pause_ms: int = 120
 
     @property
     def chunk_bytes(self) -> int:
@@ -179,9 +206,12 @@ class ScribeStats:
     drop_events: int = 0
     audio_bytes_dropped: int = 0
     languages_missed: int = 0
+    pause_commits: int = 0
+    hard_commits: int = 0
+    close_ms: dict = field(default_factory=dict)  # phase name -> ms since close() began
 
 
-def build_url(config: SttConfig) -> str:
+def build_url(config: SttConfig, tuning: Optional[ScribeTuning] = None) -> str:
     """Return the realtime URL with every query parameter the client relies on.
 
     ``commit_strategy`` is always sent: the commit guide says the default is
@@ -204,6 +234,8 @@ def build_url(config: SttConfig) -> str:
         query.append(("language_code", config.language_code))
     for code in config.secondary_languages:
         query.append(("secondary_languages", code))
+    if tuning is not None and tuning.vad_silence_threshold_secs is not None:
+        query.append(("vad_silence_threshold_secs", f"{tuning.vad_silence_threshold_secs:g}"))
     return f"{config.base_url}?{urlencode(query)}"
 
 
@@ -243,12 +275,16 @@ class _Session:
     opened_monotonic: float
     started: asyncio.Event = field(default_factory=asyncio.Event)
     done: asyncio.Event = field(default_factory=asyncio.Event)
-    commit_seen: asyncio.Event = field(default_factory=asyncio.Event)
     activity: asyncio.Event = field(default_factory=asyncio.Event)
     send_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     outbox: list = field(default_factory=list)
     local_to_global: dict = field(default_factory=dict)
     skipped: set = field(default_factory=set)
+    early_languages: list = field(default_factory=list)  # (text, language) seen before their commit
+    commits_received: int = 0
+    last_commit_index: Optional[int] = None
+    diarized_seen: set = field(default_factory=set)
+    flush_mark: Optional[int] = None  # commits_received when the client sent its final commit:true
     receiver: Optional[asyncio.Task] = None
     session_id: str = ""
     error_type: str = ""
@@ -259,6 +295,8 @@ class _Session:
     admitted: bool = False
     finished: bool = False
     first_chunk_sent: bool = False
+    segment_bytes: int = 0      # audio sent since the last commit seen or sent
+    trailing_quiet_ms: int = 0  # length of the quiet run at the end of the sent audio
     wants_previous_text: bool = False
     rotate_at: float = 0.0
 
@@ -311,6 +349,10 @@ class ScribeLiveClient:
         self._supervisor: Optional[asyncio.Task] = None
         self._sender: Optional[asyncio.Task] = None
         self._drains: set[asyncio.Task] = set()
+        self._rotation_target: Optional[tuple[_Session, _Session]] = None
+        self._close_started: Optional[float] = None
+        self._close_deadline: Optional[float] = None
+        self._rotation_switched = asyncio.Event()
 
     # ------------------------------------------------------------------ API
 
@@ -348,18 +390,66 @@ class ScribeLiveClient:
             if isinstance(event, SttStatus) and event.state in (SttState.CLOSED, SttState.FAILED):
                 return
 
-    async def close(self) -> None:
-        """Commit trailing audio, drain the last session, send a close frame."""
+    async def close(self, timeout: Optional[float] = None) -> None:
+        """Commit trailing audio, wait for its transcript, send a close frame.
+
+        Returns within ``timeout`` seconds (``ScribeTuning.close_budget`` when
+        None). Text the server delivers before the deadline is emitted; the
+        socket closes with code 1000. If a phase overruns, the remaining
+        sockets are dropped and CLOSED is emitted at the deadline.
+        """
         if self._loop is None or self._terminal:
             return
+        budget = self._tuning.close_budget if timeout is None else max(0.0, timeout)
+        self._close_started = time.monotonic()
+        self._close_deadline = self._close_started + budget
+        self.stats.close_ms = {}
+        # Audio handed over by send_audio() before this call is still queued
+        # on the loop; let those callbacks run before the queue is sealed.
+        await asyncio.sleep(0)
         self._accepting = False
         self._close_requested.set()
         self._wake_sender.set()
+        if self._supervisor is None:
+            return
+        try:
+            await asyncio.wait_for(asyncio.shield(self._supervisor), budget)
+        except asyncio.TimeoutError:
+            await self._force_close()
+        except asyncio.CancelledError:
+            if not self._supervisor.done():
+                raise
+
+    def _close_mark(self, phase: str) -> None:
+        if self._close_started is not None:
+            self.stats.close_ms[phase] = round((time.monotonic() - self._close_started) * 1000, 1)
+
+    def _close_remaining(self, reserve: float = 0.0) -> float:
+        if self._close_deadline is None:
+            return self._tuning.drain_timeout
+        return max(0.0, self._close_deadline - time.monotonic() - reserve)
+
+    async def _force_close(self) -> None:
+        """Deadline reached: drop every socket now and report CLOSED."""
+        self._close_mark("forced")
+        log.warning("scribe close overran its budget; dropping the connection")
+        self._terminal = True
         if self._supervisor is not None:
-            try:
-                await self._supervisor
-            except asyncio.CancelledError:
-                pass
+            self._supervisor.cancel()
+        if self._sender is not None:
+            self._sender.cancel()
+        for task in list(self._drains):
+            task.cancel()
+        for session in list(self._sessions):
+            transport = getattr(session.ws, "transport", None)
+            if transport is not None:
+                transport.abort()
+            if session.receiver is not None:
+                session.receiver.cancel()
+            self._finish(session)
+        self._active = None
+        if self._state not in (SttState.CLOSED, SttState.FAILED):
+            self._terminate(SttState.CLOSED)
 
     # ------------------------------------------------------------- audio in
 
@@ -395,6 +485,23 @@ class ScribeLiveClient:
         session.first_chunk_sent = True
         self.stats.chunks_sent += 1
         self.stats.audio_bytes_sent += len(pcm)
+        if commit:
+            session.segment_bytes = 0
+        else:
+            session.segment_bytes += len(pcm)
+            session.trailing_quiet_ms = _trailing_quiet_ms(pcm, session.trailing_quiet_ms,
+                                                           self._tuning.pause_dbfs)
+
+    def _segment_commit_due(self, session: _Session) -> str:
+        """Return "hard", "pause" or "" for the segment length cap."""
+        t = self._tuning
+        seconds = session.segment_bytes / (ENGINE_SAMPLE_RATE * ENGINE_SAMPLE_WIDTH)
+        if t.segment_hard_seconds > 0 and seconds >= t.segment_hard_seconds:
+            return "hard"
+        if t.segment_soft_seconds > 0 and seconds >= t.segment_soft_seconds \
+                and session.trailing_quiet_ms >= t.pause_ms:
+            return "pause"
+        return ""
 
     async def _send_loop(self) -> None:
         chunk_bytes = self._tuning.chunk_bytes
@@ -425,6 +532,18 @@ class ScribeLiveClient:
                 try:
                     await self._send_on(session, pending, commit=False)
                     pending = None
+                    target = self._rotation_target
+                    if target is not None and target[0] is session \
+                            and session.trailing_quiet_ms >= self._tuning.pause_ms:
+                        await self._switch_locked(*target)
+                        continue
+                    due = self._segment_commit_due(session)
+                    if due:
+                        await self._send_on(session, b"", commit=True)
+                        if due == "hard":
+                            self.stats.hard_commits += 1
+                        else:
+                            self.stats.pause_commits += 1
                 except ConnectionClosed:
                     pass
                 except Exception as exc:
@@ -457,7 +576,7 @@ class ScribeLiveClient:
         if not key:
             raise _Fatal(_FATAL_MESSAGES["missing_key"], "missing_key")
         self._remember_key(key)
-        url = build_url(self._config)
+        url = build_url(self._config, self._tuning)
         try:
             ws = await self._connect(url, {"xi-api-key": key})
         except InvalidStatus as exc:
@@ -512,14 +631,23 @@ class ScribeLiveClient:
         space = tail.find(" ")
         return tail[space + 1:] if 0 <= space < len(tail) - 1 else tail
 
-    async def _abort(self, session: _Session) -> None:
+    async def _abort(self, session: _Session, budget: Optional[float] = None) -> None:
+        """Close with code 1000 within ``budget`` seconds, including the receive task join."""
+        total = self._tuning.close_timeout if budget is None else min(budget, self._tuning.close_timeout)
+        deadline = time.monotonic() + max(0.02, total)
+        # websockets waits close_timeout for the close frame reply, then drops
+        # the TCP connection; keep a little time for that and the join.
+        if hasattr(session.ws, "close_timeout"):
+            session.ws.close_timeout = max(0.01, 0.8 * (deadline - time.monotonic()))
         try:
-            await session.ws.close()
-        except Exception:
-            pass
+            await asyncio.wait_for(session.ws.close(), max(0.01, deadline - time.monotonic()))
+        except (asyncio.TimeoutError, Exception):
+            transport = getattr(session.ws, "transport", None)
+            if transport is not None:
+                transport.abort()
         if session.receiver is not None:
             try:
-                await asyncio.wait_for(session.receiver, self._tuning.close_timeout)
+                await asyncio.wait_for(session.receiver, max(0.01, deadline - time.monotonic()))
             except (asyncio.TimeoutError, asyncio.CancelledError, Exception):
                 session.receiver.cancel()
         self._finish(session)
@@ -596,21 +724,33 @@ class ScribeLiveClient:
             item = _Item("committed", text=text, local_index=_int(msg.get("segment_index")),
                          received_ns=now, empty=not text.strip(),
                          ready=not self._config.include_language_detection)
+            if not item.ready:
+                early = _take_matching(session.early_languages, text)
+                if early is not None:
+                    item.language, item.ready = early[1], True
             session.outbox.append(item)
+            session.segment_bytes = 0
+            session.commits_received += 1
+            session.last_commit_index = item.local_index
             if not item.ready:
                 self._loop.call_later(self._tuning.language_wait, self._language_timeout, session, item)
-            session.commit_seen.set()
         elif kind == "committed_transcript_with_timestamps":
-            waiting = next((i for i in session.outbox if i.kind == "committed" and not i.ready), None)
-            if waiting is None:
-                log.debug("scribe session %d: language event without a pending commit", session.number)
-                return
-            if waiting.text.strip() != str(msg.get("text") or "").strip():
-                log.debug("scribe session %d: language event text differs from its commit", session.number)
+            # Live runs show this event 2 ms after the committed_transcript for
+            # VAD commits and 2 ms before it for a client commit:true, so it is
+            # matched in either order.
+            text = str(msg.get("text") or "")
             lang = msg.get("language_code")
-            waiting.language = str(lang) if lang else None
-            waiting.ready = True
+            language = str(lang) if lang else None
+            waiting = [i for i in session.outbox if i.kind == "committed" and not i.ready]
+            match = next((i for i in waiting if i.text.strip() == text.strip()), None)
+            if match is None:
+                session.early_languages.append((text, language))
+                del session.early_languages[:-_EARLY_LANGUAGE_LIMIT]
+                return
+            match.language = language
+            match.ready = True
         elif kind == "diarized_transcript":
+            session.diarized_seen.add(_int(msg.get("segment_index")))
             session.outbox.append(_Item(
                 "diarized", text=str(msg.get("text") or ""), local_index=_int(msg.get("segment_index")),
                 words=self._words(session, msg.get("words")), received_ns=now))
@@ -831,7 +971,14 @@ class ScribeLiveClient:
             await _first(session.done.wait(), self._close_requested.wait(), timeout=remaining)
 
     async def _rotate(self, old: _Session) -> _Session:
-        """Move the stream to a new session at a commit boundary."""
+        """Move the stream to a new session at a pause in the audio.
+
+        The switch happens in the sender, right after a chunk that leaves the
+        sent audio ending in ``pause_ms`` of quiet, so neither session receives
+        half a word. Waiting for the server's next commit instead is too late:
+        live, the commit event arrives after more speech has been sent, and
+        rotating on it split words between the two sessions.
+        """
         try:
             new = await self._open_session()
         except _Retry as exc:
@@ -839,21 +986,21 @@ class ScribeLiveClient:
             old.rotate_at = time.monotonic() + self._tuning.rotation_retry_seconds
             return old
         self._admit(new)
-        old.commit_seen.clear()
-        await _first(old.commit_seen.wait(), old.done.wait(), self._close_requested.wait(),
+        self._rotation_switched.clear()
+        self._rotation_target = (old, new)
+        await _first(self._rotation_switched.wait(), old.done.wait(), self._close_requested.wait(),
                      timeout=self._tuning.boundary_wait)
-        if self._close_requested.is_set() and not old.done.is_set():
-            await self._abort(new)
-            old.rotate_at = time.monotonic() + self._rotation_seconds
-            return old
-        async with old.send_lock:
-            self._set_active(new)
-            old.draining = True
-            if not old.done.is_set():
-                try:
-                    await self._send_on(old, b"", commit=True)
-                except ConnectionClosed:
-                    pass
+        if not self._rotation_switched.is_set():
+            if self._close_requested.is_set() and not old.done.is_set():
+                self._rotation_target = None
+                await self._abort(new)
+                old.rotate_at = time.monotonic() + self._rotation_seconds
+                return old
+            async with old.send_lock:
+                if not self._rotation_switched.is_set():
+                    log.debug("scribe session %d: no pause within %.0fs, rotating anyway", old.number,
+                              self._tuning.boundary_wait)
+                    await self._switch_locked(old, new)
         self.stats.rotations += 1
         log.debug("scribe rotated session %d -> %d", old.number, new.number)
         task = asyncio.create_task(self._drain_and_close(old), name=f"scribe-drain-{old.number}")
@@ -861,41 +1008,82 @@ class ScribeLiveClient:
         task.add_done_callback(self._drains.discard)
         return new
 
-    async def _drain_and_close(self, session: _Session) -> None:
-        """Wait for the final commit of a session, then close it."""
-        deadline = time.monotonic() + self._tuning.drain_timeout
-        while not session.done.is_set():
-            pending = any(not i.ready for i in session.outbox)
-            remaining = deadline - time.monotonic()
+    async def _switch_locked(self, old: _Session, new: _Session) -> None:
+        """Send later audio to ``new`` and commit the tail of ``old``. Caller holds ``old.send_lock``."""
+        self._rotation_target = None
+        self._set_active(new)
+        old.draining = True
+        await self._send_flush(old)
+        self._rotation_switched.set()
+
+    def _flush_answered(self, session: _Session) -> bool:
+        """The server has answered the client's final commit in full."""
+        if session.flush_mark is None or session.commits_received <= session.flush_mark:
+            return False
+        if any(not i.ready for i in session.outbox):
+            return False
+        if self._config.diarize and session.last_commit_index is not None:
+            return session.last_commit_index in session.diarized_seen
+        return True
+
+    async def _send_flush(self, session: _Session) -> None:
+        """Send the final ``commit: true``; caller holds ``session.send_lock``."""
+        if session.done.is_set():
+            return
+        session.flush_mark = session.commits_received
+        try:
+            await self._send_on(session, b"", commit=True)
+        except ConnectionClosed:
+            session.flush_mark = None
+
+    async def _drain_and_close(self, session: _Session, deadline: Optional[float] = None,
+                               reserve: float = 0.0) -> None:
+        """Wait until the final commit is answered (or the deadline), then close."""
+        if deadline is None:
+            deadline = time.monotonic() + self._tuning.drain_timeout
+        quiet_since = time.monotonic()
+        while not session.done.is_set() and not self._flush_answered(session):
+            remaining = deadline - reserve - time.monotonic()
             if remaining <= 0:
+                break
+            if session.flush_mark is None and time.monotonic() - quiet_since >= self._tuning.drain_quiet:
                 break
             session.activity.clear()
             got = await _first(session.activity.wait(), timeout=min(remaining, self._tuning.drain_quiet))
-            if not got and not pending:
-                break
+            if got:
+                quiet_since = time.monotonic()
+            elif not any(not i.ready for i in session.outbox):
+                break  # the server stayed silent for drain_quiet
         session.draining = True
-        await self._abort(session)
+        await self._abort(session, budget=max(0.0, deadline - time.monotonic()))
 
     async def _graceful_close(self, session: _Session) -> None:
+        deadline = self._close_deadline or (time.monotonic() + self._tuning.close_budget)
+        # Keep part of the budget for the close handshake.
+        reserve = min(0.3, 0.25 * max(0.0, deadline - time.monotonic()))
         self._closing = True
         self._wake_sender.set()
         if self._sender is not None:
             try:
-                await asyncio.wait_for(asyncio.shield(self._sender), self._tuning.drain_timeout)
+                await asyncio.wait_for(asyncio.shield(self._sender),
+                                       max(0.0, deadline - reserve - time.monotonic()))
             except asyncio.TimeoutError:
                 self._sender.cancel()
+        self._close_mark("audio sent")
         async with session.send_lock:
             self._set_active(None)
             session.draining = True
-            if not session.done.is_set():
-                try:
-                    await self._send_on(session, b"", commit=True)
-                except ConnectionClosed:
-                    pass
-        await self._drain_and_close(session)
+            await self._send_flush(session)
+        self._close_mark("final commit sent")
+        drained = asyncio.create_task(self._drain_and_close(session, deadline, reserve))
+        await drained
+        self._close_mark("socket closed")
         if self._drains:
-            await asyncio.gather(*self._drains, return_exceptions=True)
+            await asyncio.wait(set(self._drains), timeout=max(0.0, deadline - time.monotonic()))
+            for task in list(self._drains):
+                task.cancel()
         self._terminate(SttState.CLOSED)
+        self._close_mark("closed")
 
     async def _shutdown_without_session(self) -> None:
         self._closing = True
@@ -937,6 +1125,45 @@ async def _first(*aws: Awaitable, timeout: Optional[float] = None) -> bool:
     finally:
         for t in tasks:
             t.cancel()
+
+
+_EARLY_LANGUAGE_LIMIT = 8
+_FRAME_BYTES = ENGINE_SAMPLE_RATE * ENGINE_SAMPLE_WIDTH // 100  # 10 ms
+
+
+def _trailing_quiet_ms(pcm: bytes, previous_ms: int, threshold_dbfs: float) -> int:
+    """Length of the quiet run at the end of the audio sent so far.
+
+    ``previous_ms`` is the run carried over from earlier chunks; it continues
+    only if this whole chunk is quiet.
+    """
+    limit = (32768.0 * 10 ** (threshold_dbfs / 20)) ** 2
+    usable = len(pcm) - len(pcm) % ENGINE_SAMPLE_WIDTH
+    samples = array.array("h", pcm[:usable])
+    if sys.byteorder == "big":
+        samples.byteswap()
+    per_frame = _FRAME_BYTES // ENGINE_SAMPLE_WIDTH
+    frames = [samples[i:i + per_frame] for i in range(0, len(samples), per_frame)]
+    run = 0
+    for frame in reversed(frames):
+        if not frame or math.fsum(x * x for x in frame) / len(frame) >= limit:
+            return run
+        run += 10
+    return previous_ms + run
+
+
+
+
+def _take_matching(early: list, text: str) -> Optional[tuple]:
+    """Remove and return the early language event whose text equals ``text``.
+
+    Text must match: an early event left over from a commit that already timed
+    out must not lend its language to a different commit.
+    """
+    for n, entry in enumerate(early):
+        if entry[0].strip() == text.strip():
+            return early.pop(n)
+    return None
 
 
 def _float(value: Any) -> Optional[float]:

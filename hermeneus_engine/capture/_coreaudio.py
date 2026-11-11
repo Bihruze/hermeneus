@@ -185,9 +185,24 @@ class CoreAudioHAL:
             return None
         return AppInfo(name=str(app.localizedName() or ""), regular=int(app.activationPolicy()) == 0)
 
+    # ---------------------------------------------------------------- devices
+
+    def default_output_device(self) -> int:
+        return self._get_u32(self._sys, self._ca.kAudioHardwarePropertyDefaultOutputDevice, "read default output")
+
+    def device_ids(self) -> tuple[int, ...]:
+        raw = self._get(self._sys, self._ca.kAudioHardwarePropertyDevices, "read device list")
+        return tuple(struct.unpack(f"<{len(raw) // 4}I", raw))
+
+    def device_name(self, device_id: int) -> str:
+        try:
+            return self._get_cfstring(device_id, self._ca.kAudioObjectPropertyName, "read device name")
+        except HALError:
+            return ""
+
     # ---------------------------------------------------------------- tap and aggregate
 
-    def _tap_description(self, process_objects: list[int], exclude: bool, name: str):
+    def _tap_description(self, process_objects: list[int], exclude: bool, name: str, mute: bool = False):
         ca = self._ca
         if exclude:
             desc = ca.CATapDescription.alloc().initMonoGlobalTapButExcludeProcesses_(list(process_objects))
@@ -195,18 +210,22 @@ class CoreAudioHAL:
             desc = ca.CATapDescription.alloc().initMonoMixdownOfProcesses_(list(process_objects))
         desc.setPrivate_(True)
         desc.setName_(name)
+        if mute:
+            # The tapped processes stay silent on their output device while the tap is read.
+            desc.setMuteBehavior_(ca.CATapMutedWhenTapped)
         return desc
 
-    def create_tap(self, process_objects: list[int], exclude: bool, name: str) -> TapHandle:
-        desc = self._tap_description(process_objects, exclude, name)
+    def create_tap(self, process_objects: list[int], exclude: bool, name: str, mute: bool = False) -> TapHandle:
+        desc = self._tap_description(process_objects, exclude, name, mute)
         status, tap_id = self._ca.AudioHardwareCreateProcessTap(desc, None)
         if status:
             raise HALError("create process tap", status)
         return TapHandle(tap_id=int(tap_id), uid=str(desc.UUID().UUIDString()))
 
-    def set_tap_processes(self, tap_id: int, process_objects: list[int], exclude: bool, name: str) -> None:
+    def set_tap_processes(self, tap_id: int, process_objects: list[int], exclude: bool, name: str,
+                          mute: bool = False) -> None:
         """Change which processes a live tap reads (kAudioTapPropertyDescription is settable)."""
-        desc = self._tap_description(process_objects, exclude, name)
+        desc = self._tap_description(process_objects, exclude, name, mute)
         pointer = struct.pack("<Q", self._objc.pyobjc_id(desc))
         status = self._ca.AudioObjectSetPropertyData(
             tap_id, self._address(self._ca.kAudioTapPropertyDescription), 0, self._objc.NULL, len(pointer), pointer)

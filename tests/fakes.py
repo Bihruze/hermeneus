@@ -126,6 +126,7 @@ class FakeStt:
         self.last_loud = 0
         self.index = 0
         self.arrivals: list[dict] = []
+        self.emitted: list = []  # every transcript event exactly as handed to on_event
         self.closed = False
 
     async def start(self) -> None:
@@ -136,7 +137,9 @@ class FakeStt:
     def _emit(self, ev_fn):
         def fire():
             if not self.closed:
-                self.on_event(ev_fn())
+                ev = ev_fn()
+                self.emitted.append(ev)
+                self.on_event(ev)
         return fire
 
     def send_audio(self, pcm: bytes, capture_ns: int) -> None:
@@ -239,6 +242,7 @@ class FakeSpeaker:
         self.playback_ms = playback_ms
         self.timer = PreciseTimer()
         self.spoken: list[str] = []
+        self.calls: list[dict] = []
 
     async def speak(self, text, *, language):
         first = m.stage_marker(m.Stage.TTS_FIRST_AUDIO)
@@ -246,18 +250,24 @@ class FakeSpeaker:
         loop = asyncio.get_running_loop()
         done = loop.create_future()
         t0 = time.monotonic_ns()
+        call = {"start_ns": t0}
 
+        # Each marker gets the fake's own timestamp, the way a real speaker would pass the
+        # time of its audio callback, so the test can compare harness stages exactly.
         def fire_first():
-            first()
+            call["first_ns"] = time.monotonic_ns()
+            first(call["first_ns"])
 
         def fire_play():
-            play()
+            call["play_ns"] = time.monotonic_ns()
+            play(call["play_ns"])
             loop.call_soon_threadsafe(done.set_result, None)
 
         self.timer.at(t0 + int(self.first_audio_ms * 1e6), fire_first)
         self.timer.at(t0 + int((self.first_audio_ms + self.playback_ms) * 1e6), fire_play)
         await done
         self.spoken.append(text)
+        self.calls.append(call)
 
     async def close(self):
         self.timer.close()

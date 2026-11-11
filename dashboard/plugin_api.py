@@ -98,6 +98,7 @@ async def devices(backend: Optional[str] = Query(None), source_id: Optional[str]
 @router.get("/doctor")
 async def doctor() -> dict:
     report = await asyncio.to_thread(_doctor.run, get_secret=_glue.get_secret, aux_config=_glue.aux_config())
+    report.checks.append(_commands.overlay_check(plugin.settings(), await plugin.controller.overlay()))
     return report.to_dict()
 
 

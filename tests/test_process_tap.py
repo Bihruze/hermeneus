@@ -412,3 +412,374 @@ def test_real_worker_module_starts_and_exits_on_empty_input():
     out, err = proc.communicate(b"", timeout=30)
     assert proc.returncode == 0, err.decode()
     assert out == b""
+
+
+# ---------------------------------------------------------------- silence watchdog and format changes
+
+from hermeneus_engine.capture import _tap_engine as eng  # noqa: E402
+
+
+def watchdog_capture(hal, **kw):
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None,
+                     on_status=lambda c, m, d: statuses.append(c), refresh_interval=1000, **kw)
+    cap.open()
+    return cap, statuses
+
+
+def feed_and_wait(hal, cap, samples, n=1):
+    before = cap.stats.buffers
+    for _ in range(n):
+        hal.feed(0, samples)
+    assert wait_for(lambda: cap.stats.buffers >= before + n)
+
+
+def test_watchdog_reports_no_audio_when_denied_and_never_heard():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    cap, statuses = watchdog_capture(hal)
+    zeros = np.zeros(512, dtype=np.float32)
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(0.0)
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(3.0)  # 3 s of silence while playing: first rebuild
+    assert statuses == [eng.STATUS_REBUILT] and cap.stats.silent_rebuilds == 1
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(8.9)
+    assert cap.stats.silent_rebuilds == 1  # the second wait is doubled to 6 s
+    feed_and_wait(hal, cap, zeros)
+    cap.tick(9.0)
+    assert statuses == [eng.STATUS_REBUILT, eng.STATUS_REBUILT, eng.STATUS_NO_AUDIO]
+    assert [c[0] for c in hal.calls].count("create_tap") == 3
+    cap.close()
+    assert hal.clean
+
+
+def test_watchdog_ignores_silence_when_nothing_plays():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=False)
+    cap, statuses = watchdog_capture(hal)
+    for t in (0.0, 5.0, 50.0):
+        feed_and_wait(hal, cap, np.zeros(512, dtype=np.float32))
+        cap.tick(t)
+    assert statuses == [] and cap.stats.rebuilds == 0
+    cap.close()
+
+
+def test_watchdog_rebuilds_a_stalled_tap_then_reports_after_the_cap():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    cap, statuses = watchdog_capture(hal, max_rebuilds=2)
+    feed_and_wait(hal, cap, sine(440, 512))
+    cap.tick(0.0)  # audio heard
+    t = 1.0
+    for _ in range(6):
+        feed_and_wait(hal, cap, np.zeros(512, dtype=np.float32))
+        cap.tick(t)
+        t += 20.0
+    assert statuses == [eng.STATUS_REBUILT, eng.STATUS_REBUILT, eng.STATUS_STALLED]
+    feed_and_wait(hal, cap, sine(440, 512))
+    cap.tick(t)
+    assert statuses[-1] == eng.STATUS_RECOVERED
+    cap.close()
+    assert hal.clean
+
+
+def test_rate_change_rebuilds_with_a_new_resampler():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    got = []
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: got.append(pcm),
+                     on_status=lambda c, m, d: statuses.append((c, d)), refresh_interval=1000)
+    cap.open()
+    hal.fmt = hal.fmt.__class__(44100.0, hal.fmt.format_id, hal.fmt.format_flags, 1, 32)
+    cap.tick(0.0)
+    assert statuses == [(eng.STATUS_FORMAT_CHANGED, {"old_rate": 48000, "new_rate": 44100})]
+    assert cap.stats.format_rebuilds == 1
+    got.clear()
+    hal.feed(0, sine(440, 4410, rate=44100))
+    assert wait_for(lambda: cap.stats.buffers >= 1)
+    cap.close()
+    assert sum(len(p) for p in got) // 2 == 1600
+
+
+def test_backend_turns_no_audio_status_into_a_permission_message():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    seen = []
+    b = ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID,
+                          on_status=lambda c, m, d: seen.append((c, m)), responsible_app=lambda: "Terminal")
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    run = b._run
+    b._handle_status(run, json.dumps({"code": "no-audio", "message": "x", "details": {}}).encode())
+    b.stop()
+    code, message = seen[0]
+    assert code == "no-audio" and b.failure == message
+    assert "Screen & System Audio Recording" in message and "'Terminal'" in message
+
+
+# ---------------------------------------------------------------- doctor
+
+from hermeneus_engine.capture import tap_doctor  # noqa: E402
+
+
+class FakePlayer:
+    def __init__(self, hal, feed):
+        self.pid = 77
+        self.killed = False
+        self.began = False
+        self._hal, self._feed = hal, feed
+
+    def begin(self):
+        self.began = True
+        threading.Thread(target=lambda: (time.sleep(0.2), self._feed(self._hal)), daemon=True).start()
+
+    def kill(self):
+        self.killed = True
+
+
+def doctor_with(hal, feed):
+    hal.add_process(1, 77, playing=True)
+    players = []
+
+    def factory():
+        players.append(FakePlayer(hal, feed))
+        return players[-1]
+
+    result = tap_doctor.check_process_tap(
+        backend_factory=lambda **kw: ProcessTapBackend(lambda: hal, spawn=lambda: PipeWorker(hal), own_pid=OWN_PID, **kw),
+        player_factory=factory, app_name=lambda: "Terminal")
+    assert players and players[0].killed
+    return result
+
+
+def test_doctor_passes_on_the_test_tone():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, sine(440, 4800, amp=0.1, start=i * 4800))
+                                            for i in range(10)])
+    assert r.ok and r.code == "ok", r
+    assert -25 < r.details["rms_dbfs"] < -21
+
+
+def test_doctor_reports_denied_permission_with_the_pane():
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, np.zeros(4800, dtype=np.float32)) for i in range(10)])
+    assert not r.ok and r.code == "permission-denied"
+    assert "System Settings > Privacy & Security > Screen & System Audio Recording" in r.message
+    assert "'Terminal'" in r.message
+
+
+def test_doctor_rejects_audio_that_is_not_the_tone():
+    rng = np.random.default_rng(1)
+    r = doctor_with(FakeHAL(), lambda hal: [hal.feed(i * 4800, (rng.standard_normal(4800) * 0.1).astype(np.float32))
+                                            for i in range(10)])
+    assert not r.ok and r.code == "wrong-audio"
+
+
+def test_doctor_mutes_the_tapped_player():
+    hal = FakeHAL()
+    doctor_with(hal, lambda h: [h.feed(i * 4800, sine(440, 4800, amp=0.1, start=i * 4800)) for i in range(10)])
+    assert hal.muted is True
+
+
+def test_doctor_reports_start_failure():
+    hal = FakeHAL()
+    hal.fail["create_tap"] = HALError("create process tap", 2003332927)
+    r = doctor_with(hal, lambda hal: None)
+    assert not r.ok and r.code == "start-failed" and "create process tap" in r.message
+
+
+# ---------------------------------------------------------------- worker environment and doctor seam
+
+def test_worker_env_carries_no_secrets():
+    parent = {"PATH": "/usr/bin", "HOME": "/Users/x", "TMPDIR": "/tmp/x", "LANG": "en_US.UTF-8",
+              "ELEVENLABS_API_KEY": "sk-1", "OPENROUTER_API_KEY": "sk-2", "GITHUB_TOKEN": "t", "HERMES_SECRET": "s",
+              "ANTHROPIC_AUTH_TOKEN": "a", "AWS_SECRET_ACCESS_KEY": "k", "PYTHONPATH": "/elsewhere"}
+    env = process_tap.worker_env(parent, path=[])
+    assert not [k for k in env if k.endswith(("_KEY", "_TOKEN", "_SECRET")) or "SECRET" in k or "TOKEN" in k]
+    assert set(env) <= set(process_tap.WORKER_ENV_ALLOWLIST) | {"PYTHONPATH", "PYTHONUNBUFFERED"}
+    assert env["PYTHONPATH"] == str(process_tap._PACKAGE_ROOT) and env["PATH"] == "/usr/bin"
+
+
+def test_worker_path_carries_the_parent_sys_path(tmp_path):
+    deps = tmp_path / "plugin-env" / "site-packages"
+    deps.mkdir(parents=True)
+    env = process_tap.worker_env({}, path=["", str(deps), str(tmp_path / "missing")])
+    assert env["PYTHONPATH"].split(os.pathsep) == [str(process_tap._PACKAGE_ROOT), str(deps)]
+
+
+def test_spawn_worker_passes_the_minimal_env(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+    monkeypatch.setenv("SOME_PROVIDER_TOKEN", "tok")
+    seen = {}
+
+    def fake_popen(args, **kw):
+        seen.update(kw)
+        return object()
+
+    monkeypatch.setattr(process_tap.subprocess, "Popen", fake_popen)
+    process_tap.spawn_worker()
+    assert "ELEVENLABS_API_KEY" not in seen["env"] and "SOME_PROVIDER_TOKEN" not in seen["env"]
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="spawns the real worker module")
+def test_real_worker_sees_no_secrets(monkeypatch):
+    monkeypatch.setenv("ELEVENLABS_API_KEY", "sk-test")
+    env = process_tap.worker_env()
+    out = subprocess.run([sys.executable, "-c", "import os, json; print(json.dumps(sorted(os.environ)))"],
+                         env=env, capture_output=True, text=True, timeout=30).stdout
+    names = json.loads(out)
+    assert not [k for k in names if k.endswith(("_KEY", "_TOKEN", "_SECRET"))]
+
+
+def test_status_message_and_failure_follow_worker_status():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    b = make_backend(hal)
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    b._handle_status(b._run, json.dumps({"code": "rebuilt", "message": "tap rebuilt", "details": {}}).encode())
+    assert b.status_message == "tap rebuilt" and b.failure == ""
+    b._handle_status(b._run, json.dumps({"code": "recovered", "message": "back", "details": {}}).encode())
+    assert b.status_message == ""
+    b._handle_status(b._run, json.dumps({"code": "stalled", "message": "x", "details": {}}).encode())
+    assert "stopped receiving audio" in b.failure
+    b.stop()
+
+
+def test_verify_seam_is_wired(monkeypatch):
+    from hermeneus_engine import components
+    fn = components.load("capture.verify_tap_audio")
+    monkeypatch.setattr(tap_doctor, "check_process_tap",
+                        lambda timeout_s=30.0: tap_doctor.DoctorResult(False, "permission-denied", "allow it"))
+    assert fn() == (False, "allow it")
+
+
+# ---------------------------------------------------------------- PortAudio reader path
+
+class FakePAStream:
+    def __init__(self, rate):
+        self.rate = rate
+        self.latency_s = 0.05
+        self.blocks = queue_mod.Queue()
+        self.closed = False
+
+    def read(self, frames=512, stop=None):
+        while True:
+            try:
+                item = self.blocks.get(timeout=0.01)
+            except queue_mod.Empty:
+                if stop is not None and stop.is_set():
+                    return np.zeros(0, dtype=np.float32), False
+                continue
+            if item is None:
+                raise RuntimeError("stream closed")
+            return item
+
+    def close(self):
+        self.closed = True
+        self.blocks.put(None)
+
+
+class FakePA:
+    def __init__(self):
+        self.opened = []
+
+    def open(self, name, rate):
+        s = FakePAStream(rate)
+        self.opened.append((name, rate, s))
+        return s
+
+
+import queue as queue_mod  # noqa: E402
+
+
+def pa_capture(hal, got, **kw):
+    pa = FakePA()
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: got.append((pcm, ts)),
+                     reader=eng.READER_PORTAUDIO, pa_factory=lambda: pa, refresh_interval=1000, **kw)
+    cap.open()
+    return cap, pa
+
+
+def test_portaudio_reader_converts_and_counts_overflows():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    got = []
+    cap, pa = pa_capture(hal, got)
+    name, rate, stream = pa.opened[0]
+    assert name.startswith("Hermeneus capture ") and rate == 48000
+    assert "create_ioproc" not in hal.names()
+    t0 = time.monotonic_ns()
+    for i in range(10):
+        stream.blocks.put((sine(440, 4800, start=i * 4800), i == 3))
+    assert wait_for(lambda: cap.stats.buffers == 10)
+    assert cap.close() == []
+    assert stream.closed and hal.clean
+    pcm = np.frombuffer(b"".join(p for p, _ in got), dtype="<i2")
+    assert pcm.size == 16000 and cap.stats.overflows == 1
+    assert got[0][1] < t0  # stamped before arrival: block length plus reported latency
+
+
+def test_portaudio_reader_is_reopened_on_rebuild():
+    hal = FakeHAL()
+    hal.add_process(1, 77, playing=True)
+    got = []
+    cap, pa = pa_capture(hal, got)
+    assert cap.rebuild("silence")
+    assert len(pa.opened) == 2 and pa.opened[0][2].closed and not pa.opened[1][2].closed
+    assert pa.opened[0][0] != pa.opened[1][0]  # a fresh aggregate name each time
+    pa.opened[0][2].blocks.put((sine(440, 4800), False))  # late block from the old stream is ignored
+    pa.opened[1][2].blocks.put((sine(440, 4800), False))
+    assert wait_for(lambda: cap.stats.buffers == 1)
+    cap.close()
+    assert hal.clean
+
+
+# ---------------------------------------------------------------- device changes and app restarts
+
+def test_default_output_change_rebuilds_and_reports():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="pid", pid=77), lambda pcm, ts: None,
+                     on_status=lambda c, m, d: statuses.append((c, m)), refresh_interval=1000)
+    cap.open()
+    cap.tick(0.0)  # records the device state
+    assert cap.stats.rebuilds == 0
+    hal.default_out = 51
+    cap.tick(1.0)
+    assert statuses == [(eng.STATUS_DEVICES_CHANGED, "The output device changed to BlackHole 2ch; capture was rebuilt.")]
+    assert cap.stats.device_rebuilds == 1
+    cap.tick(2.0)
+    assert cap.stats.device_rebuilds == 1  # no change, no rebuild
+    hal.devices.append(52)  # headphones connected
+    cap.tick(3.0)
+    assert statuses[-1] == (eng.STATUS_DEVICES_CHANGED, "The list of audio devices changed; capture was rebuilt.")
+    cap.close()
+    assert hal.clean and [c[0] for c in hal.calls].count("create_tap") == 3
+
+
+def test_app_restart_reattaches_with_a_status():
+    hal = chrome_hal()
+    statuses = []
+    cap = TapCapture(hal, TapSpec(mode="app", bundle_id="com.hnc.Discord", exclude_pids=(OWN_PID,)),
+                     lambda pcm, ts: None, on_status=lambda c, m, d: statuses.append(c), refresh_interval=1000)
+    cap.open()
+    del hal.processes[14]  # Discord quits
+    assert cap.refresh() is False  # nothing to tap: the tap keeps its last processes
+    hal.add_process(40, 140, "com.hnc.Discord", app=AppInfo("Discord", True))  # and starts again
+    hal.add_process(41, 141, "com.hnc.Discord.helper")
+    assert cap.refresh() is True
+    assert statuses == [eng.STATUS_REATTACHED] and cap.stats.reattaches == 1
+    assert hal.tap_processes[cap.tap_id] == ([40, 41], False)
+    cap.close()
+
+
+def test_backend_shows_device_and_reattach_notes_without_failing():
+    hal = FakeHAL()
+    hal.add_process(1, 77)
+    b = make_backend(hal)
+    b.start(CaptureSource("process-tap", "pid:77", "afplay"), lambda pcm, ts: None)
+    for code in ("devices-changed", "reattached"):
+        b._handle_status(b._run, json.dumps({"code": code, "message": f"note {code}", "details": {}}).encode())
+        assert b.status_message == f"note {code}" and b.failure == ""
+    b.stop()

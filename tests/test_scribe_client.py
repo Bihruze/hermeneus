@@ -29,6 +29,7 @@ from hermeneus_engine.contracts import (
     SttStatus,
 )
 from hermeneus_engine.stt.scribe import (
+    _trailing_quiet_ms,
     FATAL_ERRORS,
     RETRYABLE_ERRORS,
     ScribeLiveClient,
@@ -288,6 +289,47 @@ async def test_commit_waits_for_language_then_times_out(fake):
     # The partial that arrived after the commit is not emitted ahead of it.
     assert events.index(committed) < events.index(of(events, PartialTranscript)[0])
     assert client.stats.languages_missed == 1
+    await client.close()
+
+
+async def test_language_event_before_its_commit_is_merged(fake):
+    # Live order for a client commit:true (run1_vad_smoke.json): the language
+    # event arrives 2 ms before committed_transcript.
+    async def script(conn):
+        await conn.started()
+        await conn.send("committed_transcript_with_timestamps", text="İyi akşamlar.", language_code="tr",
+                        words=None)
+        await conn.send("committed_transcript", text="İyi akşamlar.", segment_index=0)
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [script]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(language_wait=5.0, drain_quiet=0.1))
+    await client.start()
+    events = await collect(client, lambda ev, out: isinstance(ev, CommittedTranscript), timeout=2)
+    [committed] = of(events, CommittedTranscript)
+    assert (committed.text, committed.language_code) == ("İyi akşamlar.", "tr")
+    assert client.stats.languages_missed == 0
+    await client.close()
+
+
+async def test_late_language_event_does_not_label_the_next_commit(fake):
+    async def script(conn):
+        await conn.started()
+        await conn.send("committed_transcript", text="first", segment_index=0)
+        await asyncio.sleep(0.3)  # past language_wait
+        await conn.send("committed_transcript_with_timestamps", text="first", language_code="en")
+        await conn.send("committed_transcript", text="second", segment_index=1)
+        await conn.send("committed_transcript_with_timestamps", text="second", language_code="tr")
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [script]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(language_wait=0.1, drain_quiet=0.1))
+    await client.start()
+    events = await collect(client, lambda ev, out: len(of(out, CommittedTranscript)) == 2)
+    assert [(c.text, c.language_code) for c in of(events, CommittedTranscript)] == [
+        ("first", None), ("second", "tr")]
     await client.close()
 
 
@@ -595,7 +637,7 @@ async def test_server_error_text_is_redacted(fake, caplog):
 # ---------------------------------------------------------------- rotation
 
 
-async def test_proactive_rotation_at_commit_boundary_keeps_order_without_loss(fake):
+async def test_rotation_without_a_pause_keeps_order_without_loss(fake):
     async def old(conn):
         await conn.started()
         # Natural VAD commit some time after the rotation interval has passed.
@@ -621,8 +663,9 @@ async def test_proactive_rotation_at_commit_boundary_keeps_order_without_loss(fa
         await conn.closed_by_client.wait()
 
     fake.scripts = [old, new]
-    client = make_client(fake, tuning=ScribeTuning(rotation_seconds=0.2, boundary_wait=3.0,
-                                                   drain_quiet=0.5, drain_timeout=3.0))
+    client = make_client(fake, tuning=ScribeTuning(rotation_seconds=0.2, boundary_wait=1.0,
+                                                   drain_quiet=0.5, drain_timeout=3.0,
+                                                   segment_soft_seconds=0, segment_hard_seconds=0))
     await client.start()
     await collect(client, status_is(SttState.LIVE))
     # Session 1 keeps its 0.2 s rotation deadline; session 2 gets a long one so
@@ -676,3 +719,203 @@ async def test_close_while_reconnecting_ends_cleanly(fake):
     await asyncio.wait_for(client.close(), 2)
     events = await collect(client, status_is(SttState.CLOSED, SttState.FAILED))
     assert events[-1].state == SttState.CLOSED
+
+
+# ---------------------------------------------------------------- segment length cap
+
+
+def loud(nbytes: int) -> bytes:
+    return (8000).to_bytes(2, "little", signed=True) * (nbytes // 2)
+
+
+def test_trailing_quiet_run():
+    quiet_100ms = bytes(3200)
+    assert _trailing_quiet_ms(quiet_100ms, 0, -40.0) == 100
+    assert _trailing_quiet_ms(quiet_100ms, 70, -40.0) == 170
+    assert _trailing_quiet_ms(loud(3200), 500, -40.0) == 0
+    assert _trailing_quiet_ms(loud(1600) + bytes(1600), 500, -40.0) == 50
+
+
+def test_build_url_with_vad_silence_threshold():
+    url = build_url(SttConfig(), ScribeTuning(vad_silence_threshold_secs=0.2))
+    assert url.endswith("&include_language_detection=true&vad_silence_threshold_secs=0.2")
+
+
+def commit_flags(conn):
+    return [m["commit"] for m in conn.received if m["message_type"] == "input_audio_chunk"]
+
+
+async def feed_and_close(client, conn, chunks):
+    total = len(conn.audio())
+    for chunk in chunks:
+        client.send_audio(chunk, 0)
+        total += len(chunk)
+    while len(conn.audio()) < total:
+        await asyncio.sleep(0.01)
+    await client.close()
+
+
+async def test_pause_commit_after_soft_limit(fake):
+    client = make_client(fake, tuning=ScribeTuning(segment_soft_seconds=0.3, segment_hard_seconds=0,
+                                                   pause_ms=120, drain_quiet=0.1))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    # 0.4 s of speech, then 0.2 s of silence, then speech again.
+    await feed_and_close(client, fake.conns[0], [loud(3200)] * 4 + [bytes(3200)] * 2 + [loud(3200)] * 2)
+    flags = commit_flags(fake.conns[0])
+    # The commit follows the second quiet chunk (200 ms quiet >= 120 ms), then the close commit.
+    assert flags == [False] * 6 + [True] + [False] * 2 + [True]
+    assert client.stats.pause_commits == 1 and client.stats.hard_commits == 0
+
+
+async def test_hard_commit_without_pause(fake):
+    client = make_client(fake, tuning=ScribeTuning(segment_soft_seconds=0, segment_hard_seconds=0.5,
+                                                   drain_quiet=0.1))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    await feed_and_close(client, fake.conns[0], [loud(3200)] * 7)
+    assert commit_flags(fake.conns[0]) == [False] * 5 + [True] + [False] * 2 + [True]
+    assert client.stats.hard_commits == 1
+
+
+async def test_server_commit_resets_segment_length(fake):
+    async def script(conn):
+        await conn.started()
+        for _ in range(4):
+            await conn.wait_for(lambda m: m["message_type"] == "input_audio_chunk")
+        await conn.send("committed_transcript", text="vad commit", segment_index=0)
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [script]
+    client = make_client(fake, tuning=ScribeTuning(segment_soft_seconds=0, segment_hard_seconds=0.6,
+                                                   drain_quiet=0.1))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    for _ in range(4):
+        client.send_audio(loud(3200), 0)
+    await collect(client, lambda ev, out: isinstance(ev, CommittedTranscript))
+    await feed_and_close(client, fake.conns[0], [loud(3200)] * 4)
+    # 0.8 s sent in total, but never 0.6 s since the server commit.
+    assert commit_flags(fake.conns[0]) == [False] * 8 + [True]
+    assert client.stats.hard_commits == 0
+
+
+async def test_rotation_switches_at_a_pause_in_sent_audio(fake):
+    client = make_client(fake, tuning=ScribeTuning(rotation_seconds=0.2, boundary_wait=5.0, pause_ms=120,
+                                                   drain_quiet=0.2, segment_soft_seconds=0,
+                                                   segment_hard_seconds=0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client._rotation_seconds = 60.0
+    plan = [loud(3200)] * 8 + [bytes(3200)] * 2 + [loud(3200)] * 4
+    for chunk in plan:
+        client.send_audio(chunk, 0)
+        await asyncio.sleep(0.05)
+    while len(fake.conns) < 2 or len(fake.conns[0].audio()) + len(fake.conns[1].audio()) < 14 * 3200:
+        await asyncio.sleep(0.01)
+    await client.close()
+    # The old session got everything up to and including the 200 ms pause; the new one starts after it.
+    assert fake.conns[0].audio() == b"".join(plan[:10])
+    assert fake.conns[1].audio() == b"".join(plan[10:])
+    assert client.stats.rotations == 1
+
+
+# ---------------------------------------------------------------- bounded close
+
+
+def answer_final_commit(delay: float = 0.1, hold_close: float = 0.0, text: str = "tail words"):
+    async def script(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m.get("commit") is True)
+        await asyncio.sleep(delay)
+        await conn.send("committed_transcript", text=text, segment_index=0)
+        await conn.send("committed_transcript_with_timestamps", text=text, language_code="en")
+        await conn.send("diarized_transcript", segment_index=0, text=text,
+                        words=[{"text": text, "speaker_id": "speaker_0"}])
+        if hold_close:
+            # Stop reading, so the client's close frame goes unanswered for a while.
+            conn.ws.transport.pause_reading()
+            await asyncio.sleep(hold_close)
+            conn.ws.transport.resume_reading()
+        await conn.closed_by_client.wait()
+    return script
+
+
+async def test_close_returns_once_the_final_commit_is_answered(fake):
+    fake.scripts = [answer_final_commit(delay=0.1)]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(drain_quiet=2.0, close_budget=3.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(3200), 0)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=3.0)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed < 0.6  # no drain_quiet wait after the answer
+    [committed] = of(events, CommittedTranscript)
+    assert (committed.text, committed.language_code) == ("tail words", "en")
+    assert events.index(committed) < len(events) - 1
+    assert set(client.stats.close_ms) >= {"audio sent", "final commit sent", "socket closed", "closed"}
+    await asyncio.wait_for(fake.conns[0].closed_by_client.wait(), 2)
+    assert fake.conns[0].ws.close_code == 1000
+
+
+async def test_close_is_bounded_when_the_server_delays_its_close_frame(fake):
+    fake.scripts = [answer_final_commit(delay=0.2, hold_close=3.0)]
+    client = make_client(fake, include_language_detection=True,
+                         tuning=ScribeTuning(drain_quiet=0.5, close_timeout=2.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    client.send_audio(loud(3200), 0)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=1.0)
+    assert len(fake.conns[0].audio()) == 3200  # audio queued just before close() was sent
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 1.1
+    # Text that arrived inside the budget is emitted before CLOSED.
+    assert [c.text for c in of(events, CommittedTranscript)] == ["tail words"]
+    assert events[-1].state == SttState.CLOSED
+    assert "forced" not in client.stats.close_ms
+    # The client sent its close frame with code 1000 before giving up on the reply.
+    await asyncio.wait_for(fake.conns[0].closed_by_client.wait(), 5)
+    assert fake.conns[0].ws.close_code == 1000
+
+
+async def test_close_is_bounded_when_the_server_never_answers(fake):
+    async def silent(conn):
+        await conn.started()
+        await conn.wait_for(lambda m: m.get("commit") is True)
+        conn.ws.transport.pause_reading()
+        await asyncio.sleep(3)
+        conn.ws.transport.resume_reading()
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [silent]
+    client = make_client(fake, tuning=ScribeTuning(drain_quiet=5.0, close_timeout=5.0))
+    await client.start()
+    await collect(client, status_is(SttState.LIVE))
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=0.5)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 0.6 and events[-1].state == SttState.CLOSED
+
+
+async def test_close_while_connecting_is_bounded(fake):
+    async def slow(conn):
+        await asyncio.sleep(3)
+        await conn.started()
+        await conn.closed_by_client.wait()
+
+    fake.scripts = [slow]
+    client = make_client(fake)
+    await client.start()
+    await asyncio.sleep(0.1)
+    started = asyncio.get_running_loop().time()
+    await client.close(timeout=0.4)
+    elapsed = asyncio.get_running_loop().time() - started
+    events = await collect(client, status_is(SttState.CLOSED))
+    assert elapsed <= 0.5 and events[-1].state == SttState.CLOSED
+    assert "forced" in client.stats.close_ms

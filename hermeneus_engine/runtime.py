@@ -226,11 +226,13 @@ class SessionRuntime:
     """Lock, socket server and session for one run, on the current loop."""
 
     def __init__(self, data_dir: Path, options: SessionOptions, build: ComponentBuilder, *,
-                 owner: str, bus: Optional[SubtitleBus] = None) -> None:
+                 owner: str, bus: Optional[SubtitleBus] = None, overlay_page=None) -> None:
         self.data_dir = Path(data_dir)
         self.options = options
         self._build = build
         self.owner = owner
+        # An overlay_page.OverlayPage, or None. It serves while the session runs.
+        self.overlay_page = overlay_page
         self.bus = bus or SubtitleBus(max_lines=options.max_lines)
         self.session: Optional[TranslationSession] = None
         self._lock = SessionLock(self.data_dir)
@@ -246,7 +248,7 @@ class SessionRuntime:
                             "socket": str(sock)})
         try:
             remove_stale_socket(sock)
-            self._server = BusServer(sock, self.bus, on_stop=self.request_stop)
+            self._server = BusServer(sock, self.bus, on_stop=self.request_stop, on_overlay=self._overlay_request)
             await self._server.start()
             loop = asyncio.get_running_loop()
 
@@ -265,11 +267,25 @@ class SessionRuntime:
             await self._close_server()
             self._lock.release()
             raise
+        if self.overlay_page is not None:
+            # After the session is live, on a worker thread: the page never delays the audio path.
+            await asyncio.to_thread(self.overlay_page.auto_start)
+
+    async def _overlay_request(self, on: Optional[bool], port: Optional[int]) -> dict:
+        if self.overlay_page is None:
+            return {"type": "overlay", "running": False, "url": None, "port": None,
+                    "error": "this session was started without the overlay page"}
+        return await asyncio.to_thread(self.overlay_page.switch, on, port)
 
     def request_stop(self) -> None:
         """Ask the run to stop. Safe from the runtime's loop thread."""
         if self._stop_requested is not None:
             self._stop_requested.set()
+
+    async def wait_stop_requested(self) -> None:
+        """Return when a stop was asked for, for example by ``{"op": "stop"}`` on the socket."""
+        assert self._stop_requested is not None, "start() was not called"
+        await self._stop_requested.wait()
 
     async def wait(self) -> None:
         """Return when the session ended by itself or a stop was requested, then clean up."""
@@ -286,6 +302,8 @@ class SessionRuntime:
     async def close(self, message: str = "stopped") -> None:
         if self.session is not None and not self.session.closed:
             await self.session.stop(message)
+        if self.overlay_page is not None:
+            await asyncio.to_thread(self.overlay_page.stop)
         await self._close_server()
         self.bus.close()
         self._lock.release()
@@ -317,7 +335,7 @@ class SessionHost:
         return self.runtime.bus if self.runtime is not None else None
 
     def start(self, options: SessionOptions, build: ComponentBuilder, *,
-              timeout: float = START_TIMEOUT_S) -> dict:
+              timeout: float = START_TIMEOUT_S, overlay_page=None) -> dict:
         """Start a session on a new thread. Returns its status. Raises SessionBusy or the start error.
 
         The thread runs in a copy of the caller's context, so profile and
@@ -329,7 +347,7 @@ class SessionHost:
                 raise SessionBusy({"pid": os.getpid(), "owner": self.owner})
             started = threading.Event()
             outcome: dict = {}
-            runtime = SessionRuntime(self.data_dir, options, build, owner=self.owner)
+            runtime = SessionRuntime(self.data_dir, options, build, owner=self.owner, overlay_page=overlay_page)
 
             async def main() -> None:
                 self._loop = asyncio.get_running_loop()

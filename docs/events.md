@@ -25,7 +25,13 @@ higher. After a gap (socket dropped, process restarted) it asks
 
 - `hello` opens every accepted socket. `session` holds the latest status
   fields and the latest `seq`.
-- `line`: the same `line_id` updates a line in place. `state` is `partial`
+- `line`: the same `line_id` updates a line in place. A line holds one
+  sentence: a sentence is sent for translation as soon as the partial
+  transcript shows it complete and unchanged (`hermeneus_engine/sentences.py`),
+  and the partial line keeps only the words after it. When Scribe commits the
+  segment, its remaining sentences become their own lines. A line that ended
+  up with no words (Scribe dropped them at commit) is sent as `translated`
+  with empty `original` and `translation`; consumers may hide it. `state` is `partial`
   (still changing), `committed` (final original, translation pending),
   `translated`, or `failed` (translation failed or was skipped to keep up; the
   original stays, `error` says why).
@@ -36,7 +42,10 @@ higher. After a gap (socket dropped, process restarted) it asks
   `stopping`, `failed`. `message` is plain language. `metrics` holds counters
   (`audio_chunks_in`, `audio_chunks_dropped`, `audio_dropped_ms`,
   `audio_queued_ms`, `lines_committed`, `lines_translated`, `lines_failed`,
-  `speak_errors`, `translation_backlog`, `uptime_s`).
+  `speak_errors`, `sentences_released_early`, `translation_backlog`,
+  `uptime_s`). When translations fail, `message` names the reason and the
+  fix once, again when it changes, and at most every 30 s otherwise; it is
+  cleared by the next translated line.
 - `status.languages` lists every subtitle target with `speakable` for spoken
   translation. `code`, `target_language`, `source_language` and
   `detected_language` use ISO 639-1 where one exists, otherwise ISO 639-3.
@@ -72,4 +81,17 @@ The owner listens on `<HERMES_HOME>/plugin-data/hermeneus/run/sock` (mode
 `{"op": "status"}`, `{"op": "lines", "after": <seq or null>}` (answers
 `{"type": "lines", "seq", "reset", "events"}`), `{"op": "subscribe", "after":
 <seq or null>}` (a stream as above), `{"op": "stop"}` (answers `{"type":
-"ok"}`).
+"ok"}`), `{"op": "overlay", "on": <true, false or null>, "port": <int or null>}`
+(switches the overlay page, null only asks; answers `{"type": "overlay",
+"running", "url", "port", "error"}`).
+
+## Overlay page
+
+With the overlay page on, the session owner serves `http://127.0.0.1:<port>/<token>/`
+and `GET /<token>/events`, a Server-Sent Events stream. Each SSE `data:` line
+is one event from the list above, cut down to what the page draws: `hello`
+and `status` keep only `state`, `line` keeps `line_id`, `state`, `original`,
+`translation` and `speaker_id`; `relabel` and `reset` are unchanged. Line,
+relabel and status events carry their `seq` as the SSE `id`, so a reconnect
+resumes from `Last-Event-ID`. A first connection gets every stored line
+(`after` 0). The stream reads the session through `Controller.subscribe`.

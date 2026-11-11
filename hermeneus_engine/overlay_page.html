@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="referrer" content="no-referrer">
+<title>Hermeneus subtitles</title>
+<style>
+/* Colour and type values are copied from Hermes Desktop so the page matches the app.
+   Light: apps/desktop/src/styles.css:206 (--theme-foreground), :214 (--theme-card-seed),
+   :243-249 (--ui-* accents), :364-365 (text at 94% and 74% of the base colour),
+   :476-478 (--dt-font-sans), :159 and :501 (--radius-lg with --radius-scalar 0.2).
+   Dark: styles.css:612-614 (dark --ui-green and --ui-cyan) and the Nous dark palette in
+   apps/shared/src/theme-presets.ts:155-156 (background, foreground) and :163 (primary). */
+:root {
+  --surface: #ffffff;
+  --text-primary: rgba(23, 23, 26, 0.94);
+  --text-secondary: rgba(23, 23, 26, 0.74);
+  --speaker-1: #0053fd;
+  --speaker-2: #1f8a65;
+  --speaker-3: #db704b;
+  --speaker-4: #9e94d5;
+  --speaker-5: #4c7f8c;
+  --speaker-6: #c08532;
+  --font-sans: 'Segoe WPC', 'Segoe UI', -apple-system, BlinkMacSystemFont, 'SF Pro Text', system-ui, sans-serif,
+    'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji', emoji;
+  --radius: calc(0.2 * 0.75rem);
+  --text-size: 26px;
+  --box-opacity: 0.8;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --surface: #0d1117;
+    --text-primary: rgba(230, 237, 243, 0.94);
+    --text-secondary: rgba(230, 237, 243, 0.74);
+    --speaker-1: #4a84fe;
+    --speaker-2: #55a583;
+    --speaker-5: #6f9ba6;
+  }
+}
+:root[data-theme="dark"] {
+  --surface: #0d1117;
+  --text-primary: rgba(230, 237, 243, 0.94);
+  --text-secondary: rgba(230, 237, 243, 0.74);
+  --speaker-1: #4a84fe;
+  --speaker-2: #55a583;
+  --speaker-5: #6f9ba6;
+}
+html, body {
+  margin: 0;
+  background: transparent;
+  overflow: hidden;
+}
+[hidden] { display: none !important; }
+#subtitles {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 6vh;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.3em;
+  font-family: var(--font-sans);
+  font-size: var(--text-size);
+  line-height: 1.3;
+}
+.line {
+  position: relative;
+  isolation: isolate;
+  max-width: min(92vw, 40em);
+  padding: 0.2em 0.55em;
+  border-radius: var(--radius);
+  text-align: center;
+  color: var(--text-primary);
+  text-shadow: 0 0 0.1em var(--surface), 0 0 0.25em var(--surface);
+  overflow-wrap: anywhere;
+}
+.line::before {
+  content: '';
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  background: var(--surface);
+  opacity: var(--box-opacity);
+}
+.original {
+  display: block;
+  font-size: 0.62em;
+  color: var(--text-secondary);
+}
+.speaker {
+  font-size: 0.62em;
+  font-weight: 600;
+  margin-inline-end: 0.5em;
+}
+.speaker[data-slot="1"] { color: var(--speaker-1); }
+.speaker[data-slot="2"] { color: var(--speaker-2); }
+.speaker[data-slot="3"] { color: var(--speaker-3); }
+.speaker[data-slot="4"] { color: var(--speaker-4); }
+.speaker[data-slot="5"] { color: var(--speaker-5); }
+.speaker[data-slot="6"] { color: var(--speaker-6); }
+.text { transition: color 120ms linear; }
+.pending .text { color: var(--text-secondary); }
+</style>
+</head>
+<body>
+<main id="subtitles" aria-live="polite"></main>
+<script type="application/json" id="hermeneus-settings">{}/*HERMENEUS_SETTINGS*/</script>
+<script>
+(function (root) {
+  'use strict'
+
+  // Limits and defaults mirror hermeneus_engine/overlay_settings.py.
+  var LIMITS = { text_size: [14, 64], max_lines: [1, 3], opacity: [0, 100] }
+  var DEFAULTS = { text_size: 26, max_lines: 2, show_original: true, opacity: 80, show_speaker: true, theme: 'auto' }
+  var THEMES = ['auto', 'light', 'dark']
+  var LINE_STATES = ['partial', 'committed', 'translated', 'failed']
+  var RUNNING = ['starting', 'live', 'reconnecting']
+  var SPEAKER_SLOTS = 6
+  // Lines kept in memory; the page shows at most three.
+  var KEEP = 20
+
+  function has(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key)
+  }
+
+  function toBool(value, fallback) {
+    if (typeof value === 'boolean') return value
+    if (typeof value === 'number') return value !== 0
+    if (typeof value === 'string') {
+      var low = value.trim().toLowerCase()
+      if (['1', 'true', 'yes', 'on'].indexOf(low) !== -1) return true
+      if (['0', 'false', 'no', 'off'].indexOf(low) !== -1) return false
+    }
+    return fallback
+  }
+
+  function toInt(value, fallback, limits) {
+    if (typeof value === 'boolean' || value === null || value === undefined || value === '') return fallback
+    var n = Math.trunc(Number(value))
+    if (!Number.isFinite(n)) return fallback
+    return Math.max(limits[0], Math.min(limits[1], n))
+  }
+
+  /** Settings from the server (the plugin's shared overlay settings), then the URL query,
+   *  so each OBS source can be tuned on its own. */
+  function resolveSettings(base, query) {
+    base = base && typeof base === 'object' ? base : {}
+    var params = new URLSearchParams(query || '')
+    function pick(key) {
+      return params.has(key) ? params.get(key) : base[key]
+    }
+    var theme = String(pick('theme') || 'auto').toLowerCase()
+    return {
+      text_size: toInt(pick('text_size'), DEFAULTS.text_size, LIMITS.text_size),
+      max_lines: toInt(pick('max_lines'), DEFAULTS.max_lines, LIMITS.max_lines),
+      show_original: toBool(pick('show_original'), DEFAULTS.show_original),
+      opacity: toInt(pick('opacity'), DEFAULTS.opacity, LIMITS.opacity),
+      show_speaker: toBool(pick('show_speaker'), DEFAULTS.show_speaker),
+      theme: THEMES.indexOf(theme) === -1 ? 'auto' : theme
+    }
+  }
+
+  function createState() {
+    return { seq: null, lines: [], speakers: {}, speakerCount: 0, status: null }
+  }
+
+  function text(value) {
+    return typeof value === 'string' ? value : ''
+  }
+
+  // Speaker N by first appearance, as the pane numbers them (desktop/plugin.js withSpeaker,
+  // applyRelabel, speakerNumber).
+  function withSpeaker(state, id) {
+    if (id === null || has(state.speakers, id)) return state
+    var speakers = Object.assign({}, state.speakers)
+    speakers[id] = state.speakerCount + 1
+    return Object.assign({}, state, { speakers: speakers, speakerCount: state.speakerCount + 1 })
+  }
+
+  function applyLine(state, raw) {
+    if (!raw || typeof raw !== 'object' || typeof raw.line_id !== 'string' || LINE_STATES.indexOf(raw.state) === -1) {
+      return state
+    }
+    var line = {
+      line_id: raw.line_id,
+      state: raw.state,
+      original: text(raw.original),
+      translation: text(raw.translation),
+      speaker_id: typeof raw.speaker_id === 'string' && raw.speaker_id !== '' ? raw.speaker_id : null
+    }
+    var lines = state.lines.slice()
+    var index = -1
+    for (var i = 0; i < lines.length; i++) {
+      if (lines[i].line_id === line.line_id) { index = i; break }
+    }
+    if (index === -1) lines.push(line)
+    else lines[index] = line
+    if (lines.length > KEEP) lines = lines.slice(lines.length - KEEP)
+    return Object.assign({}, withSpeaker(state, line.speaker_id), { lines: lines })
+  }
+
+  function applyRelabel(state, from, to) {
+    if (typeof from !== 'string' || typeof to !== 'string' || !from || !to || from === to) return state
+    var lines = state.lines.map(function (line) {
+      return line.speaker_id === from ? Object.assign({}, line, { speaker_id: to }) : line
+    })
+    var speakers = state.speakers
+    if (!has(speakers, to) && has(speakers, from)) {
+      speakers = Object.assign({}, speakers)
+      speakers[to] = speakers[from]
+    }
+    return Object.assign({}, state, { lines: lines, speakers: speakers })
+  }
+
+  function clearLines(state) {
+    return Object.assign({}, state, { lines: [] })
+  }
+
+  /** One event from the stream (docs/events.md). An event whose seq is not above the
+   *  last applied one is a duplicate. hello sets the state only; reset drops the lines. */
+  function applyEvent(state, event) {
+    if (!event || typeof event !== 'object') return state
+    var seq = Number.isInteger(event.seq) ? event.seq : null
+    if (event.type === 'hello') {
+      var session = event.session
+      return session && typeof session.state === 'string' ? Object.assign({}, state, { status: session.state }) : state
+    }
+    if (event.type === 'reset') return Object.assign(clearLines(state), { seq: seq })
+    if (event.type === 'lost') return clearLines(state)
+    if (seq !== null && state.seq !== null && seq <= state.seq) return state
+    var next = state
+    if (event.type === 'line') next = applyLine(state, event.line)
+    else if (event.type === 'relabel') next = applyRelabel(state, event.from, event.to)
+    else if (event.type === 'status' && typeof event.state === 'string') {
+      // A new run has new line and speaker ids, so the list and the numbering start again.
+      if (event.state === 'starting' && RUNNING.indexOf(state.status) === -1) {
+        next = Object.assign(createState(), { status: event.state })
+      } else {
+        next = Object.assign({}, state, { status: event.state })
+      }
+    }
+    return seq === null ? next : Object.assign({}, next, { seq: seq })
+  }
+
+  /** What the page draws: the newest lines that have words, at most max_lines. */
+  function visibleLines(state, settings) {
+    if (state.status !== null && RUNNING.indexOf(state.status) === -1) return []
+    var shown = state.lines.filter(function (line) {
+      return line.state === 'translated' ? line.translation !== '' : line.original !== ''
+    })
+    return shown.slice(-settings.max_lines).map(function (line) {
+      var translated = line.state === 'translated'
+      var number = line.speaker_id !== null && has(state.speakers, line.speaker_id) ? state.speakers[line.speaker_id] : null
+      return {
+        id: line.line_id,
+        text: translated ? line.translation : line.original,
+        pending: line.state === 'partial' || line.state === 'committed',
+        original: settings.show_original && translated && line.original !== '' ? line.original : '',
+        speaker: settings.show_speaker && number !== null ? 'Speaker ' + number : '',
+        slot: number === null ? 0 : ((number - 1) % SPEAKER_SLOTS) + 1
+      }
+    })
+  }
+
+  root.HermeneusOverlay = {
+    DEFAULTS: DEFAULTS,
+    LIMITS: LIMITS,
+    resolveSettings: resolveSettings,
+    createState: createState,
+    applyEvent: applyEvent,
+    visibleLines: visibleLines
+  }
+
+  if (typeof document === 'undefined') return
+
+  // -- page --------------------------------------------------------------------
+
+  var LOST_AFTER_MS = 4000
+  var base = {}
+  try {
+    base = JSON.parse(document.getElementById('hermeneus-settings').textContent)
+  } catch (e) {
+    base = {}
+  }
+  var settings = resolveSettings(base, root.location.search)
+  var docStyle = document.documentElement.style
+  docStyle.setProperty('--text-size', settings.text_size + 'px')
+  docStyle.setProperty('--box-opacity', String(settings.opacity / 100))
+  if (settings.theme !== 'auto') document.documentElement.setAttribute('data-theme', settings.theme)
+
+  var container = document.getElementById('subtitles')
+  var nodes = {}
+  var state = createState()
+
+  function setText(el, value) {
+    if (el.textContent !== value) el.textContent = value
+  }
+
+  function makeNode() {
+    var rootEl = document.createElement('div')
+    rootEl.className = 'line'
+    var original = document.createElement('span')
+    original.className = 'original'
+    var main = document.createElement('span')
+    var speaker = document.createElement('span')
+    speaker.className = 'speaker'
+    var body = document.createElement('span')
+    body.className = 'text'
+    main.appendChild(speaker)
+    main.appendChild(body)
+    rootEl.appendChild(original)
+    rootEl.appendChild(main)
+    return { root: rootEl, original: original, speaker: speaker, text: body }
+  }
+
+  // Each line keeps its element while it changes, so a partial is replaced in place by its
+  // translation and nothing is torn down and rebuilt.
+  function render() {
+    var views = visibleLines(state, settings)
+    var keep = {}
+    for (var i = 0; i < views.length; i++) {
+      var view = views[i]
+      var node = nodes[view.id] || (nodes[view.id] = makeNode())
+      setText(node.original, view.original)
+      node.original.hidden = view.original === ''
+      setText(node.speaker, view.speaker)
+      node.speaker.hidden = view.speaker === ''
+      node.speaker.setAttribute('data-slot', String(view.slot))
+      setText(node.text, view.text)
+      node.root.classList.toggle('pending', view.pending)
+      if (container.children[i] !== node.root) container.insertBefore(node.root, container.children[i] || null)
+      keep[view.id] = true
+    }
+    Object.keys(nodes).forEach(function (id) {
+      if (!keep[id]) {
+        nodes[id].root.remove()
+        delete nodes[id]
+      }
+    })
+  }
+
+  function dispatch(event) {
+    var next = applyEvent(state, event)
+    if (next !== state) {
+      state = next
+      render()
+    }
+  }
+
+  var lostTimer = null
+  var source = new EventSource('events')
+  source.onmessage = function (message) {
+    try {
+      dispatch(JSON.parse(message.data))
+    } catch (e) {
+      // A malformed event is skipped; the next one still applies.
+    }
+  }
+  source.onopen = function () {
+    if (lostTimer !== null) {
+      clearTimeout(lostTimer)
+      lostTimer = null
+    }
+  }
+  // The server stops with the session. Lines from a stream that is gone do not stay on screen.
+  source.onerror = function () {
+    if (lostTimer === null) {
+      lostTimer = setTimeout(function () {
+        lostTimer = null
+        dispatch({ type: 'lost' })
+      }, LOST_AFTER_MS)
+    }
+  }
+})(globalThis)
+</script>
+</body>
+</html>
