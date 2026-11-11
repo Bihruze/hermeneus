@@ -66,6 +66,8 @@ Nothing is written to disk. The owner keeps the last 200 lines in memory.
 | `POST /start` | body `{"source": {"backend", "source_id"}, "target_language", "speak", "output_device": <device_id or null>, "voice_id"?}`. Answers the status event (it has a `state`). Errors: 400 missing or invalid choice, 409 a session already runs or the output device would be captured again, 422 the start failed (for example audio capture). Error bodies are `{"ok": false, "detail": "<message>", "error": "<message>"}`. |
 | `POST /stop` | the status event after the stop |
 | `GET /devices?backend=&source_id=` | `{"sources": [{backend, source_id, label, detail}], "outputs": [{device_id, label}], "unavailable": [...], "outputs_note": ""}`. `outputs` are the devices that are safe for spoken translation with the named source, or with every listed source when none is named. |
+| `GET /overlay` | `{"visible": bool, "pid": <int or null>}`: whether the native subtitle overlay is open. |
+| `POST /overlay` | body `{"visible": bool}`. Opens or closes the overlay and answers `GET /overlay` plus `message`. Errors: 400 the body is not that shape, 409 the overlay cannot open (no session running, not macOS, no desktop session, PyObjC missing, or the request is not from this machine). |
 | `GET /doctor` | `{"ok": bool, "checks": [{"id", "label", "state": "ok\|warn\|fail", "detail", "fix"?}]}` |
 | `WS /events?after=<seq>` | `hello`, then events as above. It does not end when a session ends; it falls back to idle heartbeats and attaches to the next session. |
 
